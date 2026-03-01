@@ -6,11 +6,46 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/Kocoro-lab/shan/internal/agent"
+	"github.com/Kocoro-lab/shan/internal/client"
 )
 
-type ComputerTool struct{}
+type ComputerTool struct {
+	screenW int
+	screenH int
+}
+
+func (t *ComputerTool) ensureScreenDims() {
+	if t.screenW > 0 {
+		return
+	}
+	w, h, err := GetScreenDimensions()
+	if err != nil {
+		t.screenW = DefaultAPIWidth
+		t.screenH = DefaultAPIHeight
+		return
+	}
+	t.screenW = w
+	t.screenH = h
+}
+
+func (t *ComputerTool) scaleXY(apiX, apiY int) (int, int) {
+	t.ensureScreenDims()
+	x, y := ScaleCoordinates(apiX, apiY, DefaultAPIWidth, DefaultAPIHeight, t.screenW, t.screenH)
+	return ClampCoordinates(x, y, t.screenW, t.screenH)
+}
+
+func (t *ComputerTool) captureAfterAction(result agent.ToolResult) agent.ToolResult {
+	time.Sleep(500 * time.Millisecond)
+	_, block, err := CaptureAndEncode(DefaultAPIWidth)
+	if err != nil {
+		return result // Non-fatal
+	}
+	result.Images = []agent.ImageBlock{block}
+	return result
+}
 
 type computerArgs struct {
 	Action string `json:"action"`
@@ -91,7 +126,8 @@ func (t *ComputerTool) click(ctx context.Context, args computerArgs) (agent.Tool
 			IsError: true,
 		}, nil
 	}
-	script := buildClickScript(args.X, args.Y, args.Button, args.Clicks)
+	x, y := t.scaleXY(args.X, args.Y)
+	script := buildClickScript(x, y, args.Button, args.Clicks)
 	out, err := exec.CommandContext(ctx, "python3", "-c", script).CombinedOutput()
 	if err != nil {
 		return agent.ToolResult{
@@ -107,7 +143,8 @@ func (t *ComputerTool) click(ctx context.Context, args computerArgs) (agent.Tool
 	if button == "" {
 		button = "left"
 	}
-	return agent.ToolResult{Content: fmt.Sprintf("Clicked %s button %d time(s) at (%d, %d)", button, clicks, args.X, args.Y)}, nil
+	result := agent.ToolResult{Content: fmt.Sprintf("Clicked %s button %d time(s) at (%d, %d)", button, clicks, x, y)}
+	return t.captureAfterAction(result), nil
 }
 
 func (t *ComputerTool) typeText(ctx context.Context, args computerArgs) (agent.ToolResult, error) {
@@ -123,7 +160,8 @@ func (t *ComputerTool) typeText(ctx context.Context, args computerArgs) (agent.T
 			IsError: true,
 		}, nil
 	}
-	return agent.ToolResult{Content: fmt.Sprintf("Typed: %s", args.Text)}, nil
+	result := agent.ToolResult{Content: fmt.Sprintf("Typed: %s", args.Text)}
+	return t.captureAfterAction(result), nil
 }
 
 func (t *ComputerTool) hotkey(ctx context.Context, args computerArgs) (agent.ToolResult, error) {
@@ -141,7 +179,8 @@ func (t *ComputerTool) hotkey(ctx context.Context, args computerArgs) (agent.Too
 			IsError: true,
 		}, nil
 	}
-	return agent.ToolResult{Content: fmt.Sprintf("Pressed: %s", args.Keys)}, nil
+	result := agent.ToolResult{Content: fmt.Sprintf("Pressed: %s", args.Keys)}
+	return t.captureAfterAction(result), nil
 }
 
 func (t *ComputerTool) move(ctx context.Context, args computerArgs) (agent.ToolResult, error) {
@@ -151,7 +190,8 @@ func (t *ComputerTool) move(ctx context.Context, args computerArgs) (agent.ToolR
 			IsError: true,
 		}, nil
 	}
-	script := buildMoveScript(args.X, args.Y)
+	x, y := t.scaleXY(args.X, args.Y)
+	script := buildMoveScript(x, y)
 	out, err := exec.CommandContext(ctx, "python3", "-c", script).CombinedOutput()
 	if err != nil {
 		return agent.ToolResult{
@@ -159,7 +199,8 @@ func (t *ComputerTool) move(ctx context.Context, args computerArgs) (agent.ToolR
 			IsError: true,
 		}, nil
 	}
-	return agent.ToolResult{Content: fmt.Sprintf("Moved cursor to (%d, %d)", args.X, args.Y)}, nil
+	result := agent.ToolResult{Content: fmt.Sprintf("Moved cursor to (%d, %d)", x, y)}
+	return t.captureAfterAction(result), nil
 }
 
 func buildClickScript(x, y int, button string, clicks int) string {

@@ -214,3 +214,20 @@ func TestComputer_BuildHotkeyScript_UnknownModifier(t *testing.T) {
 		t.Errorf("expected 'unknown modifier' in error, got: %s", err.Error())
 	}
 }
+
+func TestComputer_ScaleXY(t *testing.T) {
+	tool := &ComputerTool{screenW: 1440, screenH: 900}
+	x, y := tool.scaleXY(640, 400)
+	if x != 720 || y != 450 {
+		t.Errorf("expected (720, 450), got (%d, %d)", x, y)
+	}
+}
+
+func TestComputer_ScaleXY_DefaultFallback(t *testing.T) {
+	// When screen dims match API dims, no scaling
+	tool := &ComputerTool{screenW: 1280, screenH: 800}
+	x, y := tool.scaleXY(100, 200)
+	if x != 100 || y != 200 {
+		t.Errorf("expected (100, 200), got (%d, %d)", x, y)
+	}
+}

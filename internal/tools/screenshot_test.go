@@ -1,7 +1,13 @@
 package tools
 
 import (
+	"bytes"
 	"context"
+	"image"
+	"image/color"
+	"image/png"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -113,5 +119,27 @@ func TestScreenshot_BuildArgs_WindowWithDelay(t *testing.T) {
 		if args[i] != v {
 			t.Errorf("args[%d] = %q, want %q", i, args[i], v)
 		}
+	}
+}
+
+func TestScreenshot_ReturnsImageBlock(t *testing.T) {
+	// Create a minimal valid PNG file to simulate screencapture output
+	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	img.Set(0, 0, color.RGBA{255, 0, 0, 255})
+	var buf bytes.Buffer
+	png.Encode(&buf, img)
+
+	path := filepath.Join(t.TempDir(), "test-screenshot.png")
+	os.WriteFile(path, buf.Bytes(), 0644)
+
+	block, err := EncodeImage(path)
+	if err != nil {
+		t.Fatalf("EncodeImage error: %v", err)
+	}
+	if block.MediaType != "image/png" {
+		t.Errorf("expected image/png, got %s", block.MediaType)
+	}
+	if block.Data == "" {
+		t.Error("expected non-empty base64 data")
 	}
 }

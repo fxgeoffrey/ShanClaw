@@ -76,7 +76,21 @@ func (t *ScreenshotTool) Run(ctx context.Context, argsJSON string) (agent.ToolRe
 		}, nil
 	}
 
-	return agent.ToolResult{Content: fmt.Sprintf("Screenshot saved to: %s", path)}, nil
+	// Resize and encode for LLM vision
+	if err := ResizeImage(path, MaxScreenshotDim); err != nil {
+		// Non-fatal: screenshot saved but resize failed
+		return agent.ToolResult{Content: fmt.Sprintf("Screenshot saved to: %s (resize failed: %v)", path, err)}, nil
+	}
+
+	block, encErr := EncodeImage(path)
+	if encErr != nil {
+		return agent.ToolResult{Content: fmt.Sprintf("Screenshot saved to: %s (encode failed: %v)", path, encErr)}, nil
+	}
+
+	return agent.ToolResult{
+		Content: fmt.Sprintf("Screenshot saved to: %s", path),
+		Images:  []agent.ImageBlock{block},
+	}, nil
 }
 
 func buildScreencaptureArgs(target string, path string, delay int) []string {

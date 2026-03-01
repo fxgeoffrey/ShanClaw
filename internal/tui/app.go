@@ -111,7 +111,8 @@ type Model struct {
 	// Tool result display
 	pendingToolName   string
 	pendingToolArgs   string
-	lastToolResults   []toolResultEntry
+	lastToolResults    []toolResultEntry
+	toolResultExpanded bool
 	// Slash command completion menu
 	menuVisible   bool
 	menuIndex     int
@@ -349,11 +350,12 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// Ctrl+O: expand last tool result
-		if m.state == stateInput && msg.String() == "ctrl+o" && len(m.lastToolResults) > 0 {
+		// Ctrl+O: toggle expand last tool result (only expands once per result set)
+		if m.state == stateInput && msg.String() == "ctrl+o" && len(m.lastToolResults) > 0 && !m.toolResultExpanded {
 			last := m.lastToolResults[len(m.lastToolResults)-1]
 			expanded := formatExpandedToolResult(last.name, last.args, last.isError, last.content, last.elapsed)
 			m.appendOutput(expanded)
+			m.toolResultExpanded = true
 			return m, m.flushPrints()
 		}
 
@@ -1056,6 +1058,7 @@ func (h *tuiEventHandler) OnToolResult(name string, args string, result agent.To
 
 	h.model.pendingToolName = ""
 	h.model.pendingToolArgs = ""
+	h.model.toolResultExpanded = false
 }
 
 func (h *tuiEventHandler) OnText(text string) {

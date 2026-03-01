@@ -437,14 +437,18 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendOutput("Error: " + msg.err.Error())
 		}
 		if msg.usage != nil {
-			m.appendOutput(fmt.Sprintf("  [tokens: %d | cost: $%.4f]", msg.usage.TotalTokens, msg.usage.CostUSD))
+			usageDim := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+			m.appendOutput(usageDim.Render(fmt.Sprintf("  tokens: %d | cost: $%.4f", msg.usage.TotalTokens, msg.usage.CostUSD)))
 		}
 		m.sessions.Save()
 		return m, nil
 
 	case approvalRequestMsg:
 		m.state = stateApproval
-		m.appendOutput(fmt.Sprintf("\n  Tool: %s\n  Args: %s\n  Allow? [y/n]", msg.tool, msg.args))
+		dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+		warnIcon := lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("?")
+		keyArg := toolKeyArg(msg.tool, msg.args)
+		m.appendOutput(dimStyle.Render(fmt.Sprintf("⏵ %s(%s)  %s  Allow?", msg.tool, keyArg, warnIcon)))
 		return m, nil
 
 	case serverToolsLoadedMsg:
@@ -516,18 +520,33 @@ func (m *Model) View() string {
 		sb.WriteString("\n")
 		sb.WriteString(m.textarea.View())
 		sb.WriteString("\n")
-		sb.WriteString(bar)
+		// Bottom bar with right-aligned model tier
+		tierDim := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+		rightInfo := tierDim.Render(m.cfg.ModelTier)
+		barWidth := m.width - lipgloss.Width(rightInfo)
+		if barWidth < 0 {
+			barWidth = 0
+		}
+		sb.WriteString(barStyle.Render(strings.Repeat("─", barWidth)) + rightInfo)
 	case stateProcessing:
 		if m.streamingText != "" {
 			lines := strings.Split(m.streamingText, "\n")
 			sb.WriteString(lines[len(lines)-1])
+		} else if m.pendingToolName != "" {
+			dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+			keyArg := toolKeyArg(m.pendingToolName, m.pendingToolArgs)
+			sb.WriteString(dimStyle.Render(fmt.Sprintf("⏵ %s(%s)...", m.pendingToolName, keyArg)))
 		} else {
 			spinnerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 			spinnerText := m.spinnerTexts[m.spinnerIdx%len(m.spinnerTexts)]
 			sb.WriteString(spinnerStyle.Render("* " + spinnerText))
 		}
 	case stateApproval:
+		sb.WriteString(bar)
+		sb.WriteString("\n")
 		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("  [y/n] "))
+		sb.WriteString("\n")
+		sb.WriteString(bar)
 	case stateSessionPicker:
 		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Render("  Sessions (Up/Down, Enter, Esc)"))
 	}
@@ -561,7 +580,8 @@ func (m *Model) handleSubmit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	m.appendOutput(fmt.Sprintf("> %s", input))
+	promptMark := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("252")).Render(">")
+	m.appendOutput(fmt.Sprintf("%s %s", promptMark, input))
 
 	// Check slash commands
 	if strings.HasPrefix(input, "/") {
@@ -602,7 +622,8 @@ func (m *Model) loadSessionHistory(sess *session.Session) {
 	for _, msg := range sess.Messages {
 		switch msg.Role {
 		case "user":
-			m.appendOutput(fmt.Sprintf("> %s", msg.Content))
+			pm := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("252")).Render(">")
+			m.appendOutput(fmt.Sprintf("%s %s", pm, msg.Content))
 		case "assistant":
 			m.appendOutput(msg.Content)
 			m.appendOutput("")

@@ -79,6 +79,15 @@ func (t *ComputerTool) Info() agent.ToolInfo {
 
 func (t *ComputerTool) RequiresApproval() bool { return true }
 
+func (t *ComputerTool) NativeToolDef() *client.NativeToolDef {
+	return &client.NativeToolDef{
+		Type:            "computer_20251124",
+		Name:            "computer",
+		DisplayWidthPx:  DefaultAPIWidth,
+		DisplayHeightPx: DefaultAPIHeight,
+	}
+}
+
 var quartzChecked bool
 var quartzAvailable bool
 

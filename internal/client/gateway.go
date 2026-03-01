@@ -105,9 +105,20 @@ type FunctionDef struct {
 	Parameters  map[string]any `json:"parameters,omitempty"`
 }
 
+// NativeToolDef represents a provider-native tool definition (e.g., Anthropic computer use).
+type NativeToolDef struct {
+	Type            string `json:"type"`
+	Name            string `json:"name"`
+	DisplayWidthPx  int    `json:"display_width_px,omitempty"`
+	DisplayHeightPx int    `json:"display_height_px,omitempty"`
+}
+
 type Tool struct {
-	Type     string      `json:"type"`
-	Function FunctionDef `json:"function"`
+	Type            string      `json:"type"`
+	Function        FunctionDef `json:"function,omitempty"`
+	Name            string      `json:"name,omitempty"`
+	DisplayWidthPx  int         `json:"display_width_px,omitempty"`
+	DisplayHeightPx int         `json:"display_height_px,omitempty"`
 }
 
 type CompletionRequest struct {

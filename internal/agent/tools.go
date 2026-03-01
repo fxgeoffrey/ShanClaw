@@ -30,6 +30,13 @@ type Tool interface {
 	RequiresApproval() bool
 }
 
+// NativeToolProvider is an optional interface for tools that use a provider's
+// native tool schema (e.g., Anthropic's computer_20251124) instead of the
+// standard function-calling format.
+type NativeToolProvider interface {
+	NativeToolDef() *client.NativeToolDef
+}
+
 // SafeChecker is an optional interface tools can implement to indicate
 // certain invocations are safe and don't need approval.
 type SafeChecker interface {
@@ -80,6 +87,22 @@ func (r *ToolRegistry) Schemas() []client.Tool {
 	schemas := make([]client.Tool, 0, len(r.order))
 	for _, name := range r.order {
 		t := r.tools[name]
+
+		// Check for native tool definition
+		if native, ok := t.(NativeToolProvider); ok {
+			def := native.NativeToolDef()
+			if def != nil {
+				schemas = append(schemas, client.Tool{
+					Type:            def.Type,
+					Name:            def.Name,
+					DisplayWidthPx:  def.DisplayWidthPx,
+					DisplayHeightPx: def.DisplayHeightPx,
+				})
+				continue
+			}
+		}
+
+		// Standard function tool
 		info := t.Info()
 		params := info.Parameters
 		if params == nil {

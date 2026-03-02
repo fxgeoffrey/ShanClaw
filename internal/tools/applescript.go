@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/Kocoro-lab/shan/internal/agent"
 )
@@ -56,11 +57,22 @@ func (t *AppleScriptTool) Run(ctx context.Context, argsJSON string) (agent.ToolR
 		}, nil
 	}
 
+	var toolResult agent.ToolResult
 	if result == "" {
-		return agent.ToolResult{Content: "script executed successfully (no output)"}, nil
+		toolResult = agent.ToolResult{Content: "script executed successfully (no output)"}
+	} else {
+		toolResult = agent.ToolResult{Content: result}
 	}
 
-	return agent.ToolResult{Content: result}, nil
+	// Auto-screenshot after GUI actions so the LLM can verify the outcome.
+	// Brief delay to let the UI settle.
+	time.Sleep(500 * time.Millisecond)
+	_, block, captureErr := CaptureAndEncode(MaxScreenshotDim)
+	if captureErr == nil {
+		toolResult.Images = []agent.ImageBlock{block}
+	}
+
+	return toolResult, nil
 }
 
 func (t *AppleScriptTool) RequiresApproval() bool { return true }

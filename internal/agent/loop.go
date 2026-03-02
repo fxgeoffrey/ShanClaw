@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -15,6 +16,11 @@ import (
 	"github.com/Kocoro-lab/shan/internal/permissions"
 	"github.com/Kocoro-lab/shan/internal/prompt"
 )
+
+// ErrMaxIterReached is returned when the agent loop hits the iteration limit
+// but has partial work to return. Callers can check errors.Is(err, ErrMaxIterReached)
+// to distinguish truncated results from hard failures.
+var ErrMaxIterReached = errors.New("agent loop reached iteration limit")
 
 const baseSystemPrompt = `You are Shannon, an AI assistant running in a CLI terminal on the user's macOS computer. You have both local tools (file ops, shell, GUI control) and remote server tools (web search, research, analytics, multi-agent workflows).
 
@@ -31,9 +37,15 @@ const baseSystemPrompt = `You are Shannon, an AI assistant running in a CLI term
 - If a tool call is denied, do not re-attempt the same call.
 
 ## Multi-Step Tasks
-- For complex tasks, briefly state your plan before starting.
+- For complex tasks, state your plan AND include tool calls in the same response. Do not output a plan without acting on it.
 - After each step, verify the outcome before proceeding to the next.
 - When multiple tool calls are independent, make them in parallel.
+
+## Task Routing
+When a task would benefit from specialized processing beyond your local tools, suggest the appropriate command:
+- /research [quick|standard] <query> — deep research, multi-source analysis, fact-checking. Use when the user needs thorough investigation across many sources.
+- /swarm <query> — multi-agent collaboration for complex workflows requiring coordination, decomposition, or multiple perspectives.
+- Keep direct actions (file ops, shell, GUI) for yourself. Only suggest routing for tasks that genuinely need it.
 
 ## Tool Selection
 
@@ -79,20 +91,20 @@ type EventHandler interface {
 }
 
 type AgentLoop struct {
-	client             *client.GatewayClient
-	tools              *ToolRegistry
-	modelTier          string
-	handler            EventHandler
-	shannonDir         string
-	maxIter            int
-	resultTrunc        int
-	argsTrunc          int
-	permissions        *permissions.PermissionsConfig
-	auditor            *audit.AuditLogger
-	hookRunner         *hooks.HookRunner
-	mcpContext         string
-	bypassPermissions  bool
-	enableStreaming     bool
+	client            *client.GatewayClient
+	tools             *ToolRegistry
+	modelTier         string
+	handler           EventHandler
+	shannonDir        string
+	maxIter           int
+	resultTrunc       int
+	argsTrunc         int
+	permissions       *permissions.PermissionsConfig
+	auditor           *audit.AuditLogger
+	hookRunner        *hooks.HookRunner
+	mcpContext        string
+	bypassPermissions bool
+	enableStreaming    bool
 }
 
 func NewAgentLoop(gw *client.GatewayClient, tools *ToolRegistry, modelTier string, shannonDir string, maxIter int, resultTrunc int, argsTrunc int, perms *permissions.PermissionsConfig, auditor *audit.AuditLogger, hookRunner *hooks.HookRunner) *AgentLoop {
@@ -169,13 +181,31 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 	toolSchemas := a.tools.Schemas()
 	usage := &TurnUsage{}
 
-	// Track consecutive tool calls for loop detection
-	var lastToolCall string // exact signature (name+args)
-	var lastToolName string // just the tool name
-	dupCount := 0          // exact duplicate count
-	sameToolCount := 0     // consecutive same-tool count (any args)
+	// Loop behavior constants
+	const (
+		maxExactDuplicates     = 3 // stop after N identical consecutive tool calls (same name + args)
+		maxSameToolCalls       = 8 // stop after N consecutive calls to same tool (different args)
+		maxConsecutiveTextOnly = 2 // allows N-1 plan continuations before stopping
+	)
 
-	const maxSameToolCalls = 3 // max consecutive calls to same tool with varying args
+	// GUI/automation tools that naturally require many repeated calls —
+	// exempt from the same-tool counter (sameToolCount) since screenshot→action
+	// loops are normal. Note: exact-duplicate detection (dupCount) still applies
+	// to repeatable tools — identical calls even for GUI tools are suspicious.
+	repeatableTools := map[string]bool{
+		"screenshot": true, "computer": true, "applescript": true, "browser": true,
+	}
+
+	// Loop detection state
+	var (
+		lastToolCall        string // exact signature (name+args)
+		lastToolName        string // just the tool name
+		dupCount            int    // consecutive exact-duplicate count
+		sameToolCount       int    // consecutive same-tool count (any args)
+		totalToolCalls      int    // total tool calls executed this turn
+		consecutiveTextOnly int    // consecutive planning responses (before tool use)
+		lastText            string // last text output for graceful degradation
+	)
 
 	for i := 0; i < a.maxIter; i++ {
 		// Call LLM — streaming or blocking
@@ -207,13 +237,46 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		usage.CostUSD += resp.Usage.CostUSD
 		usage.LLMCalls++
 
-		// If no tool calls, return text response
+		// Handle text-only responses (no tool calls in this LLM response).
+		//
+		// Three stop/continue rules:
+		// 1. After tool use (totalToolCalls > 0): text = final summary. Stop.
+		// 2. Text looks like a plan (numbered steps, tool mentions): continue
+		//    up to maxConsecutiveTextOnly times so the model can act on its plan.
+		// 3. Otherwise: direct answer. Stop immediately.
+		//
+		// Plan detection is language-agnostic — uses numbered steps (1. / 1、/ 1))
+		// and tool name references (always English) rather than keywords.
 		if !resp.HasToolCalls() {
+			if resp.OutputText != "" {
+				lastText = resp.OutputText
+			}
 			if a.handler != nil {
 				a.handler.OnText(resp.OutputText)
 			}
+
+			// After tool use, text-only = final answer.
+			if totalToolCalls > 0 {
+				return resp.OutputText, usage, nil
+			}
+
+			// Before tool use: continue if this looks like a plan.
+			if isPlanningResponse(resp.OutputText, toolNames) {
+				consecutiveTextOnly++
+				if consecutiveTextOnly < maxConsecutiveTextOnly {
+					messages = append(messages, client.Message{
+						Role:    "assistant",
+						Content: client.NewTextContent(resp.OutputText),
+					})
+					continue
+				}
+			}
+
 			return resp.OutputText, usage, nil
 		}
+
+		// Model made tool calls — reset planning counter
+		consecutiveTextOnly = 0
 
 		// Execute all tool calls
 		toolCalls := resp.AllToolCalls()
@@ -221,9 +284,11 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		if resp.OutputText != "" {
 			allResults.WriteString(resp.OutputText)
 			allResults.WriteString("\n\n")
+			lastText = resp.OutputText
 		}
 
 		for _, fc := range toolCalls {
+			totalToolCalls++
 			argsStr := fc.ArgumentsString()
 
 			// Loop detection
@@ -235,12 +300,15 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				dupCount = 1
 			}
 			if fc.Name == lastToolName {
-				sameToolCount++
+				// GUI/automation tools naturally repeat — don't penalize them.
+				if !repeatableTools[fc.Name] {
+					sameToolCount++
+				}
 			} else {
 				lastToolName = fc.Name
 				sameToolCount = 1
 			}
-			if dupCount >= 3 || sameToolCount >= maxSameToolCalls {
+			if dupCount >= maxExactDuplicates || sameToolCount >= maxSameToolCalls {
 				messages = append(messages, client.Message{
 					Role:    "user",
 					Content: client.NewTextContent("You've called the same tool repeatedly. Please use the results already available and provide your answer now."),
@@ -269,7 +337,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 
 			tool, ok := a.tools.Get(fc.Name)
 			if !ok {
-				allResults.WriteString(fmt.Sprintf("I called %s(%s).\n\nError: unknown tool: %s\n\n", fc.Name, truncateStr(argsStr, a.argsTrunc), fc.Name))
+				fmt.Fprintf(&allResults, "I called %s(%s).\n\nError: unknown tool: %s\n\n", fc.Name, truncateStr(argsStr, a.argsTrunc), fc.Name)
 				continue
 			}
 
@@ -277,7 +345,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			decision, wasApproved := a.checkPermissionAndApproval(fc.Name, argsStr, tool, resp.OutputText)
 			if decision == "deny" {
 				a.logAudit(fc.Name, argsStr, "tool call denied by permission policy", decision, false, 0)
-				allResults.WriteString(fmt.Sprintf("I called %s(%s).\n\nError: tool call denied by permission policy\n\n", fc.Name, truncateStr(argsStr, a.argsTrunc)))
+				fmt.Fprintf(&allResults, "I called %s(%s).\n\nError: tool call denied by permission policy\n\n", fc.Name, truncateStr(argsStr, a.argsTrunc))
 				if a.handler != nil {
 					a.handler.OnToolResult(fc.Name, argsStr, ToolResult{Content: "denied by policy", IsError: true}, 0)
 				}
@@ -285,7 +353,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			}
 			if decision == "ask" && !wasApproved {
 				a.logAudit(fc.Name, argsStr, "tool call denied by user", decision, false, 0)
-				allResults.WriteString(fmt.Sprintf("I called %s(%s).\n\nError: tool call denied by user\n\n", fc.Name, truncateStr(argsStr, a.argsTrunc)))
+				fmt.Fprintf(&allResults, "I called %s(%s).\n\nError: tool call denied by user\n\n", fc.Name, truncateStr(argsStr, a.argsTrunc))
 				if a.handler != nil {
 					a.handler.OnToolResult(fc.Name, argsStr, ToolResult{Content: "denied by user", IsError: true}, 0)
 				}
@@ -300,7 +368,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				}
 				if hookDecision == "deny" {
 					a.logAudit(fc.Name, argsStr, "tool call denied by hook: "+hookReason, "deny", false, 0)
-					allResults.WriteString(fmt.Sprintf("I called %s(%s).\n\nError: tool call denied by hook: %s\n\n", fc.Name, truncateStr(argsStr, a.argsTrunc), hookReason))
+					fmt.Fprintf(&allResults, "I called %s(%s).\n\nError: tool call denied by hook: %s\n\n", fc.Name, truncateStr(argsStr, a.argsTrunc), hookReason)
 					continue
 				}
 			}
@@ -352,9 +420,9 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			} else {
 				cleanResult := stripLineNumbers(result.Content)
 				if result.IsError {
-					allResults.WriteString(fmt.Sprintf("I called %s(%s).\n\nError: %s\n\n", fc.Name, truncateStr(argsStr, a.argsTrunc), truncateStr(cleanResult, a.resultTrunc)))
+					fmt.Fprintf(&allResults, "I called %s(%s).\n\nError: %s\n\n", fc.Name, truncateStr(argsStr, a.argsTrunc), truncateStr(cleanResult, a.resultTrunc))
 				} else {
-					allResults.WriteString(fmt.Sprintf("I called %s(%s).\n\nResult:\n%s\n\n", fc.Name, truncateStr(argsStr, a.argsTrunc), truncateStr(cleanResult, a.resultTrunc)))
+					fmt.Fprintf(&allResults, "I called %s(%s).\n\nResult:\n%s\n\n", fc.Name, truncateStr(argsStr, a.argsTrunc), truncateStr(cleanResult, a.resultTrunc))
 				}
 			}
 		}
@@ -368,6 +436,11 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		}
 	}
 
+	// Graceful degradation: return last text with a sentinel error so the
+	// caller knows the loop was truncated (not a clean completion).
+	if lastText != "" {
+		return lastText, usage, ErrMaxIterReached
+	}
 	return "", usage, fmt.Errorf("agent loop exceeded %d iterations", a.maxIter)
 }
 
@@ -467,30 +540,58 @@ func stripLineNumbers(s string) string {
 	return lineNumPrefix.ReplaceAllString(s, "")
 }
 
-// formatToolResult builds a single assistant message containing the tool call
-// and its result, so the LLM sees both in one turn and doesn't re-call.
-func formatToolResult(name, args, outputText, result string, isError bool, argsTrunc, resultTrunc int) string {
-	var sb strings.Builder
-	if outputText != "" {
-		sb.WriteString(outputText)
-		sb.WriteString("\n\n")
-	}
-	sb.WriteString(fmt.Sprintf("I called %s(%s).\n\n", name, truncateStr(args, argsTrunc)))
-
-	// Strip line numbers from file content — saves tokens, prevents verbatim echo
-	cleanResult := stripLineNumbers(result)
-
-	if isError {
-		sb.WriteString(fmt.Sprintf("Error: %s", truncateStr(cleanResult, resultTrunc)))
-	} else {
-		sb.WriteString(fmt.Sprintf("Result:\n%s", truncateStr(cleanResult, resultTrunc)))
-	}
-	return sb.String()
-}
-
 func truncateStr(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
 	return s[:max] + "..."
+}
+
+// planStepPattern matches numbered/bulleted list items in any language.
+// Covers: "1. " "1、" "1) " "1：" "- " "* " "• " "· "
+// CJK punctuation (、：) doesn't require trailing whitespace since CJK text has no word spaces.
+var planStepPattern = regexp.MustCompile(`(?m)^\s*(?:\d+[.)]\s|\d+[、：]|[-*•·]\s)`)
+
+// isPlanningResponse detects text-only responses that indicate the model is
+// planning to use tools next. This is language-agnostic — it checks for
+// structural patterns (numbered/bulleted lists) and tool name references
+// (tool names are always English regardless of user language).
+//
+// Returns true for:
+//
+//	"Plan:\n1. Build the project\n2. Run tests" (English, numbered)
+//	"计划：\n1. 构建项目\n2. 运行 bash 测试"      (Chinese, numbered + tool name)
+//
+// Returns false for:
+//
+//	"The answer is 42."                        (short direct answer)
+//	"Done. File updated."                      (summary after tool use)
+func isPlanningResponse(text string, toolNames []string) bool {
+	if len(text) < 50 {
+		return false
+	}
+
+	// Structural: numbered or bulleted list items
+	if planStepPattern.MatchString(text) {
+		return true
+	}
+
+	// Semantic: mentions 2+ available tool names → planning tool usage.
+	// Only check names ≥ 5 chars to avoid false positives on short common
+	// words like "http", "grep", "bash", "glob", "process".
+	lower := strings.ToLower(text)
+	toolMentions := 0
+	for _, name := range toolNames {
+		if len(name) < 5 {
+			continue
+		}
+		if strings.Contains(lower, strings.ToLower(name)) {
+			toolMentions++
+			if toolMentions >= 2 {
+				return true
+			}
+		}
+	}
+
+	return false
 }

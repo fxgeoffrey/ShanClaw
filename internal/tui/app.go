@@ -33,7 +33,8 @@ import (
 type state int
 
 const (
-	stateInput state = iota
+	stateStartup state = iota
+	stateInput
 	stateProcessing
 	stateApproval
 	stateSessionPicker
@@ -70,6 +71,9 @@ type spinnerTickMsg struct{}
 
 // spinnerFrameMsg drives fast glyph + color animation (~100ms)
 type spinnerFrameMsg struct{}
+
+// headerTickMsg advances the startup header animation by one frame.
+type headerTickMsg struct{}
 
 // streamDeltaMsg carries an incremental text chunk from SSE streaming.
 type streamDeltaMsg struct {
@@ -129,6 +133,13 @@ type Model struct {
 	menuVisible   bool
 	menuIndex     int
 	menuItems     []slashCmd
+	// Startup header animation
+	headerFrame    int
+	headerDone     bool
+	headerHealth   *healthCheckMsg      // buffered until animation ends
+	headerSessions []session.SessionSummary // cached at startup for View()
+	headerTipIdx   int                      // stable random tip index
+	headerCWD      string                   // cached working directory
 }
 
 type slashCmd struct {
@@ -147,6 +158,38 @@ func (m *Model) SetBypassPermissions(bypass bool) {
 	if m.agentLoop != nil {
 		m.agentLoop.SetBypassPermissions(bypass)
 	}
+}
+
+func (m *Model) cwd() string {
+	dir, _ := os.Getwd()
+	return dir
+}
+
+// finishHeaderAnimation completes the startup animation, flushes the final
+// header to scrollback, and transitions to stateInput.
+func (m *Model) finishHeaderAnimation() tea.Cmd {
+	finalHeader := renderStartupHeader(headerTotalFrames-1, m.width, m.version, m.cfg.ModelTier, m.cfg.Endpoint, m.headerCWD, m.headerSessions, m.headerTipIdx)
+	m.appendOutput(finalHeader)
+	m.appendOutput("")
+	m.headerDone = true
+	m.state = stateInput
+
+	if m.headerHealth != nil {
+		if m.headerHealth.gatewayOK {
+			m.appendOutput(fmt.Sprintf("  Connected to %s", m.cfg.Endpoint))
+		} else {
+			m.appendOutput(fmt.Sprintf("  Warning: API unreachable at %s", m.cfg.Endpoint))
+		}
+		if m.serverToolErr != nil {
+			m.appendOutput(fmt.Sprintf("  %v", m.serverToolErr))
+		}
+		if m.headerHealth.newVersion != "" {
+			m.appendOutput(fmt.Sprintf("  Update available: v%s — run /update", m.headerHealth.newVersion))
+		}
+		m.appendOutput("")
+		m.headerHealth = nil
+	}
+	return nil // let the Update wrapper's flushPrints handle draining
 }
 
 func New(cfg *config.Config, version string) *Model {
@@ -260,13 +303,17 @@ func New(cfg *config.Config, version string) *Model {
 }
 
 func (m *Model) Init() tea.Cmd {
-	m.appendOutput(fmt.Sprintf("  Shannon CLI %s", m.version))
+	m.state = stateStartup
+	m.headerFrame = 0
+	m.headerSessions, _ = m.sessions.List()
+	m.headerTipIdx = pickTipIdx()
+	m.headerCWD = m.cwd()
 	m.hookRunner.RunSessionStart(context.Background(), "")
 	return tea.Batch(
 		textarea.Blink,
+		headerFrameTick(),
 		m.checkHealth(),
 		m.loadServerTools(),
-		m.flushPrints(),
 	)
 }
 
@@ -316,6 +363,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// During startup animation: Ctrl+C quits, any other key skips animation
+		if m.state == stateStartup && !m.headerDone && msg.Type != tea.KeyCtrlC {
+			m.headerFrame = headerTotalFrames - 1
+			return m, m.finishHeaderAnimation()
+		}
+
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			m.hookRunner.RunStop(context.Background(), "")
@@ -475,7 +528,9 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case serverToolsLoadedMsg:
 		if msg.err != nil {
 			m.serverToolErr = msg.err
-			m.appendOutput(fmt.Sprintf("  %v", msg.err))
+			if m.headerDone {
+				m.appendOutput(fmt.Sprintf("  %v", msg.err))
+			}
 			return m, nil
 		}
 		if msg.registry != nil {
@@ -487,7 +542,21 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case headerTickMsg:
+		if m.headerDone {
+			return m, nil
+		}
+		m.headerFrame++
+		if m.headerFrame >= headerTotalFrames {
+			return m, m.finishHeaderAnimation()
+		}
+		return m, headerFrameTick()
+
 	case healthCheckMsg:
+		if !m.headerDone {
+			m.headerHealth = &msg
+			return m, nil
+		}
 		if msg.gatewayOK {
 			m.appendOutput(fmt.Sprintf("  Connected to %s", m.cfg.Endpoint))
 		} else {
@@ -557,6 +626,8 @@ func (m *Model) View() string {
 
 	// --- Input / status line ---
 	switch m.state {
+	case stateStartup:
+		sb.WriteString(renderStartupHeader(m.headerFrame, m.width, m.version, m.cfg.ModelTier, m.cfg.Endpoint, m.headerCWD, m.headerSessions, m.headerTipIdx))
 	case stateInput:
 		sb.WriteString(bar)
 		sb.WriteString("\n")

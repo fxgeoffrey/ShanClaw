@@ -32,6 +32,7 @@ func RegisterLocalTools(cfg *config.Config) (*agent.ToolRegistry, func()) {
 	}
 	reg.Register(bashTool)
 
+	reg.Register(&ThinkTool{})
 	reg.Register(&DirectoryListTool{})
 	reg.Register(&HTTPTool{})
 	reg.Register(&SystemInfoTool{})

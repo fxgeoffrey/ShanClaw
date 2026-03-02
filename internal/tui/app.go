@@ -1255,6 +1255,10 @@ func (h *tuiEventHandler) OnToolCall(name string, args string) {
 	// Reset streaming flag — after tool execution, the next LLM call is a fresh iteration.
 	// This prevents streamingDone from carrying over and suppressing the final response.
 	h.model.streamingDone = false
+	// Skip spinner/indicator for think tool — its content is shown dimmed on result.
+	if name == "think" {
+		return
+	}
 	if h.model.program != nil {
 		h.model.program.Send(toolCallMsg{name: name, args: truncate(args, 200)})
 	}
@@ -1268,6 +1272,15 @@ func (h *tuiEventHandler) OnToolResult(name string, args string, result agent.To
 	}
 	if toolArgs == "" {
 		toolArgs = args
+	}
+
+	// Think tool: show thought content dimmed, no compact tool indicator.
+	if toolName == "think" {
+		dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+		h.model.sendOutput(dimStyle.Render(result.Content))
+		h.model.pendingToolName = ""
+		h.model.pendingToolArgs = ""
+		return
 	}
 
 	line := formatCompactToolResult(toolName, toolArgs, result.IsError, result.Content, elapsed)

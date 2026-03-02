@@ -304,23 +304,23 @@ func TestAgentLoop_ToolCallThenResponse(t *testing.T) {
 	}
 }
 
-// TestAgentLoop_PlanThenExecute verifies continuation when model plans without
-// tool calls first (numbered steps with tool names detected), then executes on next iteration.
-func TestAgentLoop_PlanThenExecute(t *testing.T) {
+// TestAgentLoop_ThinkThenExecute verifies the think tool provides an explicit
+// continuation signal — the model calls think to plan, then executes with tools.
+func TestAgentLoop_ThinkThenExecute(t *testing.T) {
 	callCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
 		switch callCount {
 		case 1:
-			// Model outputs a plan with numbered steps + tool name — triggers continuation
-			json.NewEncoder(w).Encode(nativeResponse(
-				"Plan:\n1. Use mock_tool to read the file\n2. Edit the config\n3. Verify changes", "end_turn", nil, 10, 5))
+			// Model uses think tool to plan — triggers continuation via tool_use
+			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
+				toolCall("think", `{"thought":"Plan:\n1. Read the file\n2. Edit config\n3. Verify"}`), 10, 5))
 		case 2:
-			// After continuation, model executes the plan with tool calls
+			// After think, model executes the plan with actual tools
 			json.NewEncoder(w).Encode(nativeResponse("Reading...", "tool_use",
 				toolCall("mock_tool", `{"action":"read"}`), 10, 5))
 		case 3:
-			// Final summary after tool use — stops immediately (totalToolCalls > 0)
+			// Final summary after tool use
 			json.NewEncoder(w).Encode(nativeResponse("Done. File updated.", "end_turn", nil, 10, 5))
 		default:
 			json.NewEncoder(w).Encode(nativeResponse("unexpected", "end_turn", nil, 10, 5))
@@ -330,6 +330,7 @@ func TestAgentLoop_PlanThenExecute(t *testing.T) {
 
 	gw := client.NewGatewayClient(server.URL, "")
 	reg := NewToolRegistry()
+	reg.Register(&mockTool{name: "think"}) // mock think tool
 	reg.Register(&mockTool{name: "mock_tool"})
 	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
 
@@ -340,46 +341,39 @@ func TestAgentLoop_PlanThenExecute(t *testing.T) {
 	if result != "Done. File updated." {
 		t.Errorf("unexpected result: %q", result)
 	}
-	// Plan (1, continue) → tool call (2) → text summary (3, stop) = 3 calls
+	// think (1) → tool call (2) → text summary (3) = 3 LLM calls
 	if callCount != 3 {
-		t.Errorf("expected 3 LLM calls (plan + tool + summary), got %d", callCount)
+		t.Errorf("expected 3 LLM calls (think + tool + summary), got %d", callCount)
 	}
 }
 
-// TestAgentLoop_PlanChinese verifies plan detection works with Chinese text + tool name.
-func TestAgentLoop_PlanChinese(t *testing.T) {
+// TestAgentLoop_TextOnlyAlwaysStops verifies that text-only responses always
+// terminate the loop now that isPlanningResponse is removed.
+func TestAgentLoop_TextOnlyAlwaysStops(t *testing.T) {
 	callCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
-		switch callCount {
-		case 1:
-			json.NewEncoder(w).Encode(nativeResponse(
-				"我的计划：\n1. 用 mock_tool 读取配置文件\n2. 修改设置\n3. 验证结果", "end_turn", nil, 10, 5))
-		case 2:
-			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
-				toolCall("mock_tool", `{}`), 10, 5))
-		case 3:
-			json.NewEncoder(w).Encode(nativeResponse("完成。", "end_turn", nil, 10, 5))
-		default:
-			json.NewEncoder(w).Encode(nativeResponse("unexpected", "end_turn", nil, 10, 5))
-		}
+		// Even bulleted text should stop immediately — no plan heuristic.
+		json.NewEncoder(w).Encode(nativeResponse(
+			"React vs Vue:\n• React has larger ecosystem\n• Vue is easier to learn\n• Both are great choices",
+			"end_turn", nil, 10, 5))
 	}))
 	defer server.Close()
 
 	gw := client.NewGatewayClient(server.URL, "")
 	reg := NewToolRegistry()
-	reg.Register(&mockTool{name: "mock_tool"})
 	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
 
-	result, _, err := loop.Run(context.Background(), "更新配置", nil)
+	result, _, err := loop.Run(context.Background(), "compare React vs Vue", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result != "完成。" {
+	if !strings.Contains(result, "React vs Vue") {
 		t.Errorf("unexpected result: %q", result)
 	}
-	if callCount != 3 {
-		t.Errorf("expected 3 LLM calls (Chinese plan + tool + summary), got %d", callCount)
+	// Text-only = done immediately, 1 LLM call
+	if callCount != 1 {
+		t.Errorf("expected 1 LLM call (text-only stops immediately), got %d", callCount)
 	}
 }
 
@@ -434,68 +428,6 @@ func TestAgentLoop_GracefulMaxIterExit(t *testing.T) {
 	}
 	if result != "Step 3 done." {
 		t.Errorf("expected last text from graceful exit, got %q", result)
-	}
-}
-
-// TestIsPlanningResponse verifies language-agnostic plan detection.
-func TestIsPlanningResponse(t *testing.T) {
-	tools := []string{"bash", "file_read", "file_edit", "screenshot"}
-
-	tests := []struct {
-		name   string
-		text   string
-		expect bool
-	}{
-		{"short direct answer", "The answer is 42.", false},
-		{"empty", "", false},
-		{"short summary", "Done. File updated.", false},
-		// Plans WITH tool references → true
-		{"numbered plan with tool", "Here's my plan:\n1. Use file_read to check the config\n2. Run tests\n3. Fix errors", true},
-		{"chinese plan with tool", "我的计划：\n1. 用 file_read 读取配置文件\n2. 修改设置\n3. 验证结果", true},
-		{"bullet plan with tool", "Steps to take:\n- Use bash to read the config\n- Update the value\n- Verify", true},
-		{"mentions 2 long tools", "I will use file_read to check and file_edit to update the output for the task.", true},
-		{"japanese plan with tool", "手順：\n1、file_read で設定ファイルを読む\n2、値を更新する\n3、確認する", true},
-		{"short plan text with tool", "1. file_read", true},
-		// Bulleted/numbered content WITHOUT tool references → false (the key fix)
-		{"bulleted answer no tools", "React vs Vue Comparison:\n• Larger ecosystem and community\n• More job opportunities\n• Better TypeScript support", false},
-		{"numbered answer no tools", "Top 3 features:\n1. Fast rendering\n2. Component model\n3. Rich ecosystem with great documentation", false},
-		{"description with bullets", "The page shows a website with:\n• Navigation menu: About, Work, Blog\n• Hero section with title\n• Social links", false},
-		// Other cases
-		{"mentions short tools only", "I checked with bash and grep and here is the result of the analysis.", false},
-		{"long but no structure", strings.Repeat("This is a detailed explanation. ", 10), false},
-		// Structure + short tool name → true (bash in a numbered plan is still a plan)
-		{"numbered plan with bash", "Plan:\n1. Run bash to compile\n2. Check output\n3. Fix if needed for deployment", true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := isPlanningResponse(tt.text, tools)
-			if got != tt.expect {
-				t.Errorf("isPlanningResponse(%q) = %v, want %v", tt.text[:min(len(tt.text), 60)], got, tt.expect)
-			}
-		})
-	}
-}
-
-func TestIsPlanningResponseTokenizedToolMatching(t *testing.T) {
-	tools := []string{"app", "bash", "file_read"}
-
-	tests := []struct {
-		name   string
-		text   string
-		expect bool
-	}{
-		{"substring-only tool token should not match", "Application maintenance checklist:\n1. Review requirements and implementation details.\n2. Confirm edge cases and acceptance tests for this task.", false},
-		{"exact short tool token with structure", "Plan:\n1. Use app to gather the baseline checks before edits.", true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := isPlanningResponse(tt.text, tools)
-			if got != tt.expect {
-				t.Errorf("isPlanningResponse(%q) = %v, want %v", tt.text[:min(len(tt.text), 60)], got, tt.expect)
-			}
-		})
 	}
 }
 

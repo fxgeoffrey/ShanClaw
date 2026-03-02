@@ -66,6 +66,9 @@ const baseSystemPrompt = `You are Shannon, an AI assistant running in a CLI term
 - browser: isolated headless Chrome, no cookies/sessions. Only for own sites or simple fetches — public sites block with CAPTCHA.
 - http: direct HTTP requests.
 
+### Planning
+- think: Use this to plan or reason through complex multi-step tasks before acting. Always use this instead of outputting plans as plain text.
+
 ### System
 - system_info: OS/hardware information.
 - process: list/manage running processes.`
@@ -180,23 +183,19 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 	usage := &TurnUsage{}
 
 	// Loop behavior constants
-	const (
-		maxConsecutiveTextOnly = 2 // allows N-1 plan continuations before stopping
-		maxRecentImages        = 5 // keep only last N screenshot messages in context
-	)
+	const maxRecentImages = 5 // keep only last N screenshot messages in context
 
 	// Loop detection + task-aware state
 	const maxNudges = 3 // force-stop after this many nudge injections
 
 	var (
-		detector            = NewLoopDetector()
-		toolsUsed           = make(map[string]int)
-		totalToolCalls      int
-		consecutiveTextOnly int
-		lastText            string
-		afterCheckpoint     bool
-		checkpointDone      bool
-		nudgeCount          int
+		detector       = NewLoopDetector()
+		toolsUsed      = make(map[string]int)
+		totalToolCalls int
+		lastText       string
+		afterCheckpoint bool
+		checkpointDone  bool
+		nudgeCount      int
 	)
 
 	for i := 0; ; i++ {
@@ -252,16 +251,10 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			usage.Model = resp.Model
 		}
 
-		// Handle text-only responses (no tool calls in this LLM response).
-		//
-		// Three stop/continue rules:
-		// 1. After tool use (totalToolCalls > 0): text = final summary. Stop.
-		// 2. Text looks like a plan (numbered steps, tool mentions): continue
-		//    up to maxConsecutiveTextOnly times so the model can act on its plan.
-		// 3. Otherwise: direct answer. Stop immediately.
-		//
-		// Plan detection is language-agnostic — uses numbered steps (1. / 1、/ 1))
-		// and tool name references (always English) rather than keywords.
+		// Handle text-only responses (no tool calls).
+		// Text-only always means "done" — the model uses the think tool
+		// to signal planning/continuation, so we never need to guess.
+		// Exception: after a checkpoint injection, allow one continuation.
 		if !resp.HasToolCalls() {
 			if resp.OutputText != "" {
 				lastText = resp.OutputText
@@ -270,36 +263,19 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				a.handler.OnText(resp.OutputText)
 			}
 
-			// After tool use, text-only = final answer (unless after a checkpoint).
-			if totalToolCalls > 0 {
-				if afterCheckpoint {
-					afterCheckpoint = false
-					messages = append(messages, client.Message{
-						Role:    "assistant",
-						Content: client.NewTextContent(resp.OutputText),
-					})
-					continue
-				}
-				return resp.OutputText, usage, nil
-			}
-
-			// Before tool use: continue if this looks like a plan.
-			if isPlanningResponse(resp.OutputText, toolNames) {
-				consecutiveTextOnly++
-				if consecutiveTextOnly < maxConsecutiveTextOnly {
-					messages = append(messages, client.Message{
-						Role:    "assistant",
-						Content: client.NewTextContent(resp.OutputText),
-					})
-					continue
-				}
+			if afterCheckpoint {
+				afterCheckpoint = false
+				messages = append(messages, client.Message{
+					Role:    "assistant",
+					Content: client.NewTextContent(resp.OutputText),
+				})
+				continue
 			}
 
 			return resp.OutputText, usage, nil
 		}
 
-		// Model made tool calls — reset planning counter
-		consecutiveTextOnly = 0
+		// Model made tool calls
 		afterCheckpoint = false
 
 		// Execute all tool calls
@@ -610,80 +586,6 @@ func truncateStr(s string, max int) string {
 		return s
 	}
 	return s[:max] + "..."
-}
-
-// planStepPattern matches numbered/bulleted list items in any language.
-// Covers: "1. " "1、" "1) " "1：" "- " "* " "• " "· "
-// CJK punctuation (、：) doesn't require trailing whitespace since CJK text has no word spaces.
-var planStepPattern = regexp.MustCompile(`(?m)^\s*(?:\d+[.)]\s|\d+[、：]|[-*•·]\s)`)
-var toolTokenPattern = regexp.MustCompile(`[A-Za-z0-9_]+`)
-
-// isPlanningResponse detects text-only responses that indicate the model is
-// planning to use tools next. This is language-agnostic — it checks for
-// structural patterns (numbered/bulleted lists) combined with tool name
-// references (tool names are always English regardless of user language).
-//
-// IMPORTANT: Structural patterns alone (bullets, numbered lists) are NOT
-// sufficient — regular answers often contain these (comparisons, summaries,
-// descriptions). We require at least one tool name reference to distinguish
-// a genuine plan from a bulleted answer.
-//
-// Returns true for:
-//
-//	"Plan:\n1. Use file_read to check\n2. Run tests" (structure + tool)
-//	"计划：\n1. 构建项目\n2. 运行 bash 测试"            (structure + tool)
-//	"I will use file_read to check and file_edit to update." (2+ tools, no structure needed)
-//
-// Returns false for:
-//
-//	"The answer is 42."                              (short direct answer)
-//	"Done. File updated."                            (summary after tool use)
-//	"React:\n• Large ecosystem\n• More jobs"         (bulleted answer, no tool names)
-func isPlanningResponse(text string, toolNames []string) bool {
-	toolMentions, longToolMentions := countToolMentions(text, toolNames)
-
-	// Strong signal: 2+ tool names mentioned → planning tool usage,
-	// regardless of structure. Only count long names (≥5 chars) to avoid
-	// false positives on common words like "bash", "grep", "http".
-	if longToolMentions >= 2 {
-		return true
-	}
-
-	// Structure + at least one tool name → plan (even short names count
-	// when combined with numbered/bulleted steps).
-	if toolMentions >= 1 && planStepPattern.MatchString(text) {
-		return true
-	}
-
-	return false
-}
-
-func countToolMentions(text string, toolNames []string) (int, int) {
-	if text == "" || len(toolNames) == 0 {
-		return 0, 0
-	}
-
-	tokenSet := make(map[string]struct{}, 64)
-	for _, tok := range toolTokenPattern.FindAllString(strings.ToLower(text), -1) {
-		tokenSet[tok] = struct{}{}
-	}
-
-	toolMentions := 0
-	longToolMentions := 0
-	for _, name := range toolNames {
-		if name == "" {
-			continue
-		}
-		lower := strings.ToLower(name)
-		if _, ok := tokenSet[lower]; ok {
-			toolMentions++
-			if len(lower) >= 5 {
-				longToolMentions++
-			}
-		}
-	}
-
-	return toolMentions, longToolMentions
 }
 
 // effectiveMaxIter returns a dynamic iteration limit based on tools used so far.

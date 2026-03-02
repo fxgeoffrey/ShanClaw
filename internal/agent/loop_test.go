@@ -305,16 +305,16 @@ func TestAgentLoop_ToolCallThenResponse(t *testing.T) {
 }
 
 // TestAgentLoop_PlanThenExecute verifies continuation when model plans without
-// tool calls first (numbered steps detected), then executes on next iteration.
+// tool calls first (numbered steps with tool names detected), then executes on next iteration.
 func TestAgentLoop_PlanThenExecute(t *testing.T) {
 	callCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
 		switch callCount {
 		case 1:
-			// Model outputs a plan with numbered steps — triggers continuation
+			// Model outputs a plan with numbered steps + tool name — triggers continuation
 			json.NewEncoder(w).Encode(nativeResponse(
-				"Plan:\n1. Read the file\n2. Edit the config\n3. Verify changes", "end_turn", nil, 10, 5))
+				"Plan:\n1. Use mock_tool to read the file\n2. Edit the config\n3. Verify changes", "end_turn", nil, 10, 5))
 		case 2:
 			// After continuation, model executes the plan with tool calls
 			json.NewEncoder(w).Encode(nativeResponse("Reading...", "tool_use",
@@ -346,7 +346,7 @@ func TestAgentLoop_PlanThenExecute(t *testing.T) {
 	}
 }
 
-// TestAgentLoop_PlanChinese verifies plan detection works with Chinese text.
+// TestAgentLoop_PlanChinese verifies plan detection works with Chinese text + tool name.
 func TestAgentLoop_PlanChinese(t *testing.T) {
 	callCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -354,7 +354,7 @@ func TestAgentLoop_PlanChinese(t *testing.T) {
 		switch callCount {
 		case 1:
 			json.NewEncoder(w).Encode(nativeResponse(
-				"我的计划：\n1. 读取配置文件\n2. 修改设置\n3. 验证结果", "end_turn", nil, 10, 5))
+				"我的计划：\n1. 用 mock_tool 读取配置文件\n2. 修改设置\n3. 验证结果", "end_turn", nil, 10, 5))
 		case 2:
 			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
 				toolCall("mock_tool", `{}`), 10, 5))
@@ -449,13 +449,44 @@ func TestIsPlanningResponse(t *testing.T) {
 		{"short direct answer", "The answer is 42.", false},
 		{"empty", "", false},
 		{"short summary", "Done. File updated.", false},
-		{"english numbered plan", "Here's my plan:\n1. Build the project\n2. Run tests\n3. Fix errors", true},
-		{"chinese numbered plan", "我的计划：\n1. 读取配置文件\n2. 修改设置\n3. 验证结果", true},
-		{"bullet points", "Steps to take:\n- Read the config\n- Update the value\n- Verify", true},
+		// Plans WITH tool references → true
+		{"numbered plan with tool", "Here's my plan:\n1. Use file_read to check the config\n2. Run tests\n3. Fix errors", true},
+		{"chinese plan with tool", "我的计划：\n1. 用 file_read 读取配置文件\n2. 修改设置\n3. 验证结果", true},
+		{"bullet plan with tool", "Steps to take:\n- Use bash to read the config\n- Update the value\n- Verify", true},
 		{"mentions 2 long tools", "I will use file_read to check and file_edit to update the output for the task.", true},
+		{"japanese plan with tool", "手順：\n1、file_read で設定ファイルを読む\n2、値を更新する\n3、確認する", true},
+		{"short plan text with tool", "1. file_read", true},
+		// Bulleted/numbered content WITHOUT tool references → false (the key fix)
+		{"bulleted answer no tools", "React vs Vue Comparison:\n• Larger ecosystem and community\n• More job opportunities\n• Better TypeScript support", false},
+		{"numbered answer no tools", "Top 3 features:\n1. Fast rendering\n2. Component model\n3. Rich ecosystem with great documentation", false},
+		{"description with bullets", "The page shows a website with:\n• Navigation menu: About, Work, Blog\n• Hero section with title\n• Social links", false},
+		// Other cases
 		{"mentions short tools only", "I checked with bash and grep and here is the result of the analysis.", false},
-		{"japanese numbered", "手順：\n1、設定ファイルを読む\n2、値を更新する\n3、確認する", true},
 		{"long but no structure", strings.Repeat("This is a detailed explanation. ", 10), false},
+		// Structure + short tool name → true (bash in a numbered plan is still a plan)
+		{"numbered plan with bash", "Plan:\n1. Run bash to compile\n2. Check output\n3. Fix if needed for deployment", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isPlanningResponse(tt.text, tools)
+			if got != tt.expect {
+				t.Errorf("isPlanningResponse(%q) = %v, want %v", tt.text[:min(len(tt.text), 60)], got, tt.expect)
+			}
+		})
+	}
+}
+
+func TestIsPlanningResponseTokenizedToolMatching(t *testing.T) {
+	tools := []string{"app", "bash", "file_read"}
+
+	tests := []struct {
+		name   string
+		text   string
+		expect bool
+	}{
+		{"substring-only tool token should not match", "Application maintenance checklist:\n1. Review requirements and implementation details.\n2. Confirm edge cases and acceptance tests for this task.", false},
+		{"exact short tool token with structure", "Plan:\n1. Use app to gather the baseline checks before edits.", true},
 	}
 
 	for _, tt := range tests {

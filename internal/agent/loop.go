@@ -616,49 +616,74 @@ func truncateStr(s string, max int) string {
 // Covers: "1. " "1、" "1) " "1：" "- " "* " "• " "· "
 // CJK punctuation (、：) doesn't require trailing whitespace since CJK text has no word spaces.
 var planStepPattern = regexp.MustCompile(`(?m)^\s*(?:\d+[.)]\s|\d+[、：]|[-*•·]\s)`)
+var toolTokenPattern = regexp.MustCompile(`[A-Za-z0-9_]+`)
 
 // isPlanningResponse detects text-only responses that indicate the model is
 // planning to use tools next. This is language-agnostic — it checks for
-// structural patterns (numbered/bulleted lists) and tool name references
-// (tool names are always English regardless of user language).
+// structural patterns (numbered/bulleted lists) combined with tool name
+// references (tool names are always English regardless of user language).
+//
+// IMPORTANT: Structural patterns alone (bullets, numbered lists) are NOT
+// sufficient — regular answers often contain these (comparisons, summaries,
+// descriptions). We require at least one tool name reference to distinguish
+// a genuine plan from a bulleted answer.
 //
 // Returns true for:
 //
-//	"Plan:\n1. Build the project\n2. Run tests" (English, numbered)
-//	"计划：\n1. 构建项目\n2. 运行 bash 测试"      (Chinese, numbered + tool name)
+//	"Plan:\n1. Use file_read to check\n2. Run tests" (structure + tool)
+//	"计划：\n1. 构建项目\n2. 运行 bash 测试"            (structure + tool)
+//	"I will use file_read to check and file_edit to update." (2+ tools, no structure needed)
 //
 // Returns false for:
 //
-//	"The answer is 42."                        (short direct answer)
-//	"Done. File updated."                      (summary after tool use)
+//	"The answer is 42."                              (short direct answer)
+//	"Done. File updated."                            (summary after tool use)
+//	"React:\n• Large ecosystem\n• More jobs"         (bulleted answer, no tool names)
 func isPlanningResponse(text string, toolNames []string) bool {
-	if len(text) < 50 {
-		return false
-	}
+	toolMentions, longToolMentions := countToolMentions(text, toolNames)
 
-	// Structural: numbered or bulleted list items
-	if planStepPattern.MatchString(text) {
+	// Strong signal: 2+ tool names mentioned → planning tool usage,
+	// regardless of structure. Only count long names (≥5 chars) to avoid
+	// false positives on common words like "bash", "grep", "http".
+	if longToolMentions >= 2 {
 		return true
 	}
 
-	// Semantic: mentions 2+ available tool names → planning tool usage.
-	// Only check names ≥ 5 chars to avoid false positives on short common
-	// words like "http", "grep", "bash", "glob", "process".
-	lower := strings.ToLower(text)
+	// Structure + at least one tool name → plan (even short names count
+	// when combined with numbered/bulleted steps).
+	if toolMentions >= 1 && planStepPattern.MatchString(text) {
+		return true
+	}
+
+	return false
+}
+
+func countToolMentions(text string, toolNames []string) (int, int) {
+	if text == "" || len(toolNames) == 0 {
+		return 0, 0
+	}
+
+	tokenSet := make(map[string]struct{}, 64)
+	for _, tok := range toolTokenPattern.FindAllString(strings.ToLower(text), -1) {
+		tokenSet[tok] = struct{}{}
+	}
+
 	toolMentions := 0
+	longToolMentions := 0
 	for _, name := range toolNames {
-		if len(name) < 5 {
+		if name == "" {
 			continue
 		}
-		if strings.Contains(lower, strings.ToLower(name)) {
+		lower := strings.ToLower(name)
+		if _, ok := tokenSet[lower]; ok {
 			toolMentions++
-			if toolMentions >= 2 {
-				return true
+			if len(lower) >= 5 {
+				longToolMentions++
 			}
 		}
 	}
 
-	return false
+	return toolMentions, longToolMentions
 }
 
 // effectiveMaxIter returns a dynamic iteration limit based on tools used so far.

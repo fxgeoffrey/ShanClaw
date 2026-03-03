@@ -34,10 +34,12 @@ const baseSystemPrompt = `You are Shannon, an AI assistant running in a CLI term
 - When a tool call succeeds and the user's request is fulfilled, summarize the result and STOP. Never repeat a successful action.
 
 ## Verification & Stopping
+- NEVER claim you see, read, or completed something without a tool call in the SAME response proving it. If you describe screen content, you must have called screenshot or accessibility read_tree in this turn. If you claim a file was edited, file_read must confirm it. Unverified claims are hallucinations.
 - After GUI actions (applescript, computer), only take a screenshot if the result is ambiguous or the action may have failed. If the tool returned a clear success message, trust it and move on.
-- If an action fails or produces no visible change after 2 attempts, STOP. Try a fundamentally different method, or ask the user.
+- If an action fails or produces no visible change after 2 attempts, STOP. Try a fundamentally different method, or ask the user. Do not keep trying variations of the same broken approach.
 - Do not brute-force a blocked approach. Consider alternatives or ask the user.
 - If a tool call is denied, do not re-attempt the same call.
+- If you have attempted 3+ different approaches and none worked, STOP and tell the user what you tried and what failed. Ask for guidance.
 
 ## Multi-Step Tasks
 - Only plan for genuinely complex multi-step tasks. Single-action requests (open a file, run a command, search) should be executed immediately.
@@ -54,9 +56,9 @@ const baseSystemPrompt = `You are Shannon, an AI assistant running in a CLI term
 - bash: shell commands, tests, builds. Only when no dedicated tool exists.
 
 ### GUI & Desktop (macOS)
-- accessibility: PRIMARY tool for GUI interaction. Use read_tree to see UI elements, then click/press/set_value by ref. More reliable than coordinate-based clicking. Always try this first for standard macOS apps (Finder, Safari, TextEdit, System Settings, etc.).
-- applescript: open/control apps, window management. Use for operations with no AX equivalent (e.g., "tell Finder to empty trash").
-- screenshot: visual fallback when accessibility tree is insufficient (custom-drawn UIs, games, apps with poor AX support).
+- accessibility: PRIMARY tool for GUI interaction. Use read_tree to see UI elements, then click/press/set_value by ref. More reliable than coordinate-based clicking. Always try this first for standard macOS apps (Finder, Safari, TextEdit, Calendar, Reminders, System Settings, etc.). Pattern: applescript to activate the app first → accessibility read_tree → interact by ref. If read_tree returns "not found", the app isn't running — activate it with applescript first.
+- applescript: open/activate apps, window management, and operations with no AX equivalent (create calendar events, empty trash, get app-specific data). Always use applescript to activate/launch an app before using accessibility on it.
+- screenshot: visual fallback when accessibility tree is insufficient (custom-drawn UIs, games, canvas-rendered content, apps with poor AX support).
 - computer: coordinate-based mouse/keyboard (click, type, hotkey, move). Use only when accessibility refs don't work or for drag operations.
 - notify: macOS notifications.
 - clipboard: system clipboard read/write.
@@ -184,19 +186,22 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 	usage := &TurnUsage{}
 
 	// Loop behavior constants
-	const maxRecentImages = 5 // keep only last N screenshot messages in context
+	const maxRecentImages = 5  // keep only last N screenshot messages in context
+	const compressAfter = 3    // compress tool results older than N turns from the end
+	const maxResultChars = 300 // compressed tool result max chars
 
 	// Loop detection + task-aware state
 	const maxNudges = 3 // force-stop after this many nudge injections
 
 	var (
-		detector       = NewLoopDetector()
-		toolsUsed      = make(map[string]int)
-		totalToolCalls int
-		lastText       string
-		afterCheckpoint bool
-		checkpointDone  bool
-		nudgeCount      int
+		detector             = NewLoopDetector()
+		toolsUsed            = make(map[string]int)
+		totalToolCalls       int
+		lastText             string
+		afterCheckpoint      bool
+		checkpointDone       bool
+		nudgeCount           int
+		hallucinationNudges  int
 	)
 
 	for i := 0; ; i++ {
@@ -212,6 +217,9 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 
 		// Filter old screenshots to stay within context budget
 		filterOldImages(messages, maxRecentImages)
+
+		// Compress old tool results to save context (keep recent turns verbose)
+		compressOldToolResults(messages, compressAfter, maxResultChars)
 
 		// Progress checkpoint at ~60% of effective limit
 		if !checkpointDone && totalToolCalls > 0 {
@@ -260,7 +268,9 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		// Handle text-only responses (no tool calls).
 		// Text-only always means "done" — the model uses the think tool
 		// to signal planning/continuation, so we never need to guess.
-		// Exception: after a checkpoint injection, allow one continuation.
+		// Exception 1: after a checkpoint injection, allow one continuation.
+		// Exception 2: hallucination detection — if the model claims results without
+		// tool calls and we've had tool calls before, nudge it to verify.
 		if !resp.HasToolCalls() {
 			if resp.OutputText != "" {
 				lastText = resp.OutputText
@@ -278,8 +288,43 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				continue
 			}
 
+			// Hallucination detection — two checks, max 2 nudges total:
+			//
+			// Check 1 (strongest): model outputs text that looks like fabricated tool calls
+			// e.g., "I called computer({...}).\n\nResult: Typed successfully"
+			// Real tool calls go through the tool_calls array, never as text output.
+			//
+			// Check 2 (softer): model claims to see/complete something without any tool call.
+			if hallucinationNudges < 2 && looksLikeFabricatedToolCalls(resp.OutputText) {
+				hallucinationNudges++
+				messages = append(messages, client.Message{
+					Role:    "assistant",
+					Content: client.NewTextContent(resp.OutputText),
+				})
+				messages = append(messages, client.Message{
+					Role:    "user",
+					Content: client.NewTextContent("STOP. You wrote out tool calls as text instead of actually calling them. Those are fabricated results — none of those actions happened. Use real tool calls to perform the actions."),
+				})
+				continue
+			}
+			if totalToolCalls > 0 && hallucinationNudges < 2 && looksLikeUnverifiedClaim(resp.OutputText) {
+				hallucinationNudges++
+				messages = append(messages, client.Message{
+					Role:    "assistant",
+					Content: client.NewTextContent(resp.OutputText),
+				})
+				messages = append(messages, client.Message{
+					Role:    "user",
+					Content: client.NewTextContent("You described a result without calling a tool to verify it in this response. Use the appropriate tool (screenshot, accessibility read_tree, file_read, bash, etc.) to confirm before proceeding."),
+				})
+				continue
+			}
+
 			return resp.OutputText, usage, nil
 		}
+
+		// Reset hallucination counter when the model does use tools
+		hallucinationNudges = 0
 
 		// Model made tool calls
 		afterCheckpoint = false
@@ -422,7 +467,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		if allResults.Len() > 0 {
 			messages = append(messages, client.Message{
 				Role:    "assistant",
-				Content: client.NewTextContent(allResults.String()),
+				Content: client.NewTextContent(strings.TrimRight(allResults.String(), " \t\n\r")),
 			})
 		}
 
@@ -642,4 +687,111 @@ func filterOldImages(messages []client.Message, keep int) {
 		}
 		messages[idx].Content = client.NewBlockContent(newBlocks)
 	}
+}
+
+// toolResultPattern matches "I called tool_name(args).\n\nResult:\n..." or "Error: ..." lines
+// in assistant messages that contain tool execution results.
+var toolResultPattern = regexp.MustCompile(`(?s)I called (\w+)\(([^)]*)\)\.\s*\n\n(?:Result|Error):\s*\n(.+?)(?:\n\nI called |\z)`)
+
+// compressOldToolResults replaces verbose tool results in old assistant messages
+// with short summaries. Keeps the most recent N assistant messages with tool results
+// uncompressed. Never touches LLM text responses (messages without tool result patterns).
+func compressOldToolResults(messages []client.Message, keepRecent int, maxChars int) {
+	// Find assistant messages that contain tool results (not pure text responses)
+	var toolResultIndices []int
+	for i, m := range messages {
+		if m.Role != "assistant" {
+			continue
+		}
+		text := m.Content.Text()
+		if strings.Contains(text, "I called ") && (strings.Contains(text, "\n\nResult:\n") || strings.Contains(text, "\n\nError: ")) {
+			toolResultIndices = append(toolResultIndices, i)
+		}
+	}
+
+	if len(toolResultIndices) <= keepRecent {
+		return
+	}
+
+	// Compress old ones (everything except the most recent keepRecent)
+	for _, idx := range toolResultIndices[:len(toolResultIndices)-keepRecent] {
+		text := messages[idx].Content.Text()
+		compressed := compressToolResultText(text, maxChars)
+		if compressed != text {
+			messages[idx].Content = client.NewTextContent(compressed)
+		}
+	}
+}
+
+// compressToolResultText compresses individual tool call results within an assistant message.
+// Keeps tool name + args + first maxChars of result. Preserves LLM preamble text.
+func compressToolResultText(text string, maxChars int) string {
+	matches := toolResultPattern.FindAllStringSubmatchIndex(text, -1)
+	if len(matches) == 0 {
+		return text
+	}
+
+	var result strings.Builder
+	lastEnd := 0
+
+	for _, loc := range matches {
+		// Copy text before this match
+		result.WriteString(text[lastEnd:loc[0]])
+
+		toolName := text[loc[2]:loc[3]]
+		args := text[loc[4]:loc[5]]
+		body := text[loc[6]:loc[7]]
+
+		// Truncate args
+		if len(args) > 80 {
+			args = args[:80] + "..."
+		}
+
+		// Determine if error or result
+		fullMatch := text[loc[0]:loc[1]]
+		isError := strings.Contains(fullMatch, "\n\nError:")
+
+		// Compress the body
+		body = strings.TrimSpace(body)
+		if len(body) > maxChars {
+			body = body[:maxChars] + "... [compressed]"
+		}
+
+		if isError {
+			fmt.Fprintf(&result, "I called %s(%s).\n\nError: %s", toolName, args, body)
+		} else {
+			fmt.Fprintf(&result, "I called %s(%s).\n\nResult:\n%s", toolName, args, body)
+		}
+
+		lastEnd = loc[1]
+	}
+
+	// Copy remaining text after last match
+	result.WriteString(text[lastEnd:])
+	return result.String()
+}
+
+// unverifiedClaimPatterns matches text that claims to see, read, or complete something.
+var unverifiedClaimPatterns = regexp.MustCompile(`(?i)(?:I (?:can see|see that|notice|observe|found that)|I(?:'ve| have) (?:successfully|completed|finished|done|created|updated|deleted|modified|set|changed)|(?:the (?:screen|window|page|app|file|output|result) (?:shows|displays|contains|has|reads)))`)
+
+// looksLikeUnverifiedClaim returns true if the text contains phrases that claim
+// observation or completion — the kind of claims that should be backed by a tool call.
+// Short responses (<100 chars) are exempt (likely simple answers).
+func looksLikeUnverifiedClaim(text string) bool {
+	if len(text) < 100 {
+		return false
+	}
+	return unverifiedClaimPatterns.MatchString(text)
+}
+
+// fabricatedToolCallPattern matches text that mimics tool call output format.
+// Real tool calls go through the tool_calls API array — they never appear as text.
+// Pattern: "I called tool_name(" followed later by "Result:" or "Typed successfully" etc.
+var fabricatedToolCallPattern = regexp.MustCompile(`(?s)I called \w+\(.*?\)\.\s*\n\n(?:Result|Error):\s`)
+
+// looksLikeFabricatedToolCalls returns true if the model's text output contains
+// what looks like fabricated tool call results. This is always a hallucination —
+// real tool execution produces results through the tool framework, not as text.
+func looksLikeFabricatedToolCalls(text string) bool {
+	return fabricatedToolCallPattern.MatchString(text)
 }

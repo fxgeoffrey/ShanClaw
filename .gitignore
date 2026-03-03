@@ -3,6 +3,7 @@ shannon
 *.exe
 .DS_Store
 .shannon/
+.claude/
 *.env
 .env*
 *.pem

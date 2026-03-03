@@ -15,11 +15,108 @@ import (
 
 // --- Public types (used by agent loop) ---
 
-// ContentBlock represents a polymorphic content block (text or image).
+// ContentBlock represents a polymorphic content block.
+// Supported types: "text", "image", "tool_use", "tool_result".
 type ContentBlock struct {
 	Type   string       `json:"type"`
 	Text   string       `json:"text,omitempty"`
 	Source *ImageSource `json:"source,omitempty"`
+	// tool_use fields
+	ID    string          `json:"id,omitempty"`
+	Name  string          `json:"name,omitempty"`
+	Input json.RawMessage `json:"input,omitempty"`
+	// tool_result fields
+	ToolUseID   string `json:"tool_use_id,omitempty"`
+	IsError     bool   `json:"is_error,omitempty"`
+	ToolContent any    `json:"-"` // string or []ContentBlock; serialized as "content" for tool_result
+}
+
+// MarshalJSON handles the polymorphic "content" field for tool_result blocks.
+func (cb ContentBlock) MarshalJSON() ([]byte, error) {
+	type plain ContentBlock // avoid infinite recursion
+	m := make(map[string]any)
+
+	// Marshal the base fields via the plain type
+	base, err := json.Marshal(plain(cb))
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(base, &m); err != nil {
+		return nil, err
+	}
+
+	// Add ToolContent as "content" for tool_result blocks
+	if cb.Type == "tool_result" && cb.ToolContent != nil {
+		m["content"] = cb.ToolContent
+	}
+
+	return json.Marshal(m)
+}
+
+// UnmarshalJSON handles the polymorphic "content" field for tool_result blocks.
+func (cb *ContentBlock) UnmarshalJSON(data []byte) error {
+	type plain ContentBlock
+	var p plain
+	if err := json.Unmarshal(data, &p); err != nil {
+		return err
+	}
+	*cb = ContentBlock(p)
+
+	if cb.Type == "tool_result" {
+		// Parse the "content" field which can be a string or array of blocks
+		var raw struct {
+			Content json.RawMessage `json:"content"`
+		}
+		if err := json.Unmarshal(data, &raw); err == nil && len(raw.Content) > 0 {
+			var s string
+			if err := json.Unmarshal(raw.Content, &s); err == nil {
+				cb.ToolContent = s
+			} else {
+				var blocks []ContentBlock
+				if err := json.Unmarshal(raw.Content, &blocks); err == nil {
+					cb.ToolContent = blocks
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// NewToolUseBlock creates a tool_use content block.
+func NewToolUseBlock(id, name string, input json.RawMessage) ContentBlock {
+	return ContentBlock{Type: "tool_use", ID: id, Name: name, Input: input}
+}
+
+// NewToolResultBlock creates a tool_result content block with string content.
+func NewToolResultBlock(toolUseID, content string, isError bool) ContentBlock {
+	return ContentBlock{Type: "tool_result", ToolUseID: toolUseID, IsError: isError, ToolContent: content}
+}
+
+// NewToolResultBlockWithImages creates a tool_result with nested text + image blocks.
+func NewToolResultBlockWithImages(toolUseID, text string, images []ContentBlock, isError bool) ContentBlock {
+	nested := []ContentBlock{{Type: "text", Text: text}}
+	nested = append(nested, images...)
+	return ContentBlock{Type: "tool_result", ToolUseID: toolUseID, IsError: isError, ToolContent: nested}
+}
+
+// ToolResultText extracts the text from a tool_result's content.
+func ToolResultText(cb ContentBlock) string {
+	if cb.Type != "tool_result" {
+		return ""
+	}
+	switch v := cb.ToolContent.(type) {
+	case string:
+		return v
+	case []ContentBlock:
+		var sb strings.Builder
+		for _, b := range v {
+			if b.Type == "text" {
+				sb.WriteString(b.Text)
+			}
+		}
+		return sb.String()
+	}
+	return ""
 }
 
 // ImageSource holds base64-encoded image data for image content blocks.
@@ -45,15 +142,21 @@ func NewBlockContent(blocks []ContentBlock) MessageContent {
 	return MessageContent{blocks: blocks}
 }
 
-// Text returns the text content. For block content, concatenates all text blocks.
+// Text returns the text content. For block content, concatenates text from
+// text blocks and tool_result blocks.
 func (mc MessageContent) Text() string {
 	if mc.text != "" {
 		return mc.text
 	}
 	var sb strings.Builder
 	for _, b := range mc.blocks {
-		if b.Type == "text" {
+		switch b.Type {
+		case "text":
 			sb.WriteString(b.Text)
+		case "tool_result":
+			if t := ToolResultText(b); t != "" {
+				sb.WriteString(t)
+			}
 		}
 	}
 	return sb.String()
@@ -132,6 +235,7 @@ type CompletionRequest struct {
 }
 
 type FunctionCall struct {
+	ID        string          `json:"id,omitempty"`
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments"`
 }

@@ -76,12 +76,7 @@ type spinnerFrameMsg struct{}
 // headerTickMsg advances the startup header animation by one frame.
 type headerTickMsg struct{}
 
-// streamDeltaMsg carries an incremental text chunk from SSE streaming.
-type streamDeltaMsg struct {
-	delta string
-}
-
-// toolCallMsg signals that a tool call is about to start — flushes streaming text first.
+// toolCallMsg signals that a tool call is about to start.
 type toolCallMsg struct {
 	name string
 	args string
@@ -105,8 +100,6 @@ type Model struct {
 	textarea      textarea.Model
 	output        []string
 	pendingPrints []string
-	streamingText       string
-	streamingDone       bool
 	processingStartTime time.Time
 	spinnerIdx          int
 	spinnerTexts   []string
@@ -131,7 +124,7 @@ type Model struct {
 	pendingToolName   string
 	pendingToolArgs   string
 	lastToolResults    []toolResultEntry
-	toolResultExpanded bool
+	toolExpandLevel    int // 0=summary only, 1=compact lines, 2=expanded details
 	// Slash command completion menu
 	menuVisible   bool
 	menuIndex     int
@@ -268,7 +261,7 @@ func New(cfg *config.Config, version string) *Model {
 
 	hookRunner := hooks.NewHookRunner(cfg.Hooks)
 	loop := agent.NewAgentLoop(gateway, reg, cfg.ModelTier, shannonDir, cfg.Agent.MaxIterations, cfg.Tools.ResultTruncation, cfg.Tools.ArgsTruncation, &cfg.Permissions, auditor, hookRunner)
-	loop.SetEnableStreaming(true) // TUI supports streaming via streamDeltaMsg
+	loop.SetEnableStreaming(true) // streaming enabled but deltas are suppressed — only final text rendered
 	if mcpCtx := mcp.BuildContext(cfg.MCPServers); mcpCtx != "" {
 		loop.SetMCPContext(mcpCtx)
 	}
@@ -393,12 +386,6 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					default:
 					}
 				}
-				// Flush any partial streaming text to scrollback
-				if m.streamingText != "" {
-					m.appendOutput(truncateLongResponse(renderMarkdown(m.streamingText, m.width)))
-					m.streamingText = ""
-				}
-				m.streamingDone = false
 				// Roll back the user message added in handleSubmit
 				sess := m.sessions.Current()
 				if len(sess.Messages) > 0 && sess.Messages[len(sess.Messages)-1].Role == "user" {
@@ -457,11 +444,12 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// Ctrl+O: expand last tool result (one-shot, resets on new tool result)
-		if msg.String() == "ctrl+o" && len(m.lastToolResults) > 0 && !m.toolResultExpanded {
-			last := m.lastToolResults[len(m.lastToolResults)-1]
-			m.appendOutput(formatExpandedToolResult(last.name, last.args, last.isError, last.content, last.elapsed))
-			m.toolResultExpanded = true
+		// Ctrl+O: expand tool results from last turn (one-shot, shows expanded details)
+		if msg.String() == "ctrl+o" && len(m.lastToolResults) > 0 && m.toolExpandLevel == 0 {
+			for _, r := range m.lastToolResults {
+				m.appendOutput(formatExpandedToolResult(r.name, r.args, r.isError, r.content, r.elapsed))
+			}
+			m.toolExpandLevel = 1
 			return m, m.flushPrints()
 		}
 
@@ -541,12 +529,13 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.state = stateInput
 		m.cancelRun = nil
-		if m.streamingText != "" {
-			m.appendOutput(truncateLongResponse(renderMarkdown(m.streamingText, m.width)))
-			m.streamingText = ""
-		}
 		if msg.err != nil && !errors.Is(msg.err, context.Canceled) {
 			m.appendOutput("Error: " + msg.err.Error())
+		}
+		// Collapsed tool summary (expandable via Ctrl+O)
+		if len(m.lastToolResults) > 0 {
+			m.appendOutput(formatToolSummary(m.lastToolResults))
+			m.toolExpandLevel = 0
 		}
 		// Don't show usage/elapsed for cancelled tasks
 		if msg.err == nil || errors.Is(msg.err, agent.ErrMaxIterReached) {
@@ -624,19 +613,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.appendOutput(msg.text)
 		return m, nil
 
-	case streamDeltaMsg:
-		m.streamingText += msg.delta
-		// Accumulate all streamed text — View() shows last N lines as typewriter.
-		// Markdown rendering happens when streaming completes (agentDoneMsg/toolCallMsg).
-		return m, nil
-
 	case toolCallMsg:
-		// Flush any pending streaming text BEFORE showing tool indicator.
-		// Render markdown so headings/code/etc. display properly.
-		if m.streamingText != "" {
-			m.appendOutput(renderMarkdown(m.streamingText, m.width))
-			m.streamingText = ""
-		}
 		m.pendingToolName = msg.name
 		m.pendingToolArgs = msg.args
 		// Advance spinner phrase on real events
@@ -686,14 +663,7 @@ func (m *Model) View() string {
 		}
 		sb.WriteString(barStyle.Render(strings.Repeat("─", barWidth)) + rightInfo)
 	case stateProcessing:
-		if m.streamingText != "" {
-			// Show last N lines for typewriter effect; full text rendered on completion
-			lines := strings.Split(m.streamingText, "\n")
-			if len(lines) > 20 {
-				lines = lines[len(lines)-20:]
-			}
-			sb.WriteString(strings.Join(lines, "\n"))
-		} else if m.pendingToolName != "" {
+		if m.pendingToolName != "" {
 			glyph := dotFrames[m.glyphIdx%len(dotFrames)]
 			color := spinColors[m.colorIdx%len(spinColors)]
 			glyphStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(color))
@@ -766,7 +736,7 @@ func (m *Model) handleSubmit() (tea.Model, tea.Cmd) {
 
 	// Local agent loop
 	m.state = stateProcessing
-	m.streamingDone = false
+	m.lastToolResults = nil
 	m.processingStartTime = time.Now()
 	sess := m.sessions.Current()
 	// Set title from first user message
@@ -807,7 +777,7 @@ func (m *Model) loadSessionHistory(sess *session.Session) {
 			pm := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("252")).Render(">")
 			m.appendOutput(fmt.Sprintf("%s %s", pm, msg.Content.Text()))
 		case "assistant":
-			m.appendOutput(msg.Content.Text())
+			m.appendOutput(renderMarkdown(msg.Content.Text(), m.width))
 			m.appendOutput("")
 		}
 	}
@@ -868,16 +838,16 @@ func spinnerTick() tea.Cmd {
 }
 
 // renderWaveText renders text with a shimmer effect.
-// Base color 208 (orange) with a 3-char-wide highlight at
-// 214 (light orange) that sweeps across the text.
+// Base color 76 (frog green) with a 3-char-wide highlight at
+// 82 (bright lime) that sweeps across the text.
 func renderWaveText(text string, tick int) string {
 	runes := []rune(text)
 	if len(runes) == 0 {
 		return ""
 	}
 	waveCenter := tick % (len(runes) + 4)
-	baseStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("208"))
-	shimmerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	baseStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("76"))
+	shimmerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
 	var sb strings.Builder
 	for i, r := range runes {
 		dist := waveCenter - i
@@ -1131,13 +1101,7 @@ func (m *Model) runRemote(query string, ctx map[string]any, strategy string) tea
 			switch ev.Event {
 			// --- Streaming content ---
 			case "thread.message.delta", "LLM_PARTIAL":
-				// Skip title_generator deltas (not user-facing content)
-				if event.AgentID == "title_generator" {
-					break
-				}
-				if event.Delta != "" && m.program != nil {
-					m.program.Send(streamDeltaMsg{delta: event.Delta})
-				}
+				// Deltas suppressed — final result rendered on completion.
 			case "thread.message.completed", "LLM_OUTPUT":
 				if event.AgentID == "title_generator" {
 					// Capture generated title for session
@@ -1297,9 +1261,6 @@ type tuiEventHandler struct {
 }
 
 func (h *tuiEventHandler) OnToolCall(name string, args string) {
-	// Reset streaming flag — after tool execution, the next LLM call is a fresh iteration.
-	// This prevents streamingDone from carrying over and suppressing the final response.
-	h.model.streamingDone = false
 	// Skip spinner/indicator for think tool — its content is shown dimmed on result.
 	if name == "think" {
 		return
@@ -1308,6 +1269,7 @@ func (h *tuiEventHandler) OnToolCall(name string, args string) {
 		h.model.program.Send(toolCallMsg{name: name, args: truncate(args, 200)})
 	}
 }
+
 
 func (h *tuiEventHandler) OnToolResult(name string, args string, result agent.ToolResult, elapsed time.Duration) {
 	toolName := h.model.pendingToolName
@@ -1328,10 +1290,7 @@ func (h *tuiEventHandler) OnToolResult(name string, args string, result agent.To
 		return
 	}
 
-	line := formatCompactToolResult(toolName, toolArgs, result.IsError, result.Content, elapsed)
-	h.model.sendOutput(line)
-
-	// Store for Ctrl+O expand
+	// Store for Ctrl+O expand (no longer printed inline — summary shown in agentDoneMsg)
 	h.model.lastToolResults = append(h.model.lastToolResults, toolResultEntry{
 		name:    toolName,
 		args:    toolArgs,
@@ -1345,25 +1304,16 @@ func (h *tuiEventHandler) OnToolResult(name string, args string, result agent.To
 
 	h.model.pendingToolName = ""
 	h.model.pendingToolArgs = ""
-	h.model.toolResultExpanded = false
+	h.model.toolExpandLevel = 0
 }
 
 func (h *tuiEventHandler) OnText(text string) {
-	// If streaming deltas were received, skip — the accumulated streamingText
-	// will be markdown-rendered when agentDoneMsg or toolCallMsg is processed.
-	if h.model.streamingDone {
-		h.model.streamingDone = false
-		return
-	}
-	// Non-streaming path (no deltas received): render markdown and display
-	h.model.sendOutput(truncateLongResponse(renderMarkdown(text, h.model.width)))
+	h.model.sendOutput(renderMarkdown(text, h.model.width))
 }
 
 func (h *tuiEventHandler) OnStreamDelta(delta string) {
-	if h.model.program != nil {
-		h.model.streamingDone = true // mark that we received streaming content
-		h.model.program.Send(streamDeltaMsg{delta: delta})
-	}
+	// No-op: suppress streaming text during agent loop iterations.
+	// View() shows the thinking indicator instead. OnText renders the final response.
 }
 
 func (h *tuiEventHandler) OnUsage(usage agent.TurnUsage) {}

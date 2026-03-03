@@ -129,6 +129,32 @@ func truncateLongResponse(rendered string) string {
 	return kept + "\n" + notice
 }
 
+// formatToolSummary renders a single collapsed summary line for a set of tool results.
+func formatToolSummary(results []toolResultEntry) string {
+	total := len(results)
+	if total == 0 {
+		return ""
+	}
+	var errCount int
+	for _, r := range results {
+		if r.isError {
+			errCount++
+		}
+	}
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	successIcon := lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Render("✓")
+	errorIcon := lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("✗")
+
+	var line string
+	if errCount == 0 {
+		line = fmt.Sprintf("⏵ %d tools used  %s", total, successIcon)
+	} else {
+		okCount := total - errCount
+		line = fmt.Sprintf("⏵ %d tools used  %s%d %s%d", total, successIcon, okCount, errorIcon, errCount)
+	}
+	return dimStyle.Render(line)
+}
+
 func strVal(m map[string]interface{}, key string) string {
 	if v, ok := m[key]; ok {
 		return fmt.Sprintf("%v", v)

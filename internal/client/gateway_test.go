@@ -266,3 +266,141 @@ func TestMessageContent_UnmarshalBlocks(t *testing.T) {
 		t.Fatalf("expected 2 blocks, got %d", len(blocks))
 	}
 }
+
+func TestContentBlock_ToolUse_MarshalJSON(t *testing.T) {
+	block := NewToolUseBlock("toolu_abc123", "bash", json.RawMessage(`{"command":"ls"}`))
+	data, err := json.Marshal(block)
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+	var m map[string]any
+	json.Unmarshal(data, &m)
+	if m["type"] != "tool_use" {
+		t.Errorf("expected type=tool_use, got %v", m["type"])
+	}
+	if m["id"] != "toolu_abc123" {
+		t.Errorf("expected id=toolu_abc123, got %v", m["id"])
+	}
+	if m["name"] != "bash" {
+		t.Errorf("expected name=bash, got %v", m["name"])
+	}
+}
+
+func TestContentBlock_ToolResult_MarshalJSON_StringContent(t *testing.T) {
+	block := NewToolResultBlock("toolu_abc123", "file1.txt\nfile2.txt", false)
+	data, err := json.Marshal(block)
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+	var m map[string]any
+	json.Unmarshal(data, &m)
+	if m["type"] != "tool_result" {
+		t.Errorf("expected type=tool_result, got %v", m["type"])
+	}
+	if m["tool_use_id"] != "toolu_abc123" {
+		t.Errorf("expected tool_use_id=toolu_abc123, got %v", m["tool_use_id"])
+	}
+	if m["content"] != "file1.txt\nfile2.txt" {
+		t.Errorf("unexpected content: %v", m["content"])
+	}
+	if _, ok := m["is_error"]; ok {
+		t.Error("is_error should be omitted when false")
+	}
+}
+
+func TestContentBlock_ToolResult_MarshalJSON_ArrayContent(t *testing.T) {
+	block := NewToolResultBlockWithImages("toolu_xyz", "Screenshot captured", []ContentBlock{
+		{Type: "image", Source: &ImageSource{Type: "base64", MediaType: "image/png", Data: "fakedata"}},
+	}, false)
+	data, err := json.Marshal(block)
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+	var m map[string]any
+	json.Unmarshal(data, &m)
+	contentArr, ok := m["content"].([]any)
+	if !ok {
+		t.Fatalf("expected content to be array, got %T: %v", m["content"], m["content"])
+	}
+	if len(contentArr) != 2 {
+		t.Fatalf("expected 2 content blocks (text+image), got %d", len(contentArr))
+	}
+}
+
+func TestContentBlock_ToolResult_RoundTrip(t *testing.T) {
+	// String content round-trip
+	original := NewToolResultBlock("toolu_abc", "result text", true)
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+	var decoded ContentBlock
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if decoded.Type != "tool_result" {
+		t.Errorf("type mismatch: %s", decoded.Type)
+	}
+	if decoded.ToolUseID != "toolu_abc" {
+		t.Errorf("tool_use_id mismatch: %s", decoded.ToolUseID)
+	}
+	if !decoded.IsError {
+		t.Error("is_error should be true")
+	}
+	text, ok := decoded.ToolContent.(string)
+	if !ok {
+		t.Fatalf("expected string content, got %T", decoded.ToolContent)
+	}
+	if text != "result text" {
+		t.Errorf("content mismatch: %s", text)
+	}
+
+	// Array content round-trip
+	original2 := NewToolResultBlockWithImages("toolu_xyz", "Screenshot", []ContentBlock{
+		{Type: "image", Source: &ImageSource{Type: "base64", MediaType: "image/png", Data: "abc"}},
+	}, false)
+	data2, _ := json.Marshal(original2)
+	var decoded2 ContentBlock
+	if err := json.Unmarshal(data2, &decoded2); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	blocks, ok := decoded2.ToolContent.([]ContentBlock)
+	if !ok {
+		t.Fatalf("expected []ContentBlock, got %T", decoded2.ToolContent)
+	}
+	if len(blocks) != 2 {
+		t.Fatalf("expected 2 nested blocks, got %d", len(blocks))
+	}
+}
+
+func TestFunctionCall_ID(t *testing.T) {
+	raw := `{"id":"toolu_abc","name":"bash","arguments":{"command":"ls"}}`
+	var fc FunctionCall
+	if err := json.Unmarshal([]byte(raw), &fc); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if fc.ID != "toolu_abc" {
+		t.Errorf("expected ID=toolu_abc, got %q", fc.ID)
+	}
+	if fc.Name != "bash" {
+		t.Errorf("expected Name=bash, got %q", fc.Name)
+	}
+}
+
+func TestToolResultText_Extraction(t *testing.T) {
+	// String content
+	b1 := NewToolResultBlock("id1", "hello world", false)
+	if got := ToolResultText(b1); got != "hello world" {
+		t.Errorf("expected 'hello world', got %q", got)
+	}
+	// Array content
+	b2 := NewToolResultBlockWithImages("id2", "screenshot taken", nil, false)
+	if got := ToolResultText(b2); got != "screenshot taken" {
+		t.Errorf("expected 'screenshot taken', got %q", got)
+	}
+	// Non-tool_result
+	b3 := ContentBlock{Type: "text", Text: "plain"}
+	if got := ToolResultText(b3); got != "" {
+		t.Errorf("expected empty, got %q", got)
+	}
+}

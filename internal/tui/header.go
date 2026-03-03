@@ -13,31 +13,32 @@ import (
 	"github.com/Kocoro-lab/shan/internal/session"
 )
 
-// Geometric crab — two animation frames (legs alternate).
+// Tree frog — two animation frames (eyes blink).
 // Note: ◢◣◥◤█ render as 2-cell wide in most terminals.
-// Both lines use matching widths: claws=4geo+2sp=10cells, body=5geo=10cells.
-var crabFrame0 = []string{
-	"        ◢◣ ◢◣",
-	"        ◥███◤",
-	"         ╹╹",
+var frogFrame0 = []string{
+	"        ◉   ◉",
+	"       ◢█████◣",
+	"       ◥█████◤",
+	"        ╹   ╹",
 }
-var crabFrame1 = []string{
-	"        ◢◣ ◢◣",
-	"        ◥███◤",
-	"         ╹ ╹",
+var frogFrame1 = []string{
+	"        ─   ─",
+	"       ◢█████◣",
+	"       ◥█████◤",
+	"        ╹   ╹",
 }
 
 // Color palette for the startup header.
 var (
-	crabColor   = lipgloss.Color("208") // orange — crab logo
-	borderColor = lipgloss.Color("208") // orange — box border
-	accentColor = lipgloss.Color("208") // orange — section headers
+	frogColor   = lipgloss.Color("76")  // frog green — logo
+	borderColor = lipgloss.Color("76")  // frog green — box border
+	accentColor = lipgloss.Color("76")  // frog green — section headers
 	dimColor    = lipgloss.Color("243")     // medium gray — secondary text
 	infoColor   = lipgloss.Color("39")      // blue — activity header
 )
 
 const (
-	headerTotalFrames = 6  // sparkle-blink frames (~0.5s total)
+	headerTotalFrames = 9 // one blink: closed→open→closed→open (~0.7s total)
 	headerTickMs      = 80 // ms per frame
 	headerLeftWidth   = 22 // left column visual width
 )
@@ -74,14 +75,15 @@ func renderStartupHeader(frame int, width int, version string, modelTier string,
 	// --- Build left column lines ---
 	var leftLines []string
 
-	// Crab logo: legs shift every 3 ticks (~240ms per pose).
-	crabStyle := lipgloss.NewStyle().Foreground(crabColor)
-	crabLines := crabFrame0
+	// Frog logo: eyes blink every 3 ticks (~240ms per pose).
+	// Starts closed, ends open: closed→open→closed→open.
+	frogStyle := lipgloss.NewStyle().Foreground(frogColor)
+	frogLines := frogFrame1
 	if (frame/3)%2 == 1 {
-		crabLines = crabFrame1
+		frogLines = frogFrame0
 	}
-	for _, line := range crabLines {
-		leftLines = append(leftLines, crabStyle.Render(line))
+	for _, line := range frogLines {
+		leftLines = append(leftLines, frogStyle.Render(line))
 	}
 
 	// Model + CWD + Endpoint — always visible.

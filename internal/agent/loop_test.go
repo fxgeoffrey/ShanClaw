@@ -37,6 +37,23 @@ func toolCall(name string, args string) *client.FunctionCall {
 	}
 }
 
+func toolCallWithID(name, args, id string) *client.FunctionCall {
+	return &client.FunctionCall{
+		ID:        id,
+		Name:      name,
+		Arguments: json.RawMessage(args),
+	}
+}
+
+// nativeResponseWithID builds a response with a tool call that has an ID.
+func nativeResponseWithID(content string, finishReason string, fc *client.FunctionCall, inputTokens, outputTokens int) client.CompletionResponse {
+	resp := nativeResponse(content, finishReason, nil, inputTokens, outputTokens)
+	if fc != nil {
+		resp.ToolCalls = []client.FunctionCall{*fc}
+	}
+	return resp
+}
+
 func TestAgentLoop_SimpleTextResponse(t *testing.T) {
 	callCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -659,4 +676,438 @@ func TestAgentLoop_ContextCancellation(t *testing.T) {
 	if callCount >= 25 {
 		t.Errorf("expected loop to exit early due to cancellation, but made %d calls", callCount)
 	}
+}
+
+func TestGenerateCallID(t *testing.T) {
+	id := generateCallID()
+	if len(id) != 6 {
+		t.Errorf("expected 6 chars, got %d: %q", len(id), id)
+	}
+	id2 := generateCallID()
+	if id == id2 {
+		t.Errorf("two consecutive calls returned same ID: %s", id)
+	}
+}
+
+func TestFormatToolExec(t *testing.T) {
+	result := formatToolExec("screenshot", `{"target":"fullscreen"}`, "a1b2c3", "screenshot saved to /tmp/s.png", false)
+	if !strings.Contains(result, `<tool_exec tool="screenshot" call_id="a1b2c3">`) {
+		t.Errorf("missing opening tag: %s", result)
+	}
+	if !strings.Contains(result, `<output status="ok">`) {
+		t.Errorf("missing ok status: %s", result)
+	}
+	if !strings.Contains(result, `</tool_exec>`) {
+		t.Errorf("missing closing tag: %s", result)
+	}
+
+	errResult := formatToolExec("bash", `{"cmd":"ls"}`, "d4e5f6", "permission denied", true)
+	if !strings.Contains(errResult, `<output status="error">`) {
+		t.Errorf("missing error status: %s", errResult)
+	}
+
+	// Verify XML escaping: output containing tag-like content must not break parsing
+	nasty := formatToolExec("bash", `echo "</input>"`, "aabbcc", "line with </output> and </tool_exec> in it", false)
+	if strings.Contains(nasty, "</input>\"") || strings.Count(nasty, "</output>") != 1 || strings.Count(nasty, "</tool_exec>") != 1 {
+		t.Errorf("XML escaping failed — raw delimiters leaked through: %s", nasty)
+	}
+	// Escaped output should still be parseable by toolResultPattern
+	if !toolResultPattern.MatchString(nasty) {
+		t.Errorf("escaped output should still match toolResultPattern: %s", nasty)
+	}
+}
+
+func TestToolResultPatternMatchesXML(t *testing.T) {
+	text := formatToolExec("bash", `{"cmd":"ls"}`, "abc123", "file1.go\nfile2.go", false)
+	if !toolResultPattern.MatchString(text) {
+		t.Errorf("toolResultPattern should match XML format: %s", text)
+	}
+}
+
+func TestFabricatedToolCallDetection(t *testing.T) {
+	// Old format (backward compat)
+	old := "I called screenshot({\"target\":\"fullscreen\"}).\n\nResult:\nscreenshot saved"
+	if !looksLikeFabricatedToolCalls(old) {
+		t.Error("should detect old format")
+	}
+	// New XML format in text output
+	xml := `<tool_exec tool="bash" call_id="aaa111">
+<input>{"cmd":"ls"}</input>
+<output status="ok">done</output>
+</tool_exec>`
+	if !looksLikeFabricatedToolCalls(xml) {
+		t.Error("should detect XML format in text output")
+	}
+	// Normal text
+	if looksLikeFabricatedToolCalls("Here is the answer.") {
+		t.Error("should not flag normal text")
+	}
+}
+
+func TestPreambleSuppressedWithToolCalls(t *testing.T) {
+	var lastMessages []client.Message
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		var req client.CompletionRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		lastMessages = req.Messages
+		if callCount == 1 {
+			json.NewEncoder(w).Encode(nativeResponse("Let me check that file for you.", "tool_use",
+				toolCall("mock_tool", `{}`), 10, 5))
+		} else {
+			json.NewEncoder(w).Encode(nativeResponse("Done.", "end_turn", nil, 10, 5))
+		}
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&mockTool{name: "mock_tool"})
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+
+	_, _, err := loop.Run(context.Background(), "check the file", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify the preamble is NOT in context
+	for _, msg := range lastMessages {
+		text := msg.Content.Text()
+		if strings.Contains(text, "Let me check that file for you") {
+			t.Errorf("preamble should be suppressed from context, but found: %s", text)
+		}
+	}
+}
+
+func TestContextUsesXMLFormat(t *testing.T) {
+	var lastMessages []client.Message
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		var req client.CompletionRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		lastMessages = req.Messages
+		if callCount == 1 {
+			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
+				toolCall("mock_tool", `{}`), 10, 5))
+		} else {
+			json.NewEncoder(w).Encode(nativeResponse("done", "end_turn", nil, 10, 5))
+		}
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&mockTool{name: "mock_tool"})
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+
+	_, _, err := loop.Run(context.Background(), "use the tool", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Context should contain XML format, not "I called" format
+	for _, msg := range lastMessages {
+		text := msg.Content.Text()
+		if strings.Contains(text, "I called ") {
+			t.Errorf("context should use XML format, not 'I called': %s", text)
+		}
+		if strings.Contains(text, "<tool_exec ") {
+			if !strings.Contains(text, "call_id=") {
+				t.Error("tool_exec should have call_id attribute")
+			}
+		}
+	}
+}
+
+func TestCompressOldToolResultsXML(t *testing.T) {
+	messages := []client.Message{
+		{Role: "system", Content: client.NewTextContent("system prompt")},
+		{Role: "user", Content: client.NewTextContent("do stuff")},
+	}
+	// Add 5 assistant messages with XML-format tool results
+	for i := range 5 {
+		text := formatToolExec("bash", fmt.Sprintf(`{"step":%d}`, i), generateCallID(),
+			strings.Repeat("x", 500), false)
+		messages = append(messages, client.Message{
+			Role:    "assistant",
+			Content: client.NewTextContent(text),
+		})
+	}
+
+	compressOldToolResults(messages, 3, 100)
+
+	// First 2 assistant messages (indices 2,3) should be compressed
+	for _, idx := range []int{2, 3} {
+		text := messages[idx].Content.Text()
+		if !strings.Contains(text, "[compressed]") {
+			t.Errorf("message %d should be compressed", idx)
+		}
+	}
+	// Last 3 (indices 4,5,6) should be uncompressed
+	for _, idx := range []int{4, 5, 6} {
+		text := messages[idx].Content.Text()
+		if strings.Contains(text, "[compressed]") {
+			t.Errorf("message %d should NOT be compressed", idx)
+		}
+	}
+}
+
+// --- Phase 3: Native tool_use/tool_result block tests ---
+
+func TestAgentLoop_NativeToolUseBlocks(t *testing.T) {
+	var lastMessages []client.Message
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		var req client.CompletionRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		lastMessages = req.Messages
+		if callCount == 1 {
+			json.NewEncoder(w).Encode(nativeResponseWithID("Let me check.", "tool_use",
+				toolCallWithID("mock_tool", `{}`, "toolu_abc123"), 10, 5))
+		} else {
+			json.NewEncoder(w).Encode(nativeResponse("Done.", "end_turn", nil, 10, 5))
+		}
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&mockTool{name: "mock_tool"})
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+
+	result, _, err := loop.Run(context.Background(), "check something", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "Done." {
+		t.Errorf("unexpected result: %q", result)
+	}
+
+	// Verify native blocks in context (second LLM call)
+	hasToolUse := false
+	hasToolResult := false
+	for _, msg := range lastMessages {
+		if !msg.Content.HasBlocks() {
+			// Should NOT contain "I called" or "<tool_exec" in text
+			text := msg.Content.Text()
+			if strings.Contains(text, "I called ") || strings.Contains(text, "<tool_exec ") {
+				t.Errorf("native path should not use text format: %s", text)
+			}
+			continue
+		}
+		for _, b := range msg.Content.Blocks() {
+			if b.Type == "tool_use" {
+				hasToolUse = true
+				if b.ID != "toolu_abc123" {
+					t.Errorf("expected tool_use ID=toolu_abc123, got %q", b.ID)
+				}
+				if b.Name != "mock_tool" {
+					t.Errorf("expected tool_use Name=mock_tool, got %q", b.Name)
+				}
+			}
+			if b.Type == "tool_result" {
+				hasToolResult = true
+				if b.ToolUseID != "toolu_abc123" {
+					t.Errorf("expected tool_result tool_use_id=toolu_abc123, got %q", b.ToolUseID)
+				}
+			}
+		}
+	}
+	if !hasToolUse {
+		t.Error("expected tool_use block in context")
+	}
+	if !hasToolResult {
+		t.Error("expected tool_result block in context")
+	}
+}
+
+func TestAgentLoop_NativeBlocks_IncludesPreamble(t *testing.T) {
+	var lastMessages []client.Message
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		var req client.CompletionRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		lastMessages = req.Messages
+		if callCount == 1 {
+			json.NewEncoder(w).Encode(nativeResponseWithID("Let me check that file.", "tool_use",
+				toolCallWithID("mock_tool", `{}`, "toolu_preamble"), 10, 5))
+		} else {
+			json.NewEncoder(w).Encode(nativeResponse("Done.", "end_turn", nil, 10, 5))
+		}
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&mockTool{name: "mock_tool"})
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+
+	_, _, err := loop.Run(context.Background(), "check file", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Native path INCLUDES preamble text in assistant message (unlike Phase 2 suppression)
+	for _, msg := range lastMessages {
+		if msg.Role == "assistant" && msg.Content.HasBlocks() {
+			for _, b := range msg.Content.Blocks() {
+				if b.Type == "text" && b.Text == "Let me check that file." {
+					return // found it
+				}
+			}
+		}
+	}
+	t.Error("native path should include preamble text in assistant message")
+}
+
+func TestAgentLoop_FallbackToXML_NoID(t *testing.T) {
+	var lastMessages []client.Message
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		var req client.CompletionRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		lastMessages = req.Messages
+		if callCount == 1 {
+			// No ID on the tool call — should use XML fallback
+			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
+				toolCall("mock_tool", `{}`), 10, 5))
+		} else {
+			json.NewEncoder(w).Encode(nativeResponse("Done.", "end_turn", nil, 10, 5))
+		}
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&mockTool{name: "mock_tool"})
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+
+	_, _, err := loop.Run(context.Background(), "use tool", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should use XML format (no tool_use/tool_result blocks)
+	for _, msg := range lastMessages {
+		if msg.Content.HasBlocks() {
+			for _, b := range msg.Content.Blocks() {
+				if b.Type == "tool_use" || b.Type == "tool_result" {
+					t.Error("fallback path should not produce native blocks")
+				}
+			}
+		}
+		text := msg.Content.Text()
+		if strings.Contains(text, "<tool_exec ") {
+			return // found XML format — correct
+		}
+	}
+	t.Error("fallback path should use XML format")
+}
+
+func TestAgentLoop_NativeBlocks_DeniedTool(t *testing.T) {
+	var lastMessages []client.Message
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		var req client.CompletionRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		lastMessages = req.Messages
+		if callCount == 1 {
+			json.NewEncoder(w).Encode(nativeResponseWithID("", "tool_use",
+				toolCallWithID("guarded_tool", `{"cmd":"rm -rf /"}`, "toolu_denied"), 10, 5))
+		} else {
+			json.NewEncoder(w).Encode(nativeResponse("Denied.", "end_turn", nil, 10, 5))
+		}
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&mockApprovalTool{
+		name:     "guarded_tool",
+		safeArgs: func(args string) bool { return false },
+	})
+	handler := &mockHandler{approveResult: false}
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+	loop.SetHandler(handler)
+
+	_, _, err := loop.Run(context.Background(), "run dangerous", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify tool_result with is_error for denied tool
+	for _, msg := range lastMessages {
+		if !msg.Content.HasBlocks() {
+			continue
+		}
+		for _, b := range msg.Content.Blocks() {
+			if b.Type == "tool_result" && b.ToolUseID == "toolu_denied" {
+				if !b.IsError {
+					t.Error("denied tool should have is_error=true")
+				}
+				return
+			}
+		}
+	}
+	t.Error("expected tool_result block for denied tool")
+}
+
+func TestAgentLoop_NativeBlocks_ImageResult(t *testing.T) {
+	var lastMessages []client.Message
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		var req client.CompletionRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		lastMessages = req.Messages
+		if callCount == 1 {
+			json.NewEncoder(w).Encode(nativeResponseWithID("", "tool_use",
+				toolCallWithID("image_tool", `{}`, "toolu_img"), 10, 5))
+		} else {
+			json.NewEncoder(w).Encode(nativeResponse("I see it", "end_turn", nil, 10, 5))
+		}
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&mockImageTool{name: "image_tool"})
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+
+	_, _, err := loop.Run(context.Background(), "take screenshot", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify image is nested inside tool_result (not as separate message)
+	for _, msg := range lastMessages {
+		if !msg.Content.HasBlocks() {
+			continue
+		}
+		for _, b := range msg.Content.Blocks() {
+			if b.Type == "tool_result" && b.ToolUseID == "toolu_img" {
+				nested, ok := b.ToolContent.([]client.ContentBlock)
+				if !ok {
+					t.Fatalf("expected nested blocks, got %T", b.ToolContent)
+				}
+				hasImage := false
+				for _, nb := range nested {
+					if nb.Type == "image" {
+						hasImage = true
+					}
+				}
+				if !hasImage {
+					t.Error("expected image block nested inside tool_result")
+				}
+				return
+			}
+		}
+	}
+	t.Error("expected tool_result block with image for image_tool")
 }

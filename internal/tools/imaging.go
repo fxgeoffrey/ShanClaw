@@ -79,12 +79,24 @@ func CaptureAndEncode(maxDim int) (string, agent.ImageBlock, error) {
 	return path, block, nil
 }
 
-// GetScreenDimensions returns the logical screen dimensions of the main display.
-// Uses system_profiler on macOS. Parses "Resolution:" or "UI Looks like:" lines.
+// GetScreenDimensions returns the logical screen dimensions (points, not physical pixels)
+// of the main display. Uses Quartz CGDisplayPixelsWide/High which returns the coordinate
+// space that CGEvent mouse clicks operate in. Falls back to system_profiler parsing.
 func GetScreenDimensions() (width, height int, err error) {
-	out, err := exec.Command("system_profiler", "SPDisplaysDataType").CombinedOutput()
+	// Primary: Quartz CGDisplayPixelsWide/High — returns logical points (what CGEvent uses)
+	out, err := exec.Command("python3", "-c",
+		`import Quartz; d=Quartz.CGMainDisplayID(); print(Quartz.CGDisplayPixelsWide(d), Quartz.CGDisplayPixelsHigh(d))`).CombinedOutput()
+	if err == nil {
+		var w, h int
+		if _, parseErr := fmt.Sscanf(strings.TrimSpace(string(out)), "%d %d", &w, &h); parseErr == nil && w > 0 && h > 0 {
+			return w, h, nil
+		}
+	}
+
+	// Fallback: system_profiler (may return physical pixels on Retina without "UI Looks like:")
+	out, err = exec.Command("system_profiler", "SPDisplaysDataType").CombinedOutput()
 	if err != nil {
-		return 0, 0, fmt.Errorf("system_profiler: %v", err)
+		return 0, 0, fmt.Errorf("screen dimensions: %v", err)
 	}
 	return parseScreenDimensions(string(out))
 }

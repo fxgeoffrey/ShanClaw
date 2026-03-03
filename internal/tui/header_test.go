@@ -14,7 +14,7 @@ func TestRenderStartupHeader_FirstFrame(t *testing.T) {
 		t.Error("first frame should contain title in top border")
 	}
 	if !strings.Contains(result, "◢") {
-		t.Error("first frame should show crab logo")
+		t.Error("first frame should show frog logo")
 	}
 }
 
@@ -28,7 +28,7 @@ func TestRenderStartupHeader_FinalFrame(t *testing.T) {
 		t.Error("final frame should contain title")
 	}
 	if !strings.Contains(result, "◥") {
-		t.Error("final frame should contain crab logo")
+		t.Error("final frame should contain frog logo")
 	}
 	if !strings.Contains(result, "Tips") {
 		t.Error("final frame should contain Tips section")
@@ -63,15 +63,15 @@ func TestRenderStartupHeader_WideTerminal(t *testing.T) {
 func TestRenderStartupHeader_LogoAlwaysVisible(t *testing.T) {
 	result := renderStartupHeader(0, 80, "dev", "small", "https://api.test.com", "/tmp", nil, 0)
 	if !strings.Contains(result, "◢") {
-		t.Error("frame 0 should show crab logo")
+		t.Error("frame 0 should show frog logo")
 	}
 }
 
-func TestRenderStartupHeader_LegAnimation(t *testing.T) {
-	// Frames 0-2 show pose A, frames 3-5 show pose B.
-	poseA := renderStartupHeader(0, 80, "dev", "small", "https://api.test.com", "/tmp", nil, 0)
-	poseB := renderStartupHeader(3, 80, "dev", "small", "https://api.test.com", "/tmp", nil, 0)
-	if poseA == poseB {
+func TestRenderStartupHeader_EyeBlinkAnimation(t *testing.T) {
+	// Frames 0-2 show eyes open, frames 3-5 show eyes closed.
+	eyesOpen := renderStartupHeader(0, 80, "dev", "small", "https://api.test.com", "/tmp", nil, 0)
+	eyesClosed := renderStartupHeader(3, 80, "dev", "small", "https://api.test.com", "/tmp", nil, 0)
+	if eyesOpen == eyesClosed {
 		t.Error("animation frames from different poses should differ")
 	}
 }

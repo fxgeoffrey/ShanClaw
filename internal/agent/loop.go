@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -275,9 +277,6 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			if resp.OutputText != "" {
 				lastText = resp.OutputText
 			}
-			if a.handler != nil {
-				a.handler.OnText(resp.OutputText)
-			}
 
 			if afterCheckpoint {
 				afterCheckpoint = false
@@ -320,6 +319,11 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				continue
 			}
 
+			// Only render text for the final response — intermediate text
+			// from checkpoint/hallucination paths must not leak to the user.
+			if a.handler != nil {
+				a.handler.OnText(resp.OutputText)
+			}
 			return resp.OutputText, usage, nil
 		}
 
@@ -331,12 +335,30 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 
 		// Execute all tool calls
 		toolCalls := resp.AllToolCalls()
-		var allResults strings.Builder
 		if resp.OutputText != "" {
-			allResults.WriteString(resp.OutputText)
-			allResults.WriteString("\n\n")
 			lastText = resp.OutputText
 		}
+
+		useNative := hasNativeToolIDs(toolCalls)
+
+		// Native path: build assistant message with tool_use blocks before execution
+		var resultBlocks []client.ContentBlock
+		if useNative {
+			var assistantBlocks []client.ContentBlock
+			if resp.OutputText != "" {
+				assistantBlocks = append(assistantBlocks, client.ContentBlock{Type: "text", Text: resp.OutputText})
+			}
+			for _, fc := range toolCalls {
+				assistantBlocks = append(assistantBlocks, client.NewToolUseBlock(fc.ID, fc.Name, fc.Arguments))
+			}
+			messages = append(messages, client.Message{
+				Role:    "assistant",
+				Content: client.NewBlockContent(assistantBlocks),
+			})
+		}
+
+		// XML fallback path: string builder for text-based results
+		var allResults strings.Builder
 
 		var worstAction LoopAction
 		var worstMsg string
@@ -350,9 +372,19 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				a.handler.OnToolCall(fc.Name, argsStr)
 			}
 
+			// recordError is a helper to record error results in the appropriate format.
+			recordError := func(errMsg string) {
+				if useNative {
+					resultBlocks = append(resultBlocks, client.NewToolResultBlock(fc.ID, errMsg, true))
+				} else {
+					allResults.WriteString(formatToolExec(fc.Name, truncateStr(argsStr, a.argsTrunc), generateCallID(), errMsg, true))
+					allResults.WriteString("\n\n")
+				}
+			}
+
 			tool, ok := a.tools.Get(fc.Name)
 			if !ok {
-				fmt.Fprintf(&allResults, "I called %s(%s).\n\nError: unknown tool: %s\n\n", fc.Name, truncateStr(argsStr, a.argsTrunc), fc.Name)
+				recordError("unknown tool: " + fc.Name)
 				continue
 			}
 
@@ -360,7 +392,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			decision, wasApproved := a.checkPermissionAndApproval(fc.Name, argsStr, tool, resp.OutputText)
 			if decision == "deny" {
 				a.logAudit(fc.Name, argsStr, "tool call denied by permission policy", decision, false, 0)
-				fmt.Fprintf(&allResults, "I called %s(%s).\n\nError: tool call denied by permission policy\n\n", fc.Name, truncateStr(argsStr, a.argsTrunc))
+				recordError("tool call denied by permission policy")
 				if a.handler != nil {
 					a.handler.OnToolResult(fc.Name, argsStr, ToolResult{Content: "denied by policy", IsError: true}, 0)
 				}
@@ -368,7 +400,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			}
 			if decision == "ask" && !wasApproved {
 				a.logAudit(fc.Name, argsStr, "tool call denied by user", decision, false, 0)
-				fmt.Fprintf(&allResults, "I called %s(%s).\n\nError: tool call denied by user\n\n", fc.Name, truncateStr(argsStr, a.argsTrunc))
+				recordError("tool call denied by user")
 				if a.handler != nil {
 					a.handler.OnToolResult(fc.Name, argsStr, ToolResult{Content: "denied by user", IsError: true}, 0)
 				}
@@ -383,7 +415,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				}
 				if hookDecision == "deny" {
 					a.logAudit(fc.Name, argsStr, "tool call denied by hook: "+hookReason, "deny", false, 0)
-					fmt.Fprintf(&allResults, "I called %s(%s).\n\nError: tool call denied by hook: %s\n\n", fc.Name, truncateStr(argsStr, a.argsTrunc), hookReason)
+					recordError("tool call denied by hook: " + hookReason)
 					continue
 				}
 			}
@@ -410,34 +442,41 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				a.handler.OnToolResult(fc.Name, argsStr, result, elapsed)
 			}
 
-			if len(result.Images) > 0 {
-				// Build content blocks: text result + image blocks
-				var blocks []client.ContentBlock
-				cleanResult := stripLineNumbers(result.Content)
-				text := fmt.Sprintf("I called %s(%s).\n\nResult:\n%s",
-					fc.Name, truncateStr(argsStr, a.argsTrunc), truncateStr(cleanResult, a.resultTrunc))
-				blocks = append(blocks, client.ContentBlock{Type: "text", Text: text})
-				for _, img := range result.Images {
-					blocks = append(blocks, client.ContentBlock{
-						Type: "image",
-						Source: &client.ImageSource{
-							Type:      "base64",
-							MediaType: img.MediaType,
-							Data:      img.Data,
-						},
-					})
-				}
-				// Image content must be in a user role message (Anthropic API requirement)
-				messages = append(messages, client.Message{
-					Role:    "user",
-					Content: client.NewBlockContent(blocks),
-				})
-			} else {
-				cleanResult := stripLineNumbers(result.Content)
-				if result.IsError {
-					fmt.Fprintf(&allResults, "I called %s(%s).\n\nError: %s\n\n", fc.Name, truncateStr(argsStr, a.argsTrunc), truncateStr(cleanResult, a.resultTrunc))
+			// Record result in context
+			cleanResult := stripLineNumbers(result.Content)
+			if useNative {
+				if len(result.Images) > 0 {
+					var imageBlocks []client.ContentBlock
+					for _, img := range result.Images {
+						imageBlocks = append(imageBlocks, client.ContentBlock{
+							Type:   "image",
+							Source: &client.ImageSource{Type: "base64", MediaType: img.MediaType, Data: img.Data},
+						})
+					}
+					resultBlocks = append(resultBlocks, client.NewToolResultBlockWithImages(
+						fc.ID, truncateStr(cleanResult, a.resultTrunc), imageBlocks, result.IsError))
 				} else {
-					fmt.Fprintf(&allResults, "I called %s(%s).\n\nResult:\n%s\n\n", fc.Name, truncateStr(argsStr, a.argsTrunc), truncateStr(cleanResult, a.resultTrunc))
+					resultBlocks = append(resultBlocks, client.NewToolResultBlock(
+						fc.ID, truncateStr(cleanResult, a.resultTrunc), result.IsError))
+				}
+			} else {
+				if len(result.Images) > 0 {
+					text := formatToolExec(fc.Name, truncateStr(argsStr, a.argsTrunc), generateCallID(), truncateStr(cleanResult, a.resultTrunc), false)
+					var blocks []client.ContentBlock
+					blocks = append(blocks, client.ContentBlock{Type: "text", Text: text})
+					for _, img := range result.Images {
+						blocks = append(blocks, client.ContentBlock{
+							Type:   "image",
+							Source: &client.ImageSource{Type: "base64", MediaType: img.MediaType, Data: img.Data},
+						})
+					}
+					messages = append(messages, client.Message{
+						Role:    "user",
+						Content: client.NewBlockContent(blocks),
+					})
+				} else {
+					allResults.WriteString(formatToolExec(fc.Name, truncateStr(argsStr, a.argsTrunc), generateCallID(), truncateStr(cleanResult, a.resultTrunc), result.IsError))
+					allResults.WriteString("\n\n")
 				}
 			}
 
@@ -463,8 +502,15 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			}
 		}
 
-		// Add all tool results as a single assistant message (skip if all results were image tools)
-		if allResults.Len() > 0 {
+		// Append tool result messages to context
+		if useNative {
+			if len(resultBlocks) > 0 {
+				messages = append(messages, client.Message{
+					Role:    "user",
+					Content: client.NewBlockContent(resultBlocks),
+				})
+			}
+		} else if allResults.Len() > 0 {
 			messages = append(messages, client.Message{
 				Role:    "assistant",
 				Content: client.NewTextContent(strings.TrimRight(allResults.String(), " \t\n\r")),
@@ -639,6 +685,55 @@ func truncateStr(s string, max int) string {
 	return s[:max] + "..."
 }
 
+// generateCallID returns a 6-character random hex string used to tag tool
+// execution records. The randomness makes it infeasible for the LLM to
+// fabricate valid call IDs in its text output.
+func generateCallID() string {
+	b := make([]byte, 3)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%06x", time.Now().UnixNano()&0xFFFFFF)
+	}
+	return hex.EncodeToString(b)
+}
+
+// escapeToolXML escapes XML-like tag delimiters in tool payloads so they
+// don't break the <tool_exec> structural format during parsing/compression.
+func escapeToolXML(s string) string {
+	s = strings.ReplaceAll(s, "</input>", "&lt;/input&gt;")
+	s = strings.ReplaceAll(s, "</output>", "&lt;/output&gt;")
+	s = strings.ReplaceAll(s, "<tool_exec", "&lt;tool_exec")
+	s = strings.ReplaceAll(s, "</tool_exec>", "&lt;/tool_exec&gt;")
+	return s
+}
+
+// formatToolExec produces a structural XML-tagged tool execution record.
+// This format is distinct from natural language, making it hard for the LLM
+// to mimic in its text output (unlike the old "I called tool(args)" format).
+// Payloads are escaped to prevent delimiter collision.
+func formatToolExec(toolName, args, callID, output string, isError bool) string {
+	status := "ok"
+	if isError {
+		status = "error"
+	}
+	return fmt.Sprintf("<tool_exec tool=%q call_id=%q>\n<input>%s</input>\n<output status=%q>%s</output>\n</tool_exec>",
+		toolName, callID, escapeToolXML(args), status, escapeToolXML(output))
+}
+
+// hasNativeToolIDs returns true if ALL tool calls have IDs, indicating the
+// gateway supports native tool_use/tool_result protocol. Requires all-or-nothing
+// to avoid emitting blocks with empty id/tool_use_id for mixed responses.
+func hasNativeToolIDs(toolCalls []client.FunctionCall) bool {
+	if len(toolCalls) == 0 {
+		return false
+	}
+	for _, fc := range toolCalls {
+		if fc.ID == "" {
+			return false
+		}
+	}
+	return true
+}
+
 // effectiveMaxIter returns a dynamic iteration limit based on tools used so far.
 // GUI tasks get a higher limit since screenshot→action loops are normal.
 func (a *AgentLoop) effectiveMaxIter(toolsUsed map[string]int) int {
@@ -657,16 +752,14 @@ func (a *AgentLoop) effectiveMaxIter(toolsUsed map[string]int) int {
 // keeping only the N most recent image-bearing messages in context.
 func filterOldImages(messages []client.Message, keep int) {
 	// Collect indices of messages containing image blocks, newest first.
+	// Checks both top-level image blocks and images nested inside tool_result content.
 	var imageIndices []int
 	for i := len(messages) - 1; i >= 0; i-- {
 		if !messages[i].Content.HasBlocks() {
 			continue
 		}
-		for _, b := range messages[i].Content.Blocks() {
-			if b.Type == "image" {
-				imageIndices = append(imageIndices, i)
-				break
-			}
+		if messageHasImages(messages[i]) {
+			imageIndices = append(imageIndices, i)
 		}
 	}
 	if len(imageIndices) <= keep {
@@ -681,6 +774,8 @@ func filterOldImages(messages []client.Message, keep int) {
 					Type: "text",
 					Text: "[previous screenshot removed to save context]",
 				})
+			} else if b.Type == "tool_result" {
+				newBlocks = append(newBlocks, stripImagesFromToolResult(b))
 			} else {
 				newBlocks = append(newBlocks, b)
 			}
@@ -689,23 +784,76 @@ func filterOldImages(messages []client.Message, keep int) {
 	}
 }
 
-// toolResultPattern matches "I called tool_name(args).\n\nResult:\n..." or "Error: ..." lines
-// in assistant messages that contain tool execution results.
-var toolResultPattern = regexp.MustCompile(`(?s)I called (\w+)\(([^)]*)\)\.\s*\n\n(?:Result|Error):\s*\n(.+?)(?:\n\nI called |\z)`)
+// messageHasImages checks if a message contains image blocks at any level.
+func messageHasImages(msg client.Message) bool {
+	for _, b := range msg.Content.Blocks() {
+		if b.Type == "image" {
+			return true
+		}
+		if b.Type == "tool_result" {
+			if nested, ok := b.ToolContent.([]client.ContentBlock); ok {
+				for _, nb := range nested {
+					if nb.Type == "image" {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
 
-// compressOldToolResults replaces verbose tool results in old assistant messages
-// with short summaries. Keeps the most recent N assistant messages with tool results
-// uncompressed. Never touches LLM text responses (messages without tool result patterns).
+// stripImagesFromToolResult replaces image blocks inside a tool_result with text placeholders.
+func stripImagesFromToolResult(b client.ContentBlock) client.ContentBlock {
+	nested, ok := b.ToolContent.([]client.ContentBlock)
+	if !ok {
+		return b
+	}
+	var newNested []client.ContentBlock
+	for _, nb := range nested {
+		if nb.Type == "image" {
+			newNested = append(newNested, client.ContentBlock{
+				Type: "text",
+				Text: "[previous screenshot removed to save context]",
+			})
+		} else {
+			newNested = append(newNested, nb)
+		}
+	}
+	b.ToolContent = newNested
+	return b
+}
+
+// toolResultPattern matches <tool_exec> XML blocks in assistant messages.
+var toolResultPattern = regexp.MustCompile(`(?s)<tool_exec tool="(\w+)" call_id="[0-9a-f]+">\n<input>(.*?)</input>\n<output status="(?:ok|error)">(.*?)</output>\n</tool_exec>`)
+
+// legacyToolResultPattern matches old "I called" format for backward-compat compression.
+var legacyToolResultPattern = regexp.MustCompile(`(?s)I called (\w+)\(([^)]*)\)\.\s*\n\n(?:Result|Error):\s*\n(.+?)(?:\n\nI called |\z)`)
+
+// compressOldToolResults replaces verbose tool results in old messages
+// with short summaries. Handles both XML-text format (assistant role) and
+// native tool_result blocks (user role). Keeps most recent N uncompressed.
 func compressOldToolResults(messages []client.Message, keepRecent int, maxChars int) {
-	// Find assistant messages that contain tool results (not pure text responses)
+	// Find messages that contain tool results (XML text or native blocks)
 	var toolResultIndices []int
 	for i, m := range messages {
-		if m.Role != "assistant" {
-			continue
+		// XML format: assistant-role text messages
+		if m.Role == "assistant" {
+			text := m.Content.Text()
+			if (strings.Contains(text, "<tool_exec ") && strings.Contains(text, "</tool_exec>")) ||
+				(strings.Contains(text, "I called ") && (strings.Contains(text, "\n\nResult:\n") || strings.Contains(text, "\n\nError: "))) {
+				toolResultIndices = append(toolResultIndices, i)
+				continue
+			}
 		}
-		text := m.Content.Text()
-		if strings.Contains(text, "I called ") && (strings.Contains(text, "\n\nResult:\n") || strings.Contains(text, "\n\nError: ")) {
-			toolResultIndices = append(toolResultIndices, i)
+		// Native format: user-role messages with tool_result blocks
+		if m.Role == "user" && m.Content.HasBlocks() {
+			for _, b := range m.Content.Blocks() {
+				if b.Type == "tool_result" {
+					toolResultIndices = append(toolResultIndices, i)
+					break
+				}
+			}
 		}
 	}
 
@@ -715,18 +863,64 @@ func compressOldToolResults(messages []client.Message, keepRecent int, maxChars 
 
 	// Compress old ones (everything except the most recent keepRecent)
 	for _, idx := range toolResultIndices[:len(toolResultIndices)-keepRecent] {
-		text := messages[idx].Content.Text()
-		compressed := compressToolResultText(text, maxChars)
-		if compressed != text {
-			messages[idx].Content = client.NewTextContent(compressed)
+		msg := messages[idx]
+		if msg.Role == "user" && msg.Content.HasBlocks() {
+			// Native blocks: truncate tool_result content
+			messages[idx].Content = compressToolResultBlocks(msg.Content, maxChars)
+		} else {
+			// XML text: parse and truncate
+			text := msg.Content.Text()
+			compressed := compressToolResultText(text, maxChars)
+			if compressed != text {
+				messages[idx].Content = client.NewTextContent(compressed)
+			}
 		}
 	}
+}
+
+// compressToolResultBlocks truncates the text content inside tool_result blocks.
+func compressToolResultBlocks(mc client.MessageContent, maxChars int) client.MessageContent {
+	blocks := mc.Blocks()
+	var newBlocks []client.ContentBlock
+	for _, b := range blocks {
+		if b.Type != "tool_result" {
+			newBlocks = append(newBlocks, b)
+			continue
+		}
+		switch v := b.ToolContent.(type) {
+		case string:
+			if len(v) > maxChars {
+				b.ToolContent = v[:maxChars] + "... [compressed]"
+			}
+		case []client.ContentBlock:
+			var newNested []client.ContentBlock
+			for _, nb := range v {
+				if nb.Type == "text" && len(nb.Text) > maxChars {
+					nb.Text = nb.Text[:maxChars] + "... [compressed]"
+				}
+				// Strip images in compressed results
+				if nb.Type == "image" {
+					nb = client.ContentBlock{Type: "text", Text: "[image removed to save context]"}
+				}
+				newNested = append(newNested, nb)
+			}
+			b.ToolContent = newNested
+		}
+		newBlocks = append(newBlocks, b)
+	}
+	return client.NewBlockContent(newBlocks)
 }
 
 // compressToolResultText compresses individual tool call results within an assistant message.
 // Keeps tool name + args + first maxChars of result. Preserves LLM preamble text.
 func compressToolResultText(text string, maxChars int) string {
 	matches := toolResultPattern.FindAllStringSubmatchIndex(text, -1)
+	isLegacy := false
+	if len(matches) == 0 {
+		// Try legacy "I called" format for old session messages
+		matches = legacyToolResultPattern.FindAllStringSubmatchIndex(text, -1)
+		isLegacy = true
+	}
 	if len(matches) == 0 {
 		return text
 	}
@@ -749,7 +943,12 @@ func compressToolResultText(text string, maxChars int) string {
 
 		// Determine if error or result
 		fullMatch := text[loc[0]:loc[1]]
-		isError := strings.Contains(fullMatch, "\n\nError:")
+		var isError bool
+		if isLegacy {
+			isError = strings.Contains(fullMatch, "\n\nError:")
+		} else {
+			isError = strings.Contains(fullMatch, `status="error"`)
+		}
 
 		// Compress the body
 		body = strings.TrimSpace(body)
@@ -757,11 +956,7 @@ func compressToolResultText(text string, maxChars int) string {
 			body = body[:maxChars] + "... [compressed]"
 		}
 
-		if isError {
-			fmt.Fprintf(&result, "I called %s(%s).\n\nError: %s", toolName, args, body)
-		} else {
-			fmt.Fprintf(&result, "I called %s(%s).\n\nResult:\n%s", toolName, args, body)
-		}
+		result.WriteString(formatToolExec(toolName, args, "comp", body, isError))
 
 		lastEnd = loc[1]
 	}
@@ -786,8 +981,9 @@ func looksLikeUnverifiedClaim(text string) bool {
 
 // fabricatedToolCallPattern matches text that mimics tool call output format.
 // Real tool calls go through the tool_calls API array — they never appear as text.
-// Pattern: "I called tool_name(" followed later by "Result:" or "Typed successfully" etc.
-var fabricatedToolCallPattern = regexp.MustCompile(`(?s)I called \w+\(.*?\)\.\s*\n\n(?:Result|Error):\s`)
+// Matches both old "I called" format (backward compat) and new <tool_exec> XML tags.
+// XML branch requires exact attribute shape to avoid false-positives on code examples.
+var fabricatedToolCallPattern = regexp.MustCompile(`(?s)(?:I called \w+\(.*?\)\.\s*\n\n(?:Result|Error):\s|<tool_exec tool="[^"]*" call_id="[0-9a-f]+">\n<input>.*?</input>\n<output status="(?:ok|error)">.*?</output>\n</tool_exec>)`)
 
 // looksLikeFabricatedToolCalls returns true if the model's text output contains
 // what looks like fabricated tool call results. This is always a hallucination —

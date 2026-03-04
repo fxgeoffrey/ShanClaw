@@ -232,6 +232,17 @@ type CompletionRequest struct {
 	MaxTokens     int       `json:"max_tokens,omitempty"`
 	Tools         []Tool    `json:"tools,omitempty"`
 	Stream        bool      `json:"stream,omitempty"`
+
+	// Provider-specific parameters (passed through to gateway)
+	Thinking        *ThinkingConfig `json:"thinking,omitempty"`
+	ReasoningEffort string          `json:"reasoning_effort,omitempty"` // OpenAI o-models: minimal/low/medium/high
+}
+
+// ThinkingConfig for Anthropic extended thinking.
+// Sent as-is to the gateway which passes it to the Anthropic provider.
+type ThinkingConfig struct {
+	Type         string `json:"type"`                    // "enabled" or "disabled"
+	BudgetTokens int    `json:"budget_tokens,omitempty"` // thinking token budget
 }
 
 type FunctionCall struct {
@@ -254,10 +265,12 @@ func (fc *FunctionCall) ArgumentsString() string {
 }
 
 type Usage struct {
-	InputTokens  int     `json:"input_tokens"`
-	OutputTokens int     `json:"output_tokens"`
-	TotalTokens  int     `json:"total_tokens"`
-	CostUSD      float64 `json:"cost_usd"`
+	InputTokens        int     `json:"input_tokens"`
+	OutputTokens       int     `json:"output_tokens"`
+	TotalTokens        int     `json:"total_tokens"`
+	CostUSD            float64 `json:"cost_usd"`
+	CacheReadTokens    int     `json:"cache_read_tokens,omitempty"`
+	CacheCreationTokens int    `json:"cache_creation_tokens,omitempty"`
 }
 
 type CompletionResponse struct {
@@ -328,7 +341,7 @@ func NewGatewayClient(baseURL, apiKey string) *GatewayClient {
 		baseURL: baseURL,
 		apiKey:  apiKey,
 		httpClient: &http.Client{
-			Timeout: 120 * time.Second,
+			Timeout: 600 * time.Second,
 		},
 	}
 }

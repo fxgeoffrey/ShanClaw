@@ -32,9 +32,13 @@ type Config struct {
 }
 
 type AgentConfig struct {
-	MaxIterations int     `mapstructure:"max_iterations" yaml:"max_iterations"`
-	Temperature   float64 `mapstructure:"temperature" yaml:"temperature"`
-	MaxTokens     int     `mapstructure:"max_tokens" yaml:"max_tokens"`
+	MaxIterations   int     `mapstructure:"max_iterations" yaml:"max_iterations"`
+	Temperature     float64 `mapstructure:"temperature" yaml:"temperature"`
+	MaxTokens       int     `mapstructure:"max_tokens" yaml:"max_tokens"`
+	Thinking        bool    `mapstructure:"thinking" yaml:"thinking"`
+	ThinkingBudget  int     `mapstructure:"thinking_budget" yaml:"thinking_budget"`
+	ReasoningEffort string  `mapstructure:"reasoning_effort" yaml:"reasoning_effort"`
+	Model           string  `mapstructure:"model" yaml:"model"` // specific model override
 }
 
 type ToolsConfig struct {
@@ -79,7 +83,11 @@ func Load() (*Config, error) {
 	viper.SetDefault("auto_update_check", true)
 	viper.SetDefault("agent.max_iterations", 25)
 	viper.SetDefault("agent.temperature", 0)
-	viper.SetDefault("agent.max_tokens", 16000)
+	viper.SetDefault("agent.max_tokens", 32000)
+	viper.SetDefault("agent.thinking", true)
+	viper.SetDefault("agent.thinking_budget", 10000)
+	viper.SetDefault("agent.reasoning_effort", "")
+	viper.SetDefault("agent.model", "")
 	viper.SetDefault("tools.bash_timeout", 120)
 	viper.SetDefault("tools.bash_max_output", 30000)
 	viper.SetDefault("tools.result_truncation", 2000)
@@ -181,9 +189,13 @@ type overlayConfig struct {
 }
 
 type overlayAgentConfig struct {
-	MaxIterations *int     `yaml:"max_iterations"`
-	Temperature   *float64 `yaml:"temperature"`
-	MaxTokens     *int     `yaml:"max_tokens"`
+	MaxIterations   *int     `yaml:"max_iterations"`
+	Temperature     *float64 `yaml:"temperature"`
+	MaxTokens       *int     `yaml:"max_tokens"`
+	Thinking        *bool    `yaml:"thinking"`
+	ThinkingBudget  *int     `yaml:"thinking_budget"`
+	ReasoningEffort *string  `yaml:"reasoning_effort"`
+	Model           *string  `yaml:"model"`
 }
 
 type overlayToolsConfig struct {
@@ -205,6 +217,7 @@ func buildDefaultSources() map[string]ConfigSource {
 		"agent.max_iterations":     {Level: "default"},
 		"agent.temperature":        {Level: "default"},
 		"agent.max_tokens":         {Level: "default"},
+		"agent.thinking":           {Level: "default"},
 		"tools.bash_timeout":       {Level: "default"},
 		"tools.bash_max_output":    {Level: "default"},
 		"tools.result_truncation":  {Level: "default"},
@@ -238,6 +251,9 @@ func markGlobalSources(cfg *Config, file string) {
 	}
 	if viper.IsSet("agent.max_tokens") {
 		cfg.Sources["agent.max_tokens"] = src
+	}
+	if viper.IsSet("agent.thinking") {
+		cfg.Sources["agent.thinking"] = src
 	}
 	if viper.IsSet("tools.bash_timeout") {
 		cfg.Sources["tools.bash_timeout"] = src
@@ -321,6 +337,22 @@ func mergeOverlayFile(cfg *Config, file string, level string) {
 		if overlay.Agent.MaxTokens != nil {
 			cfg.Agent.MaxTokens = *overlay.Agent.MaxTokens
 			cfg.Sources["agent.max_tokens"] = src
+		}
+		if overlay.Agent.Thinking != nil {
+			cfg.Agent.Thinking = *overlay.Agent.Thinking
+			cfg.Sources["agent.thinking"] = src
+		}
+		if overlay.Agent.ThinkingBudget != nil {
+			cfg.Agent.ThinkingBudget = *overlay.Agent.ThinkingBudget
+			cfg.Sources["agent.thinking_budget"] = src
+		}
+		if overlay.Agent.ReasoningEffort != nil {
+			cfg.Agent.ReasoningEffort = *overlay.Agent.ReasoningEffort
+			cfg.Sources["agent.reasoning_effort"] = src
+		}
+		if overlay.Agent.Model != nil {
+			cfg.Agent.Model = *overlay.Agent.Model
+			cfg.Sources["agent.model"] = src
 		}
 	}
 

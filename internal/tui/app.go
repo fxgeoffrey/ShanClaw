@@ -260,6 +260,16 @@ func New(cfg *config.Config, version string) *Model {
 	hookRunner := hooks.NewHookRunner(cfg.Hooks)
 	loop := agent.NewAgentLoop(gateway, reg, cfg.ModelTier, shannonDir, cfg.Agent.MaxIterations, cfg.Tools.ResultTruncation, cfg.Tools.ArgsTruncation, &cfg.Permissions, auditor, hookRunner)
 	loop.SetMaxTokens(cfg.Agent.MaxTokens)
+	loop.SetTemperature(cfg.Agent.Temperature)
+	if cfg.Agent.Model != "" {
+		loop.SetSpecificModel(cfg.Agent.Model)
+	}
+	if cfg.Agent.Thinking {
+		loop.SetThinking(&client.ThinkingConfig{Type: "enabled", BudgetTokens: cfg.Agent.ThinkingBudget})
+	}
+	if cfg.Agent.ReasoningEffort != "" {
+		loop.SetReasoningEffort(cfg.Agent.ReasoningEffort)
+	}
 	loop.SetEnableStreaming(true) // streaming enabled but deltas are suppressed — only final text rendered
 	if mcpCtx := mcp.BuildContext(cfg.MCPServers); mcpCtx != "" {
 		loop.SetMCPContext(mcpCtx)
@@ -575,6 +585,16 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.toolRegistry = msg.registry
 			m.agentLoop = agent.NewAgentLoop(m.gateway, msg.registry, m.cfg.ModelTier, m.shannonDir, m.cfg.Agent.MaxIterations, m.cfg.Tools.ResultTruncation, m.cfg.Tools.ArgsTruncation, &m.cfg.Permissions, m.auditor, m.hookRunner)
 			m.agentLoop.SetMaxTokens(m.cfg.Agent.MaxTokens)
+			m.agentLoop.SetTemperature(m.cfg.Agent.Temperature)
+			if m.cfg.Agent.Model != "" {
+				m.agentLoop.SetSpecificModel(m.cfg.Agent.Model)
+			}
+			if m.cfg.Agent.Thinking {
+				m.agentLoop.SetThinking(&client.ThinkingConfig{Type: "enabled", BudgetTokens: m.cfg.Agent.ThinkingBudget})
+			}
+			if m.cfg.Agent.ReasoningEffort != "" {
+				m.agentLoop.SetReasoningEffort(m.cfg.Agent.ReasoningEffort)
+			}
 			m.agentLoop.SetBypassPermissions(m.bypassPermissions)
 			m.agentLoop.SetEnableStreaming(true)
 			m.serverToolErr = nil
@@ -1541,6 +1561,16 @@ func formatConfigDisplay(cfg *config.Config) string {
 	sb.WriteString(fmt.Sprintf("  max_iterations: %d %s\n", cfg.Agent.MaxIterations, srcLabel("agent.max_iterations")))
 	sb.WriteString(fmt.Sprintf("  temperature: %g %s\n", cfg.Agent.Temperature, srcLabel("agent.temperature")))
 	sb.WriteString(fmt.Sprintf("  max_tokens: %d %s\n", cfg.Agent.MaxTokens, srcLabel("agent.max_tokens")))
+	sb.WriteString(fmt.Sprintf("  thinking: %v %s\n", cfg.Agent.Thinking, srcLabel("agent.thinking")))
+	if cfg.Agent.Thinking {
+		sb.WriteString(fmt.Sprintf("  thinking_budget: %d %s\n", cfg.Agent.ThinkingBudget, srcLabel("agent.thinking_budget")))
+	}
+	if cfg.Agent.ReasoningEffort != "" {
+		sb.WriteString(fmt.Sprintf("  reasoning_effort: %s %s\n", cfg.Agent.ReasoningEffort, srcLabel("agent.reasoning_effort")))
+	}
+	if cfg.Agent.Model != "" {
+		sb.WriteString(fmt.Sprintf("  model: %s %s\n", cfg.Agent.Model, srcLabel("agent.model")))
+	}
 
 	sb.WriteString("\nTools:\n")
 	sb.WriteString(fmt.Sprintf("  bash_timeout: %d %s\n", cfg.Tools.BashTimeout, srcLabel("tools.bash_timeout")))

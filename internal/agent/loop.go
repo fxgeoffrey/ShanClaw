@@ -109,12 +109,25 @@ Do NOT use bash when a dedicated tool exists:
 - process: list/manage running processes.`
 
 type TurnUsage struct {
-	InputTokens  int
-	OutputTokens int
-	TotalTokens  int
-	CostUSD      float64
-	LLMCalls     int
-	Model        string // actual model from gateway response
+	InputTokens         int
+	OutputTokens        int
+	TotalTokens         int
+	CostUSD             float64
+	LLMCalls            int
+	Model               string // actual model from gateway response
+	CacheReadTokens     int
+	CacheCreationTokens int
+}
+
+// Add accumulates usage from a single LLM response into the turn totals.
+func (u *TurnUsage) Add(r client.Usage) {
+	u.InputTokens += r.InputTokens
+	u.OutputTokens += r.OutputTokens
+	u.TotalTokens += r.TotalTokens
+	u.CostUSD += r.CostUSD
+	u.CacheReadTokens += r.CacheReadTokens
+	u.CacheCreationTokens += r.CacheCreationTokens
+	u.LLMCalls++
 }
 
 type EventHandler interface {
@@ -142,6 +155,10 @@ type AgentLoop struct {
 	mcpContext        string
 	bypassPermissions bool
 	enableStreaming    bool
+	thinking          *client.ThinkingConfig
+	reasoningEffort   string
+	temperature       float64
+	specificModel     string
 }
 
 func NewAgentLoop(gw *client.GatewayClient, tools *ToolRegistry, modelTier string, shannonDir string, maxIter int, resultTrunc int, argsTrunc int, perms *permissions.PermissionsConfig, auditor *audit.AuditLogger, hookRunner *hooks.HookRunner) *AgentLoop {
@@ -186,6 +203,22 @@ func (a *AgentLoop) SetBypassPermissions(bypass bool) {
 
 func (a *AgentLoop) SetMaxTokens(maxTokens int) {
 	a.maxTokens = maxTokens
+}
+
+func (a *AgentLoop) SetThinking(cfg *client.ThinkingConfig) {
+	a.thinking = cfg
+}
+
+func (a *AgentLoop) SetReasoningEffort(effort string) {
+	a.reasoningEffort = effort
+}
+
+func (a *AgentLoop) SetTemperature(temp float64) {
+	a.temperature = temp
+}
+
+func (a *AgentLoop) SetSpecificModel(model string) {
+	a.specificModel = model
 }
 
 func (a *AgentLoop) SetEnableStreaming(enable bool) {
@@ -300,10 +333,14 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		var resp *client.CompletionResponse
 		var err error
 		req := client.CompletionRequest{
-			Messages:  messages,
-			ModelTier: a.modelTier,
-			MaxTokens: a.maxTokens,
-			Tools:     toolSchemas,
+			Messages:        messages,
+			ModelTier:       a.modelTier,
+			SpecificModel:   a.specificModel,
+			Temperature:     a.temperature,
+			MaxTokens:       a.maxTokens,
+			Tools:           toolSchemas,
+			Thinking:        a.thinking,
+			ReasoningEffort: a.reasoningEffort,
 		}
 		if a.enableStreaming && a.handler != nil {
 			resp, err = a.client.CompleteStream(ctx, req, func(delta client.StreamDelta) {
@@ -320,11 +357,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			return "", usage, fmt.Errorf("LLM call failed: %w", err)
 		}
 
-		usage.InputTokens += resp.Usage.InputTokens
-		usage.OutputTokens += resp.Usage.OutputTokens
-		usage.TotalTokens += resp.Usage.TotalTokens
-		usage.CostUSD += resp.Usage.CostUSD
-		usage.LLMCalls++
+		usage.Add(resp.Usage)
 		if resp.Model != "" {
 			usage.Model = resp.Model
 		}
@@ -688,11 +721,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			if err != nil {
 				return "", usage, fmt.Errorf("LLM call failed: %w", err)
 			}
-			usage.InputTokens += finalResp.Usage.InputTokens
-			usage.OutputTokens += finalResp.Usage.OutputTokens
-			usage.TotalTokens += finalResp.Usage.TotalTokens
-			usage.CostUSD += finalResp.Usage.CostUSD
-			usage.LLMCalls++
+			usage.Add(finalResp.Usage)
 			if a.handler != nil {
 				a.handler.OnText(finalResp.OutputText)
 			}
@@ -715,11 +744,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				if err != nil {
 					return "", usage, fmt.Errorf("LLM call failed: %w", err)
 				}
-				usage.InputTokens += finalResp.Usage.InputTokens
-				usage.OutputTokens += finalResp.Usage.OutputTokens
-				usage.TotalTokens += finalResp.Usage.TotalTokens
-				usage.CostUSD += finalResp.Usage.CostUSD
-				usage.LLMCalls++
+				usage.Add(finalResp.Usage)
 				if a.handler != nil {
 					a.handler.OnText(finalResp.OutputText)
 				}

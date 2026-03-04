@@ -133,6 +133,7 @@ type AgentLoop struct {
 	handler           EventHandler
 	shannonDir        string
 	maxIter           int
+	maxTokens         int
 	resultTrunc       int
 	argsTrunc         int
 	permissions       *permissions.PermissionsConfig
@@ -181,6 +182,10 @@ func (a *AgentLoop) SetMCPContext(ctx string) {
 
 func (a *AgentLoop) SetBypassPermissions(bypass bool) {
 	a.bypassPermissions = bypass
+}
+
+func (a *AgentLoop) SetMaxTokens(maxTokens int) {
+	a.maxTokens = maxTokens
 }
 
 func (a *AgentLoop) SetEnableStreaming(enable bool) {
@@ -297,6 +302,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		req := client.CompletionRequest{
 			Messages:  messages,
 			ModelTier: a.modelTier,
+			MaxTokens: a.maxTokens,
 			Tools:     toolSchemas,
 		}
 		if a.enableStreaming && a.handler != nil {
@@ -336,10 +342,10 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 
 			// If response was truncated by max_tokens, accumulate the partial text
 			// and continue the loop so the LLM can finish its output.
-			// Detection: explicit finish_reason OR heuristic (response ends abruptly
-			// mid-sentence — no terminal punctuation, and output is substantial).
+			// Detection: explicit finish_reason from gateway, or output token count
+			// matches the max_tokens limit (gateway may omit finish_reason in streaming).
 			isTruncated := isMaxTokensTruncation(resp.FinishReason) ||
-				(resp.FinishReason == "" && looksAbruptlyTruncated(resp.OutputText))
+				(a.maxTokens > 0 && resp.Usage.OutputTokens >= a.maxTokens)
 			if isTruncated && resp.OutputText != "" && continuationCount < maxContinuations {
 				continuationCount++
 				truncatedText.WriteString(resp.OutputText)
@@ -1171,29 +1177,6 @@ func isMaxTokensTruncation(reason string) bool {
 	return false
 }
 
-// looksAbruptlyTruncated detects responses that were likely truncated by max_tokens
-// when the gateway doesn't provide an explicit finish_reason. Heuristic: substantial
-// text (>500 runes) that doesn't end with terminal punctuation or a closing markdown tag.
-func looksAbruptlyTruncated(text string) bool {
-	if len([]rune(text)) < 500 {
-		return false
-	}
-	trimmed := strings.TrimRight(text, " \t\n\r")
-	if trimmed == "" {
-		return false
-	}
-	lastRune := []rune(trimmed)[len([]rune(trimmed))-1]
-	// Terminal punctuation (including CJK)
-	switch lastRune {
-	case '.', '!', '?', '。', '！', '？', '…', ')', '）', ']', '】', '"', '\u201D', '`':
-		return false
-	}
-	// Ends with a markdown closing tag
-	if strings.HasSuffix(trimmed, "```") || strings.HasSuffix(trimmed, "---") {
-		return false
-	}
-	return true
-}
 
 // extractPathArg extracts the "path" field from a tool's JSON arguments.
 func extractPathArg(argsJSON string) string {

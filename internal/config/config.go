@@ -79,7 +79,7 @@ func Load() (*Config, error) {
 	viper.SetDefault("auto_update_check", true)
 	viper.SetDefault("agent.max_iterations", 25)
 	viper.SetDefault("agent.temperature", 0)
-	viper.SetDefault("agent.max_tokens", 0)
+	viper.SetDefault("agent.max_tokens", 16000)
 	viper.SetDefault("tools.bash_timeout", 120)
 	viper.SetDefault("tools.bash_max_output", 30000)
 	viper.SetDefault("tools.result_truncation", 2000)

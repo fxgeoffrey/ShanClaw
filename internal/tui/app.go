@@ -259,6 +259,7 @@ func New(cfg *config.Config, version string) *Model {
 
 	hookRunner := hooks.NewHookRunner(cfg.Hooks)
 	loop := agent.NewAgentLoop(gateway, reg, cfg.ModelTier, shannonDir, cfg.Agent.MaxIterations, cfg.Tools.ResultTruncation, cfg.Tools.ArgsTruncation, &cfg.Permissions, auditor, hookRunner)
+	loop.SetMaxTokens(cfg.Agent.MaxTokens)
 	loop.SetEnableStreaming(true) // streaming enabled but deltas are suppressed — only final text rendered
 	if mcpCtx := mcp.BuildContext(cfg.MCPServers); mcpCtx != "" {
 		loop.SetMCPContext(mcpCtx)
@@ -573,6 +574,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.registry != nil {
 			m.toolRegistry = msg.registry
 			m.agentLoop = agent.NewAgentLoop(m.gateway, msg.registry, m.cfg.ModelTier, m.shannonDir, m.cfg.Agent.MaxIterations, m.cfg.Tools.ResultTruncation, m.cfg.Tools.ArgsTruncation, &m.cfg.Permissions, m.auditor, m.hookRunner)
+			m.agentLoop.SetMaxTokens(m.cfg.Agent.MaxTokens)
 			m.agentLoop.SetBypassPermissions(m.bypassPermissions)
 			m.agentLoop.SetEnableStreaming(true)
 			m.serverToolErr = nil

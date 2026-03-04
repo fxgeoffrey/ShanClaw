@@ -133,6 +133,7 @@ func runOneShot(cfg *config.Config, query string) error {
 
 	hookRunner := hooks.NewHookRunner(cfg.Hooks)
 	loop := agent.NewAgentLoop(gw, reg, cfg.ModelTier, shannonDir, cfg.Agent.MaxIterations, cfg.Tools.ResultTruncation, cfg.Tools.ArgsTruncation, &cfg.Permissions, auditor, hookRunner)
+	loop.SetMaxTokens(cfg.Agent.MaxTokens)
 	loop.SetHandler(&cliEventHandler{autoApprove: autoApprove})
 	loop.SetBypassPermissions(dangerouslySkipPermissions)
 	if mcpCtx := mcppkg.BuildContext(cfg.MCPServers); mcpCtx != "" {

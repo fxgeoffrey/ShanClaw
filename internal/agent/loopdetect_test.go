@@ -124,17 +124,18 @@ func TestLoopDetector_NoProgress_Nudge(t *testing.T) {
 	ld := NewLoopDetector()
 
 	// 7 calls with different args: no trigger (threshold is 8)
+	// Use bash (not in any tool family) to test pure NoProgress detection.
 	for i := range 7 {
-		ld.Record("grep", fmt.Sprintf(`{"pattern":"p%d"}`, i), false, "", "")
+		ld.Record("bash", fmt.Sprintf(`{"cmd":"cmd%d"}`, i), false, "", "")
 	}
-	action, _ := ld.Check("grep")
+	action, _ := ld.Check("bash")
 	if action != LoopContinue {
 		t.Errorf("7 calls should not trigger, got %v", action)
 	}
 
 	// 8th call: nudge
-	ld.Record("grep", `{"pattern":"p8"}`, false, "", "")
-	action, _ = ld.Check("grep")
+	ld.Record("bash", `{"cmd":"cmd8"}`, false, "", "")
+	action, _ = ld.Check("bash")
 	if action != LoopNudge {
 		t.Errorf("8 calls should trigger nudge, got %v", action)
 	}
@@ -615,5 +616,75 @@ func TestLoopDetector_SleepDetection_IgnoreNonBash(t *testing.T) {
 	action, _ := ld.Check("grep")
 	if action != LoopContinue {
 		t.Errorf("sleep in non-bash tool args should not trigger, got %v", action)
+	}
+}
+
+func TestLoopDetector_SearchEscalation_Nudge(t *testing.T) {
+	ld := NewLoopDetector()
+
+	// 2 consecutive grep calls: no trigger yet
+	ld.Record("grep", `{"pattern":"foo"}`, false, "", "")
+	ld.Record("grep", `{"pattern":"bar"}`, false, "", "")
+	action, _ := ld.Check("grep")
+	if action != LoopContinue {
+		t.Errorf("2 consecutive search calls should not trigger, got %v", action)
+	}
+
+	// 3rd consecutive search call: nudge
+	ld.Record("grep", `{"pattern":"baz"}`, false, "", "")
+	action, msg := ld.Check("grep")
+	if action != LoopNudge {
+		t.Errorf("3 consecutive search calls should nudge, got %v", action)
+	}
+	if msg == "" {
+		t.Error("nudge should have a message")
+	}
+}
+
+func TestLoopDetector_SearchEscalation_ForceStop(t *testing.T) {
+	ld := NewLoopDetector()
+
+	// 5 consecutive search calls (mixed grep/glob): force stop
+	ld.Record("grep", `{"pattern":"a"}`, false, "", "")
+	ld.Record("glob", `{"pattern":"*.go"}`, false, "", "")
+	ld.Record("grep", `{"pattern":"b"}`, false, "", "")
+	ld.Record("glob", `{"pattern":"*.ts"}`, false, "", "")
+	ld.Record("grep", `{"pattern":"c"}`, false, "", "")
+	action, _ := ld.Check("grep")
+	if action != LoopForceStop {
+		t.Errorf("5 consecutive search calls should force stop, got %v", action)
+	}
+}
+
+func TestLoopDetector_SearchEscalation_NoFalsePositive(t *testing.T) {
+	ld := NewLoopDetector()
+
+	// grep interspersed with file_edit: no consecutive run builds up
+	ld.Record("grep", `{"pattern":"foo"}`, false, "", "")
+	ld.Record("file_edit", `{"file":"main.go","old":"a","new":"b"}`, false, "", "")
+	ld.Record("grep", `{"pattern":"bar"}`, false, "", "")
+	ld.Record("file_edit", `{"file":"main.go","old":"b","new":"c"}`, false, "", "")
+	ld.Record("grep", `{"pattern":"baz"}`, false, "", "")
+
+	action, _ := ld.Check("grep")
+	if action != LoopContinue {
+		t.Errorf("grep interspersed with edits should not trigger search escalation, got %v", action)
+	}
+}
+
+func TestLoopDetector_SearchEscalation_MixedSearchTools(t *testing.T) {
+	ld := NewLoopDetector()
+
+	// grep + glob in sequence counts together as search family
+	ld.Record("grep", `{"pattern":"foo"}`, false, "", "")
+	ld.Record("glob", `{"pattern":"**/*.go"}`, false, "", "")
+	ld.Record("grep", `{"pattern":"bar"}`, false, "", "")
+
+	action, msg := ld.Check("grep")
+	if action != LoopNudge {
+		t.Errorf("3 consecutive mixed search calls should nudge, got %v", action)
+	}
+	if msg == "" {
+		t.Error("nudge should have a message")
 	}
 }

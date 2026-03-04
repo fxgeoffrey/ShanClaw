@@ -36,6 +36,8 @@ type ToolCallRecord struct {
 //   - SameToolError: same tool returns errors N+ times in window
 //   - FamilyNoProgress: web tools in the same family, counted by topic similarity
 //     (3 same-topic → nudge, 5 → stronger nudge, 7 → force stop; 7 family calls → force stop)
+//   - SearchEscalation: consecutive search-family calls without intervening non-search tools
+//     (3 consecutive → nudge, 5 consecutive → force stop)
 //   - NoProgress: same tool called M+ times regardless of args (non-GUI only)
 //   - Sleep: bash commands containing sleep (2 → nudge, 4 → force stop)
 //
@@ -285,7 +287,28 @@ func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 		}
 	}
 
-	// 4. No progress detector: same tool called too many times (skip for GUI tools)
+	// 4. Search escalation: consecutive search-family calls without other tools between them.
+	// Catches grep→grep→grep or grep→glob→grep without acting on results.
+	if family == "search" {
+		consecSearch := 0
+		for i := len(ld.history) - 1; i >= 0; i-- {
+			if ToolFamilies[ld.history[i].Name] == "search" {
+				consecSearch++
+			} else {
+				break
+			}
+		}
+		if consecSearch >= 5 {
+			return LoopForceStop, fmt.Sprintf(
+				"You have made %d consecutive search calls without acting on results. Stop searching and use what you have, or ask the user for guidance.", consecSearch)
+		}
+		if consecSearch >= 3 {
+			return LoopNudge, fmt.Sprintf(
+				"You've made %d search calls without finding useful results. Reconsider your approach — try different search terms, check if the file/pattern exists, or ask the user for guidance.", consecSearch)
+		}
+	}
+
+	// 5. No progress detector: same tool called too many times (skip for GUI tools)
 	if !ld.repeatableTools[name] {
 		count := 0
 		for _, rec := range ld.history {

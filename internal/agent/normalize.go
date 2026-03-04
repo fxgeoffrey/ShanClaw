@@ -17,6 +17,8 @@ var ToolFamilies = map[string]string{
 	"screenshot":    "gui",
 	"computer":      "gui",
 	"applescript":   "gui",
+	"grep":          "search",
+	"glob":          "search",
 }
 
 // fillerWords are common query padding that don't affect semantic meaning.

@@ -542,9 +542,8 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil && !errors.Is(msg.err, context.Canceled) {
 			m.appendOutput("Error: " + msg.err.Error())
 		}
-		// Collapsed tool summary (expandable via Ctrl+O)
+		// Tool count summary (individual tool lines already shown during execution)
 		if len(m.lastToolResults) > 0 {
-			m.appendOutput(formatToolSummary(m.lastToolResults))
 			m.toolExpandLevel = 0
 		}
 		// Don't show usage/elapsed for cancelled tasks
@@ -1311,14 +1310,19 @@ func (h *tuiEventHandler) OnToolResult(name string, args string, result agent.To
 		return
 	}
 
-	// Store for Ctrl+O expand (no longer printed inline — summary shown in agentDoneMsg)
-	h.model.lastToolResults = append(h.model.lastToolResults, toolResultEntry{
+	entry := toolResultEntry{
 		name:    toolName,
 		args:    toolArgs,
 		content: result.Content,
 		isError: result.IsError,
 		elapsed: elapsed,
-	})
+	}
+
+	// Flush compact tool indicator to scrollback immediately for progress visibility
+	h.model.sendOutput(formatCompactToolResult(toolName, toolArgs, result.IsError, result.Content, elapsed))
+
+	// Store for Ctrl+O expand
+	h.model.lastToolResults = append(h.model.lastToolResults, entry)
 	if len(h.model.lastToolResults) > 20 {
 		h.model.lastToolResults = h.model.lastToolResults[1:]
 	}

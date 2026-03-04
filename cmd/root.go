@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -176,11 +177,19 @@ func (h *cliEventHandler) OnToolResult(name string, args string, result agent.To
 	if result.IsError {
 		icon = "✗"
 	}
+	keyArg := cliToolKeyArg(name, args)
 	brief := ""
 	if elapsed > 100*time.Millisecond {
-		brief = fmt.Sprintf("  (%.1fs)", elapsed.Seconds())
+		brief = fmt.Sprintf("  %.1fs", elapsed.Seconds())
 	}
-	fmt.Printf("  ⏵ %s  %s%s\n", name, icon, brief)
+	if result.IsError {
+		errMsg := result.Content
+		if len([]rune(errMsg)) > 60 {
+			errMsg = string([]rune(errMsg)[:60]) + "..."
+		}
+		brief += "  " + errMsg
+	}
+	fmt.Printf("  ⏵ %s(%s)  %s%s\n", name, keyArg, icon, brief)
 }
 
 func (h *cliEventHandler) OnText(text string) {}
@@ -207,6 +216,49 @@ func (h *cliEventHandler) OnApprovalNeeded(tool string, args string) bool {
 		return false
 	}
 	return response == "y" || response == "Y"
+}
+
+// cliToolKeyArg extracts a short key argument for display in one-shot mode.
+func cliToolKeyArg(toolName, argsJSON string) string {
+	var m map[string]interface{}
+	if json.Unmarshal([]byte(argsJSON), &m) != nil {
+		if len([]rune(argsJSON)) > 40 {
+			return string([]rune(argsJSON)[:40]) + "..."
+		}
+		return argsJSON
+	}
+	var key string
+	switch toolName {
+	case "bash":
+		key, _ = m["command"].(string)
+	case "file_read", "file_write", "file_edit", "directory_list":
+		key, _ = m["path"].(string)
+	case "glob", "grep":
+		key, _ = m["pattern"].(string)
+	case "web_search":
+		key, _ = m["query"].(string)
+	case "screenshot":
+		key = "screen"
+	case "computer":
+		key, _ = m["action"].(string)
+	default:
+		for _, f := range []string{"query", "path", "url", "command", "name"} {
+			if v, ok := m[f].(string); ok && v != "" {
+				key = v
+				break
+			}
+		}
+	}
+	if key == "" {
+		if len([]rune(argsJSON)) > 40 {
+			return string([]rune(argsJSON)[:40]) + "..."
+		}
+		return argsJSON
+	}
+	if len([]rune(key)) > 50 {
+		return string([]rune(key)[:50]) + "..."
+	}
+	return key
 }
 
 func stdinIsTTY() bool {

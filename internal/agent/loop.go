@@ -227,6 +227,9 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 	// Loop detection + task-aware state
 	const maxNudges = 3 // force-stop after this many nudge injections
 
+	// Approval cache: tracks tool+args combos the user already approved this turn
+	approvalCache := NewApprovalCache()
+
 	var (
 		detector             = NewLoopDetector()
 		toolsUsed            = make(map[string]int)
@@ -421,7 +424,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			}
 
 			// Permission check
-			decision, wasApproved := a.checkPermissionAndApproval(fc.Name, argsStr, tool, resp.OutputText)
+			decision, wasApproved := a.checkPermissionAndApproval(fc.Name, argsStr, tool, resp.OutputText, approvalCache)
 			if decision == "deny" {
 				a.logAudit(fc.Name, argsStr, "tool call denied by permission policy", decision, false, 0)
 				recordError("tool call denied by permission policy")
@@ -625,7 +628,9 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 // to the existing RequiresApproval/SafeChecker logic if needed.
 // Returns (decision, wasApproved). decision is "allow", "deny", or "ask".
 // wasApproved is true if the tool call should proceed.
-func (a *AgentLoop) checkPermissionAndApproval(toolName, argsStr string, tool Tool, outputText string) (string, bool) {
+// The approvalCache tracks previously approved tool+args combinations within
+// the current turn so the user is not asked twice for the same call.
+func (a *AgentLoop) checkPermissionAndApproval(toolName, argsStr string, tool Tool, outputText string, cache *ApprovalCache) (string, bool) {
 	// Bypass mode: skip all permission checks including hard-blocks
 	if a.bypassPermissions {
 		return "allow", true
@@ -653,9 +658,17 @@ func (a *AgentLoop) checkPermissionAndApproval(toolName, argsStr string, tool To
 		}
 	}
 	if needsApproval {
+		// Check approval cache: if this exact tool+args was already approved
+		// in this turn, skip asking the user again.
+		if cache != nil && cache.WasApproved(toolName, argsStr) {
+			return "ask", true
+		}
 		approved := false
 		if a.handler != nil {
 			approved = a.handler.OnApprovalNeeded(toolName, argsStr)
+		}
+		if approved && cache != nil {
+			cache.RecordApproval(toolName, argsStr)
 		}
 		return "ask", approved
 	}

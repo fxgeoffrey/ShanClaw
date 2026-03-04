@@ -3,7 +3,9 @@ package agent
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"regexp"
 )
 
 // LoopAction tells the agent loop how to respond to a detection signal.
@@ -23,17 +25,19 @@ type ToolCallRecord struct {
 	ResultSig string // domain signature from results (web tools)
 	IsError   bool
 	ErrorSig  string // first 100 chars of error for grouping
+	IsSleep   bool   // bash command contains sleep
 }
 
 // LoopDetector uses a sliding window of recent tool calls to detect stuck loops.
 //
-// Five detectors (checked in order, first match wins):
+// Six detectors (checked in order, first match wins):
 //   - ConsecutiveDuplicate: back-to-back identical calls (catches web_search→web_search)
 //   - ExactDuplicate: same name+argsHash spread across window (catches read→edit→read→edit→read)
 //   - SameToolError: same tool returns errors N+ times in window
 //   - FamilyNoProgress: web tools in the same family, counted by topic similarity
 //     (3 same-topic → nudge, 5 → stronger nudge, 7 → force stop; 7 family calls → force stop)
 //   - NoProgress: same tool called M+ times regardless of args (non-GUI only)
+//   - Sleep: bash commands containing sleep (2 → nudge, 4 → force stop)
 //
 // Response escalation: threshold = nudge, 2x threshold = force stop.
 type LoopDetector struct {
@@ -99,6 +103,7 @@ func (ld *LoopDetector) Record(name, argsJSON string, isError bool, errMsg strin
 		ResultSig: resultSig,
 		IsError:   isError,
 		ErrorSig:  truncateErrSig(errMsg, 100),
+		IsSleep:   name == "bash" && isSleepCommand(argsJSON),
 	}
 	ld.history = append(ld.history, rec)
 	if len(ld.history) > ld.historySize {
@@ -139,7 +144,7 @@ func (ld *LoopDetector) Record(name, argsJSON string, isError bool, errMsg strin
 	}
 }
 
-// Check evaluates all five detectors for the named tool.
+// Check evaluates all six detectors for the named tool.
 // Returns the most severe action and an appropriate message.
 func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 	if len(ld.history) < 2 {
@@ -298,12 +303,44 @@ func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 		}
 	}
 
+	// 5. Sleep detector: bash commands containing sleep indicate polling/waiting
+	sleepCount := 0
+	for _, rec := range ld.history {
+		if rec.IsSleep {
+			sleepCount++
+		}
+	}
+	if sleepCount >= 4 {
+		return LoopForceStop, fmt.Sprintf(
+			"You have used `sleep` in bash commands %d times. Stop polling and provide your answer now.", sleepCount)
+	}
+	if sleepCount >= 2 {
+		return LoopNudge, fmt.Sprintf(
+			"You've used `sleep` in bash commands %d times. Do not poll or wait in loops — diagnose the root cause, use a check command, or ask the user.", sleepCount)
+	}
+
 	return LoopContinue, ""
 }
 
 func hashArgs(args string) string {
 	h := sha256.Sum256([]byte(args))
 	return hex.EncodeToString(h[:8])
+}
+
+// sleepPattern matches `sleep` followed by a number, as a word boundary.
+// Catches: "sleep 5", "sleep 1 && curl ...", "while true; do sleep 1; done"
+// Avoids: "sleep.log", "sleeper"
+var sleepPattern = regexp.MustCompile(`\bsleep\s+\d`)
+
+// isSleepCommand checks whether a bash tool's JSON args contain a sleep command.
+func isSleepCommand(argsJSON string) bool {
+	var args struct {
+		Command string `json:"command"`
+	}
+	if json.Unmarshal([]byte(argsJSON), &args) != nil {
+		return false
+	}
+	return sleepPattern.MatchString(args.Command)
 }
 
 func truncateErrSig(s string, maxLen int) string {

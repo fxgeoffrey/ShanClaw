@@ -554,3 +554,66 @@ func TestLoopDetector_SuccessAfterError_ResetsOnNewWork(t *testing.T) {
 		t.Errorf("recovery should have reset, but got recovery nudge: %s", msg)
 	}
 }
+
+func TestLoopDetector_SleepDetection_Nudge(t *testing.T) {
+	ld := NewLoopDetector()
+
+	// 1 sleep call: no trigger
+	ld.Record("bash", `{"command":"sleep 5"}`, false, "", "")
+	action, _ := ld.Check("bash")
+	if action != LoopContinue {
+		t.Errorf("1 sleep call should not trigger, got %v", action)
+	}
+
+	// 2nd sleep call: nudge
+	ld.Record("bash", `{"command":"sleep 5 && curl http://localhost:8080"}`, false, "", "")
+	action, msg := ld.Check("bash")
+	if action != LoopNudge {
+		t.Errorf("2 sleep calls should nudge, got %v", action)
+	}
+	if msg == "" {
+		t.Error("nudge should have a message")
+	}
+}
+
+func TestLoopDetector_SleepDetection_ForceStop(t *testing.T) {
+	ld := NewLoopDetector()
+
+	// 4 sleep calls: force stop
+	ld.Record("bash", `{"command":"sleep 5"}`, false, "", "")
+	ld.Record("bash", `{"command":"sleep 1 && echo done"}`, false, "", "")
+	ld.Record("bash", `{"command":"while true; do sleep 1; done"}`, false, "", "")
+	ld.Record("bash", `{"command":"sleep 10"}`, false, "", "")
+	action, _ := ld.Check("bash")
+	if action != LoopForceStop {
+		t.Errorf("4 sleep calls should force stop, got %v", action)
+	}
+}
+
+func TestLoopDetector_SleepDetection_NoFalsePositive(t *testing.T) {
+	ld := NewLoopDetector()
+
+	// bash commands without sleep: no trigger
+	ld.Record("bash", `{"command":"echo hello"}`, false, "", "")
+	ld.Record("bash", `{"command":"cat sleep.log"}`, false, "", "")
+	ld.Record("bash", `{"command":"grep sleeper main.go"}`, false, "", "")
+	ld.Record("bash", `{"command":"ls -la"}`, false, "", "")
+	action, _ := ld.Check("bash")
+	if action != LoopContinue {
+		t.Errorf("non-sleep bash commands should not trigger, got %v", action)
+	}
+}
+
+func TestLoopDetector_SleepDetection_IgnoreNonBash(t *testing.T) {
+	ld := NewLoopDetector()
+
+	// sleep in non-bash tool args: no trigger (different args to avoid dup detection)
+	ld.Record("file_read", `{"command":"sleep 5"}`, false, "", "")
+	ld.Record("grep", `{"command":"sleep 10"}`, false, "", "")
+	ld.Record("file_read", `{"command":"sleep 15"}`, false, "", "")
+	ld.Record("grep", `{"command":"sleep 20"}`, false, "", "")
+	action, _ := ld.Check("grep")
+	if action != LoopContinue {
+		t.Errorf("sleep in non-bash tool args should not trigger, got %v", action)
+	}
+}

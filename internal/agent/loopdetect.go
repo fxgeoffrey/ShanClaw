@@ -367,8 +367,9 @@ func isSleepCommand(argsJSON string) bool {
 }
 
 func truncateErrSig(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	r := []rune(s)
+	if len(r) <= maxLen {
 		return s
 	}
-	return s[:maxLen]
+	return string(r[:maxLen])
 }

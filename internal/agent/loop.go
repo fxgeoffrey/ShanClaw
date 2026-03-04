@@ -814,7 +814,12 @@ func truncateStr(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
-	return s[:max] + "..."
+	// Truncate by rune to avoid splitting multi-byte UTF-8 characters
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max]) + "..."
 }
 
 // generateCallID returns a 6-character random hex string used to tag tool
@@ -1021,14 +1026,16 @@ func compressToolResultBlocks(mc client.MessageContent, maxChars int) client.Mes
 		}
 		switch v := b.ToolContent.(type) {
 		case string:
-			if len(v) > maxChars {
-				b.ToolContent = v[:maxChars] + "... [compressed]"
+			if r := []rune(v); len(r) > maxChars {
+				b.ToolContent = string(r[:maxChars]) + "... [compressed]"
 			}
 		case []client.ContentBlock:
 			var newNested []client.ContentBlock
 			for _, nb := range v {
-				if nb.Type == "text" && len(nb.Text) > maxChars {
-					nb.Text = nb.Text[:maxChars] + "... [compressed]"
+				if nb.Type == "text" {
+					if r := []rune(nb.Text); len(r) > maxChars {
+						nb.Text = string(r[:maxChars]) + "... [compressed]"
+					}
 				}
 				// Strip images in compressed results
 				if nb.Type == "image" {
@@ -1069,8 +1076,8 @@ func compressToolResultText(text string, maxChars int) string {
 		body := text[loc[6]:loc[7]]
 
 		// Truncate args
-		if len(args) > 80 {
-			args = args[:80] + "..."
+		if argsRunes := []rune(args); len(argsRunes) > 80 {
+			args = string(argsRunes[:80]) + "..."
 		}
 
 		// Determine if error or result
@@ -1084,8 +1091,8 @@ func compressToolResultText(text string, maxChars int) string {
 
 		// Compress the body
 		body = strings.TrimSpace(body)
-		if len(body) > maxChars {
-			body = body[:maxChars] + "... [compressed]"
+		if bodyRunes := []rune(body); len(bodyRunes) > maxChars {
+			body = string(bodyRunes[:maxChars]) + "... [compressed]"
 		}
 
 		result.WriteString(formatToolExec(toolName, args, "comp", body, isError))

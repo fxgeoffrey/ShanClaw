@@ -4,16 +4,18 @@ Interactive AI agent CLI powered by Shannon. Local tools for computer control, M
 
 ## Installation
 
-### Option A: Homebrew (Recommended)
-
-```bash
-brew install Kocoro-lab/tap/shan
-```
-
-### Option B: npm
+### Option A: npm (Recommended)
 
 ```bash
 npm install -g @kocoro/shan
+```
+
+Auto-updates on every launch — no manual upgrading needed.
+
+### Option B: Homebrew
+
+```bash
+brew install Kocoro-lab/tap/shan
 ```
 
 ### Option C: Install Script

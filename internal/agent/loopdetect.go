@@ -51,6 +51,10 @@ type LoopDetector struct {
 	lastNonGUISuccess bool
 	lastNonGUITool    string
 	modeSwitchNudged  bool
+
+	// SuccessAfterError detector state
+	recentRecovery bool
+	recoveredTool  string
 }
 
 // GUITools are tools that indicate GUI automation tasks.
@@ -113,6 +117,26 @@ func (ld *LoopDetector) Record(name, argsJSON string, isError bool, errMsg strin
 			ld.modeSwitchNudged = false
 		}
 	}
+
+	// Track error recovery for SuccessAfterError detection
+	if !isError && !visualTools[name] {
+		// Check if this tool had a previous error in the window with different args
+		hasEarlierError := false
+		for _, rec := range ld.history[:len(ld.history)-1] { // exclude the just-recorded entry
+			if rec.Name == name && rec.IsError && rec.ArgsHash != ld.history[len(ld.history)-1].ArgsHash {
+				hasEarlierError = true
+				break
+			}
+		}
+		if hasEarlierError {
+			ld.recentRecovery = true
+			ld.recoveredTool = name
+		} else if name != ld.recoveredTool {
+			// Moving to different non-visual tool → reset recovery state
+			ld.recentRecovery = false
+			ld.recoveredTool = ""
+		}
+	}
 }
 
 // Check evaluates all five detectors for the named tool.
@@ -127,6 +151,13 @@ func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 		ld.modeSwitchNudged = true
 		return LoopNudge, fmt.Sprintf(
 			"Your previous non-GUI tool call (%s) returned a success result. Visual verification is likely unnecessary — consider whether you can summarize the result and stop.", ld.lastNonGUITool)
+	}
+
+	// 0b. Success after error: agent recovered from error but continues verifying
+	if visualTools[name] && ld.recentRecovery {
+		ld.recentRecovery = false
+		return LoopNudge, fmt.Sprintf(
+			"You recovered from the earlier %s error and the retry succeeded. The successful result is your confirmation — proceed to your final answer.", ld.recoveredTool)
 	}
 
 	// Find latest argsHash for this tool (must be called right after Record).

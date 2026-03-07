@@ -41,7 +41,7 @@ type ToolCallRecord struct {
 //   - NoProgress: same tool called M+ times regardless of args (non-GUI only)
 //   - Sleep: bash commands containing sleep (2 → nudge, 4 → force stop)
 //
-// Response escalation: threshold = nudge, 2x threshold = force stop.
+// Response escalation: threshold = nudge, threshold+1 = force stop (consecutive), 2x threshold = force stop (others).
 type LoopDetector struct {
 	history     []ToolCallRecord
 	historySize int
@@ -85,7 +85,7 @@ func NewLoopDetector() *LoopDetector {
 		exactDupThreshold:    3,
 		sameToolErrThreshold: 4,
 		noProgressThreshold:  8,
-		repeatableTools:      GUITools,
+		repeatableTools:      visualTools,
 	}
 }
 
@@ -153,8 +153,10 @@ func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 		return LoopContinue, ""
 	}
 
-	// 0. Mode switch: visual tool used right after successful data tool
-	if visualTools[name] && ld.lastNonGUISuccess && !ld.modeSwitchNudged {
+	// 0. Mode switch: visual tool used right after successful GUI-adjacent tool
+	// (applescript, browser). Only fire for GUI-adjacent tools where visual
+	// verification is likely redundant. Don't fire after file_read, bash, etc.
+	if visualTools[name] && ld.lastNonGUISuccess && !ld.modeSwitchNudged && GUITools[ld.lastNonGUITool] {
 		ld.modeSwitchNudged = true
 		return LoopNudge, fmt.Sprintf(
 			"Your previous non-GUI tool call (%s) returned a success result. Visual verification is likely unnecessary — consider whether you can summarize the result and stop.", ld.lastNonGUITool)
@@ -186,7 +188,7 @@ func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 		}
 		consecCount++
 	}
-	if consecCount >= ld.consecDupThreshold*2 {
+	if consecCount >= ld.consecDupThreshold+1 {
 		return LoopForceStop, fmt.Sprintf(
 			"You have called %s with identical arguments %d times in a row. Stop retrying and provide your answer now.", name, consecCount)
 	}
@@ -284,6 +286,28 @@ func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 		if progressCount >= 3 {
 			return LoopNudge, fmt.Sprintf(
 				"You've searched the same topic %d times with similar results. Use the results you already have or try a fundamentally different query.", progressCount)
+		}
+
+		// Fallback for families without topic/result tracking (e.g., GUI tools
+		// where normalizer can't extract topics from script/screenshot args).
+		// Count same-tool occurrences as a proxy for lack of progress.
+		// Skip repeatable tools (screenshot, computer, accessibility) — they're
+		// expected to be called many times in GUI automation workflows.
+		if progressCount == 0 && !ld.repeatableTools[name] {
+			sameToolInFamily := 0
+			for _, rec := range ld.history {
+				if rec.Name == name {
+					sameToolInFamily++
+				}
+			}
+			if sameToolInFamily >= 7 {
+				return LoopForceStop, fmt.Sprintf(
+					"You have called %s %d times without meaningful progress. Provide your answer now.", name, sameToolInFamily)
+			}
+			if sameToolInFamily >= 5 {
+				return LoopNudge, fmt.Sprintf(
+					"You've called %s %d times. Consider whether you're making progress or stuck in a loop.", name, sameToolInFamily)
+			}
 		}
 	}
 

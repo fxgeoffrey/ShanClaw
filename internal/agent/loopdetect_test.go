@@ -30,13 +30,13 @@ func TestLoopDetector_ConsecutiveDup_Nudge(t *testing.T) {
 func TestLoopDetector_ConsecutiveDup_ForceStop(t *testing.T) {
 	ld := NewLoopDetector()
 
-	// 4 consecutive identical calls: force stop (2× consecDupThreshold)
-	for range 4 {
+	// 3 consecutive identical calls: force stop (consecDupThreshold+1)
+	for range 3 {
 		ld.Record("web_search", `{"q":"test"}`, false, "", "")
 	}
 	action, _ := ld.Check("web_search")
 	if action != LoopForceStop {
-		t.Errorf("4 consecutive identical calls should force stop, got %v", action)
+		t.Errorf("3 consecutive identical calls should force stop, got %v", action)
 	}
 }
 
@@ -446,7 +446,7 @@ func TestLoopDetector_ToolModeSwitch_NudgeOnlyOnce(t *testing.T) {
 func TestLoopDetector_ToolModeSwitch_ResetsOnNewNonGUI(t *testing.T) {
 	ld := NewLoopDetector()
 
-	// Success → GUI nudge → new non-GUI success → GUI nudge again (new mode switch)
+	// Success → GUI nudge → new GUI-adjacent success → GUI nudge again (new mode switch)
 	ld.Record("applescript", `{"script":"create event"}`, false, "", "")
 	ld.Record("screenshot", `{"target":"screen"}`, false, "", "")
 	action, _ := ld.Check("screenshot")
@@ -454,12 +454,25 @@ func TestLoopDetector_ToolModeSwitch_ResetsOnNewNonGUI(t *testing.T) {
 		t.Errorf("first mode switch should nudge, got %v", action)
 	}
 
-	// New non-GUI success resets the detector
-	ld.Record("bash", `{"command":"echo hello"}`, false, "", "")
+	// New GUI-adjacent success resets the detector
+	ld.Record("browser", `{"action":"navigate","url":"http://example.com"}`, false, "", "")
 	ld.Record("screenshot", `{"target":"screen"}`, false, "", "")
 	action, _ = ld.Check("screenshot")
 	if action != LoopNudge {
 		t.Errorf("new mode switch after reset should nudge again, got %v", action)
+	}
+}
+
+func TestLoopDetector_ToolModeSwitch_NoNudgeAfterNonGUITool(t *testing.T) {
+	ld := NewLoopDetector()
+
+	// Non-GUI tool (bash, file_read, etc.) success → screenshot should NOT trigger
+	// mode switch since these aren't GUI-adjacent tools.
+	ld.Record("bash", `{"command":"echo hello"}`, false, "", "")
+	ld.Record("screenshot", `{"target":"screen"}`, false, "", "")
+	action, _ := ld.Check("screenshot")
+	if action != LoopContinue {
+		t.Errorf("screenshot after bash should not trigger mode switch, got %v", action)
 	}
 }
 

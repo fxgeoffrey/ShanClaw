@@ -39,6 +39,7 @@ const baseSystemPrompt = `You are Shannon, an AI assistant running in a CLI term
 ## Core Rules
 - Always use tools to perform actions. Never claim you did something without a tool call.
 - Be concise. Summarize tool results — do not echo raw output.
+- Never apologize for, comment on, or explain your own tool calls. Just answer the user's question with the information you have.
 - Format text responses using GitHub-flavored markdown (GFM): use headers, fenced code blocks with language tags, lists, bold/italic, and tables where appropriate.
 - Read before modifying: always use file_read before file_edit or file_write on existing files. Never propose changes to code you haven't read.
 - Avoid over-engineering. Only do what was asked. Don't create abstractions for one-time operations — three similar lines of code is better than a premature abstraction.
@@ -92,7 +93,7 @@ IMPORTANT: Do NOT use bash to run find, grep, cat, head, tail, sed, awk, or ls c
 
 ### GUI & Desktop (macOS)
 - accessibility: PRIMARY tool for GUI interaction. Use read_tree to see UI elements, then click/press/set_value by ref. More reliable than coordinate-based clicking. Always try this first for standard macOS apps (Finder, Safari, TextEdit, Calendar, Reminders, System Settings, etc.). Pattern: applescript to activate the app first → accessibility read_tree → interact by ref. If read_tree returns "not found", the app isn't running — activate it with applescript first.
-- applescript: open/activate apps, window management, and operations with no AX equivalent (create calendar events, empty trash, get app-specific data). Always use applescript to activate/launch an app before using accessibility on it.
+- applescript: open/activate apps, window management, and operations with no AX equivalent (create calendar events, empty trash, get app-specific data). Always use applescript to activate/launch an app before using accessibility on it. NOTE: events on the "Scheduled Reminders" calendar are owned by Reminders.app — use "tell application Reminders" to modify them, not "tell application Calendar".
 - screenshot: visual fallback when accessibility tree is insufficient (custom-drawn UIs, games, canvas-rendered content, apps with poor AX support). Do NOT use screenshot to verify non-GUI operations that returned success.
 - computer: coordinate-based mouse/keyboard (click, type, hotkey, move). Use only when accessibility refs don't work or for drag operations. Do NOT use computer to click around UIs just to visually confirm data operations.
 - notify: macOS notifications.
@@ -360,6 +361,14 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		summaryFailures      int    // consecutive summary failures; backs off after 3
 		cloudNudgeFired     bool
 		cloudDelegateClaimed bool // set on first cloud_delegate attempt; blocks all subsequent calls
+
+		// Cross-iteration dedup: cache successful results from previous iteration
+		// to prevent re-execution of identical tool calls across consecutive iterations.
+		prevIterResults = make(map[string]ToolResult)
+
+		// Denied-call blocking: track tool+args denied by the user this turn
+		// to prevent re-prompting for the same call.
+		deniedCalls = make(map[string]bool)
 	)
 
 	for i := 0; ; i++ {
@@ -563,9 +572,6 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			return fullText, usage, nil
 		}
 
-		// Reset hallucination counter when the model does use tools
-		hallucinationNudges = 0
-
 		// Model made tool calls
 		afterCheckpoint = false
 
@@ -637,6 +643,36 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			}
 			seenCalls[dedupKey] = true
 
+			// Denied-call blocking: auto-reject if this exact call was denied earlier
+			if deniedCalls[dedupKey] {
+				callMeta[idx].resolved = true
+				execResults[idx] = toolExecResult{
+					result: ToolResult{Content: "tool call blocked: previously denied this turn. Use a different approach.", IsError: true},
+				}
+				if a.handler != nil {
+					a.handler.OnToolCall(fc.Name, argsStr)
+					a.handler.OnToolResult(fc.Name, argsStr, execResults[idx].result, 0)
+				}
+				continue
+			}
+
+			// Cross-iteration dedup: return cached result if identical call succeeded in previous iteration
+			if cached, ok := prevIterResults[dedupKey]; ok {
+				callMeta[idx].resolved = true
+				execResults[idx] = toolExecResult{
+					result: ToolResult{
+						Content: "Already called with identical arguments. Previous result:\n" + cached.Content,
+						IsError: cached.IsError,
+						Images:  cached.Images,
+					},
+				}
+				if a.handler != nil {
+					a.handler.OnToolCall(fc.Name, argsStr)
+					a.handler.OnToolResult(fc.Name, argsStr, execResults[idx].result, 0)
+				}
+				continue
+			}
+
 			// cloud_delegate: once-per-turn lock. The first call claims the lock;
 			// any subsequent call (same response or later iteration) is blocked.
 			if fc.Name == "cloud_delegate" {
@@ -664,6 +700,9 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				execResults[idx] = toolExecResult{
 					result: ToolResult{Content: "unknown tool: " + fc.Name, IsError: true},
 				}
+				if a.handler != nil {
+					a.handler.OnToolResult(fc.Name, argsStr, execResults[idx].result, 0)
+				}
 				continue
 			}
 
@@ -688,6 +727,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				execResults[idx] = toolExecResult{
 					result: ToolResult{Content: "tool call denied by user", IsError: true},
 				}
+				deniedCalls[dedupKey] = true
 				if a.handler != nil {
 					a.handler.OnToolResult(fc.Name, argsStr, ToolResult{Content: "denied by user", IsError: true}, 0)
 				}
@@ -705,6 +745,9 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 					callMeta[idx].resolved = true
 					execResults[idx] = toolExecResult{
 						result: ToolResult{Content: "tool call denied by hook: " + hookReason, IsError: true},
+					}
+					if a.handler != nil {
+						a.handler.OnToolResult(fc.Name, argsStr, execResults[idx].result, 0)
 					}
 					continue
 				}
@@ -822,6 +865,11 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				}
 			}
 
+			// Reset cloud_delegate lock on failure so it can be retried
+			if fc.Name == "cloud_delegate" && result.IsError {
+				cloudDelegateClaimed = false
+			}
+
 			// Record in sliding-window loop detector
 			errMsg := ""
 			if result.IsError {
@@ -839,9 +887,8 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				worstAction = action
 				worstMsg = msg
 			}
-			if action == LoopForceStop {
-				break // stop processing remaining tool results
-			}
+			// No break on ForceStop — continue processing remaining results into
+			// context so the final LLM call has complete information.
 		}
 
 		// Append tool result messages to context
@@ -905,6 +952,20 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				Role:    "user",
 				Content: client.NewTextContent(worstMsg),
 			})
+		}
+
+		// Accumulate cross-iteration result cache from this iteration's successful executions.
+		// Sanitize before caching to avoid re-injecting raw base64 blobs into context.
+		for _, ac := range approved {
+			r := execResults[ac.index].result
+			if !r.IsError {
+				key := ac.fc.Name + "\x00" + normalizeJSON(ac.fc.Arguments)
+				cached := ToolResult{Content: r.Content, IsError: false, Images: r.Images}
+				if len(cached.Images) == 0 {
+					cached.Content = sanitizeResult(cached.Content)
+				}
+				prevIterResults[key] = cached
+			}
 		}
 
 		// One-shot cloud delegation nudge when struggling with web tasks

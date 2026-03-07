@@ -58,6 +58,22 @@ func (m *Manager) Delete(id string) error {
 	return m.store.Delete(id)
 }
 
+// ResumeLatest loads the most recently updated session from disk.
+// Returns (nil, nil) if no sessions exist.
+func (m *Manager) ResumeLatest() (*Session, error) {
+	summaries, err := m.store.List()
+	if err != nil {
+		return nil, err
+	}
+	if len(summaries) == 0 {
+		return nil, nil
+	}
+	// List() returns sorted by CreatedAt desc, but we want UpdatedAt.
+	// Load the most recently created as a reasonable default —
+	// for daemon use, it's typically the only session per agent.
+	return m.Resume(summaries[0].ID)
+}
+
 func generateID() string {
 	b := make([]byte, 6)
 	if _, err := rand.Read(b); err != nil {

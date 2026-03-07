@@ -56,7 +56,7 @@ var daemonStartCmd = &cobra.Command{
 		}
 		hookRunner := hooks.NewHookRunner(cfg.Hooks)
 
-		sessionCache := daemon.NewSessionCache()
+		sessionCache := daemon.NewSessionCache(shanDir)
 
 		wsEndpoint := strings.Replace(cfg.Endpoint, "https://", "wss://", 1)
 		wsEndpoint = strings.Replace(wsEndpoint, "http://", "ws://", 1)
@@ -92,8 +92,9 @@ var daemonStartCmd = &cobra.Command{
 				prompt = msg.Text
 			}
 
-			sessKey := daemon.SessionKey(agentName, msg.Channel, msg.ThreadID)
-			history := sessionCache.Get(sessKey)
+			sessMgr := sessionCache.GetOrCreate(agentName)
+			sess := sessMgr.Current()
+			history := sess.Messages
 
 			loop := agent.NewAgentLoop(gw, reg, cfg.ModelTier, shanDir, cfg.Agent.MaxIterations,
 				cfg.Tools.ResultTruncation, cfg.Tools.ArgsTruncation, &cfg.Permissions, auditor, hookRunner)
@@ -124,7 +125,7 @@ var daemonStartCmd = &cobra.Command{
 
 			result, usage, runErr := loop.Run(ctx, prompt, history)
 			if runErr != nil {
-				log.Printf("daemon: agent error for %s: %v", sessKey, runErr)
+				log.Printf("daemon: agent error for %s: %v", agentName, runErr)
 				// Send error reply so the channel sender knows it failed
 				wsClient.SendReply(daemon.OutgoingReply{
 					Channel:  msg.Channel,
@@ -134,12 +135,15 @@ var daemonStartCmd = &cobra.Command{
 				return
 			}
 
-			sessionCache.Append(sessKey,
+			sess.Messages = append(sess.Messages,
 				client.Message{Role: "user", Content: client.NewTextContent(prompt)},
 				client.Message{Role: "assistant", Content: client.NewTextContent(result)},
 			)
+			if err := sessMgr.Save(); err != nil {
+				log.Printf("daemon: failed to save session: %v", err)
+			}
 
-			log.Printf("daemon: reply to %s (%d tokens, $%.4f)", sessKey, usage.TotalTokens, usage.CostUSD)
+			log.Printf("daemon: reply to %s (%d tokens, $%.4f)", agentName, usage.TotalTokens, usage.CostUSD)
 
 			if err := wsClient.SendReply(daemon.OutgoingReply{
 				Channel:  msg.Channel,

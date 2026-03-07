@@ -22,6 +22,7 @@ import (
 	"github.com/Kocoro-lab/shan/internal/config"
 	"github.com/Kocoro-lab/shan/internal/hooks"
 	mcppkg "github.com/Kocoro-lab/shan/internal/mcp"
+	"github.com/Kocoro-lab/shan/internal/session"
 	"github.com/Kocoro-lab/shan/internal/tools"
 	"github.com/Kocoro-lab/shan/internal/tui"
 	"github.com/Kocoro-lab/shan/internal/update"
@@ -171,10 +172,31 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 	if mcpCtx := mcppkg.BuildContext(cfg.MCPServers); mcpCtx != "" {
 		loop.SetMCPContext(mcpCtx)
 	}
+	// Create session for persistence
+	var sessDir string
+	if agentName != "" {
+		sessDir = filepath.Join(shannonDir, "agents", agentName, "sessions")
+	} else {
+		sessDir = filepath.Join(shannonDir, "sessions")
+	}
+	sessMgr := session.NewManager(sessDir)
+	sess := sessMgr.NewSession()
+	sess.Title = sessionTitleFromQuery(query)
+
 	result, usage, err := loop.Run(context.Background(), query, nil)
 	if err != nil && !errors.Is(err, agent.ErrMaxIterReached) {
 		return err
 	}
+
+	// Persist session to disk
+	sess.Messages = append(sess.Messages,
+		client.Message{Role: "user", Content: client.NewTextContent(query)},
+		client.Message{Role: "assistant", Content: client.NewTextContent(result)},
+	)
+	if saveErr := sessMgr.Save(); saveErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to save session: %v\n", saveErr)
+	}
+
 	fmt.Print(renderMarkdown(result))
 	usageLine := fmt.Sprintf("\n[tokens: %d | cost: $%.4f", usage.TotalTokens, usage.CostUSD)
 	if usage.Model != "" {
@@ -288,6 +310,20 @@ func stdinIsTTY() bool {
 		return false
 	}
 	return info.Mode()&os.ModeCharDevice != 0
+}
+
+func sessionTitleFromQuery(query string) string {
+	if idx := strings.IndexAny(query, "\n\r"); idx >= 0 {
+		query = query[:idx]
+	}
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return "New session"
+	}
+	if len(query) <= 50 {
+		return query
+	}
+	return query[:50] + "..."
 }
 
 func renderMarkdown(text string) string {

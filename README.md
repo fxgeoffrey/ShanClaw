@@ -777,9 +777,9 @@ Names must match `^[a-z0-9][a-z0-9_-]{0,63}$` (lowercase alphanumeric, hyphens, 
 
 Each agent gets its own session directory at `~/.shannon/agents/<name>/sessions/`, keeping conversation histories separate.
 
-## Daemon (Channel Messaging)
+## Daemon Mode
 
-The daemon connects to Shannon Cloud via WebSocket to receive messages from Slack, Telegram, LINE, Discord, and other channels. Messages are processed locally using shan's agent loop and tools, then replies are sent back through Shannon Cloud.
+The daemon serves two roles: it connects to Shannon Cloud via WebSocket to receive channel messages (Slack, LINE, etc.), and it exposes a local HTTP API on port 7533 for native apps and scripts.
 
 ```bash
 shan daemon start           # foreground (logs to stdout)
@@ -790,22 +790,66 @@ shan daemon status          # show connection status
 ### Architecture
 
 ```
-Shannon Cloud                          shan daemon (local macOS)
-┌─────────────────┐                   ┌──────────────────────┐
-│ Slack webhook    │                   │                      │
-│ Telegram webhook │──→ WebSocket ──→  │ Message router       │
-│ LINE webhook     │    (persistent)   │   ├─ @ops-bot → agent│
-│ Discord webhook  │                   │   ├─ @reviewer→ agent│
-│                  │◀── reply ───────  │   └─ default → agent │
-└─────────────────┘                   └──────────────────────┘
+Slack/LINE ──webhook──▶ Shannon Cloud ──WebSocket──▶ shan daemon (macOS)
+                                                      ├─ Agent loop + local tools
+                                                      └─ HTTP :7533 (local API)
+                                                           ▲
+                                              curl / native apps / scripts
 ```
 
-- **Channel registration and auth** are managed in Shannon Cloud (not in shan)
-- **All agents** can see all channels — routing is by `@mention`, not config
-- **Session continuity** per thread — conversation history maintained across messages
+### Channel Messaging (via Shannon Cloud)
+
+- **Envelope protocol** — typed messages with claim/ack handshake (broadcast + first-to-claim)
+- **Progress heartbeats** — 15s interval extends claim TTL during long agent runs
+- **Channel routing** — agent name set per channel in cloud config, fallback to `@mention` parsing
+- **Session continuity** — conversation history maintained per agent across messages
 - **Up to 5 concurrent agents** — bounded worker pool prevents resource exhaustion
 - **Auto-reconnect** with exponential backoff on connection loss
+- **Graceful disconnect** — sends disconnect message on shutdown
 - **Schedule mutation tools** (`schedule_create/update/remove`) are denied by default in daemon mode
+
+### Local HTTP API (port 7533)
+
+The daemon exposes a localhost-only HTTP server for native app integration and scripting.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Liveness check → `{"status":"ok"}` |
+| `/status` | GET | Connection state, active agent, uptime |
+| `/agents` | GET | List named agents from `~/.shannon/agents/` |
+| `/sessions` | GET | List sessions, optional `?agent=` filter |
+| `/message` | POST | Send a message to an agent, get reply |
+
+**Send a message:**
+
+```bash
+# Synchronous (blocks until agent completes)
+curl -X POST http://localhost:7533/message \
+  -d '{"text":"what is 2+2?"}' \
+  -H "Content-Type: application/json"
+
+# With a named agent and session resumption
+curl -X POST http://localhost:7533/message \
+  -d '{"text":"check disk usage","agent":"ops-bot","session_id":"2026-03-08-abc123"}' \
+  -H "Content-Type: application/json"
+
+# SSE streaming (tool progress + text deltas)
+curl -X POST http://localhost:7533/message \
+  -d '{"text":"analyze this codebase"}' \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream"
+```
+
+**Response (synchronous):**
+
+```json
+{
+  "reply": "2+2 equals 4.",
+  "session_id": "2026-03-08-a1b2c3d4e5f6",
+  "agent": "",
+  "usage": {"input_tokens": 150, "output_tokens": 20, "total_tokens": 170, "cost_usd": 0.002}
+}
+```
 
 ## Scheduled Tasks
 
@@ -917,7 +961,7 @@ go vet ./...                 # lint
 - **Vision**: Screenshots are captured, resized (1200px max), and sent as base64 image content blocks to the LLM. The computer tool uses Anthropic's native `computer_20251124` schema with coordinate scaling for retina displays. Vision models may blend what they see with training knowledge — verify critical details.
 - **Streaming**: One-shot mode does not stream responses; it waits for the full LLM response before displaying.
 - **Windows/Linux**: Local tools (clipboard, notifications, AppleScript, screenshot, computer) and scheduled tasks (launchd) are macOS-only.
-- **Daemon**: Requires Shannon Cloud WebSocket endpoint (`wss://.../v1/ws/messages`) — not yet available.
+- **Daemon**: Background mode (`shan daemon start -d`) not yet implemented — runs in foreground only.
 - **Scheduled tasks**: launchd-only (macOS). Complex cron expressions (ranges, steps) fall back to `StartInterval` instead of `StartCalendarInterval`.
 
 ## License

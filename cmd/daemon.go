@@ -115,6 +115,7 @@ var daemonStartCmd = &cobra.Command{
 		})
 
 		localServer := daemon.NewServer(7533, wsClient, deps, Version)
+		localServer.SetCancelFunc(cancel)
 		serverErrCh := make(chan error, 1)
 		go func() {
 			serverErrCh <- localServer.Start(ctx)

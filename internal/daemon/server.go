@@ -24,6 +24,7 @@ type Server struct {
 	server   *http.Server
 	listener net.Listener
 	version  string
+	cancel   context.CancelFunc
 }
 
 func NewServer(port int, client *Client, deps *ServerDeps, version string) *Server {
@@ -37,6 +38,11 @@ func (s *Server) Port() int {
 	return s.port
 }
 
+// SetCancelFunc sets a cancel function that handleShutdown will call to stop the daemon.
+func (s *Server) SetCancelFunc(cancel context.CancelFunc) {
+	s.cancel = cancel
+}
+
 func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
@@ -44,6 +50,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("GET /agents", s.handleAgents)
 	mux.HandleFunc("GET /sessions", s.handleSessions)
 	mux.HandleFunc("POST /message", s.handleMessage)
+	mux.HandleFunc("POST /shutdown", s.handleShutdown)
 
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", s.port))
 	if err != nil {
@@ -63,6 +70,15 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "shutting_down"})
+	if s.cancel != nil {
+		log.Println("daemon: shutdown requested via /shutdown")
+		go s.cancel()
+	}
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

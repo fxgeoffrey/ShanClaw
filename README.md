@@ -57,7 +57,7 @@ shan auto-updates when you launch it. You can also update explicitly:
 ```bash
 shan update              # manual update
 brew upgrade shan        # if installed via Homebrew
-npm update -g shan-cli   # if installed via npm
+npm update -g @kocoro/shan  # if installed via npm
 ```
 
 ## Setup
@@ -244,7 +244,8 @@ Type `/` in the TUI to see the interactive command menu:
 | `/session resume <n>` | Resume session by number or ID |
 | `/clear` | Clear screen |
 | `/update` | Self-update from GitHub releases |
-| `/quit` | Exit |
+| `/setup` | Reconfigure endpoint & API key |
+| `/quit` | Exit (alias: `/exit`) |
 | `/<custom>` | Custom commands from `.shannon/commands/*.md` |
 
 ### Subcommands
@@ -334,7 +335,7 @@ Tool call from LLM
 
 1. **Hard-block** — built-in constants (rm -rf /, mkfs, dd, curl|sh, etc.), cannot be overridden
 2. **Denied commands** — `permissions.denied_commands` in config
-3. **Shell AST parsing** — compound commands split on `&&`, `||`, `;`, `|`, each sub-command checked independently
+3. **Compound command splitting** — commands split on `&&`, `||`, `;`, `|`, each sub-command checked independently
 4. **Allowed commands** — `permissions.allowed_commands` in config (glob patterns)
 5. **User approval** — interactive prompt or `-y` flag
 
@@ -375,7 +376,7 @@ Hook protocol:
 - Receives JSON on stdin with tool name, arguments, result
 - Exit 0 = allow, exit 2 = deny (PreToolUse only)
 - 10s timeout, 10KB output limit
-- Hook commands must use absolute paths or `./` prefix (bare command names are rejected for security)
+- Hook commands must use `./` prefix (relative) or absolute paths under `~/.shannon/` (bare command names and absolute paths outside `~/.shannon/` are rejected for security)
 
 ## MCP Server
 
@@ -621,7 +622,7 @@ Merge behavior: scalars override, lists merge + dedup, structs field-level merge
 # Connection
 endpoint: http://localhost:8080    # Shannon Gateway URL
 api_key: ""                        # Gateway API key
-model_tier: medium                 # small, medium, large
+model_tier: medium                 # small, medium, large (default: medium)
 
 # Permissions
 permissions:
@@ -650,13 +651,23 @@ mcp_servers:
 
 # Agent behavior
 agent:
-  max_iterations: 25               # max tool calls per turn
+  max_iterations: 25               # max tool calls per turn (default: 25)
+  temperature: 0                   # LLM temperature (default: 0)
+  max_tokens: 32000                # max output tokens (default: 32000)
+  thinking: true                   # enable extended thinking (default: true)
+  thinking_mode: adaptive          # "adaptive" or "enabled" (default: adaptive)
+  thinking_budget: 10000           # thinking token budget (default: 10000)
+  model: ""                        # specific model override (empty = use model_tier)
+  context_window: 128000           # context window in tokens (default: 128000)
 
 # Tool settings
 tools:
-  bash_timeout: 120                # seconds
-  result_truncation: 2000          # max chars in tool result
-  args_truncation: 200             # max chars in displayed args
+  bash_timeout: 120                # seconds (default: 120)
+  bash_max_output: 30000           # max chars in bash output (default: 30000)
+  result_truncation: 2000          # max chars in tool result (default: 2000)
+  args_truncation: 200             # max chars in displayed args (default: 200)
+  server_tool_timeout: 5           # gateway tool timeout in seconds (default: 5)
+  grep_max_results: 100            # max grep results (default: 100)
 
 # Hooks
 hooks:
@@ -814,11 +825,12 @@ The daemon exposes a localhost-only HTTP server for native app integration and s
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/health` | GET | Liveness check → `{"status":"ok"}` |
-| `/status` | GET | Connection state, active agent, uptime |
+| `/health` | GET | Liveness check → `{"status":"ok","version":"..."}` |
+| `/status` | GET | Connection state, active agent, uptime, version |
 | `/agents` | GET | List named agents from `~/.shannon/agents/` |
 | `/sessions` | GET | List sessions, optional `?agent=` filter |
 | `/message` | POST | Send a message to an agent, get reply |
+| `/shutdown` | POST | Graceful daemon shutdown (used by `shan daemon stop`) |
 
 **Send a message:**
 

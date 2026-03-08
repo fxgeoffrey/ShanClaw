@@ -92,7 +92,7 @@ func Load() (*Config, error) {
 
 	viper.SetDefault("endpoint", "https://api-dev.shannon.run")
 	viper.SetDefault("api_key", "")
-	viper.SetDefault("model_tier", "small")
+	viper.SetDefault("model_tier", "medium")
 	viper.SetDefault("auto_update_check", true)
 	viper.SetDefault("agent.max_iterations", 25)
 	viper.SetDefault("agent.temperature", 0)

@@ -35,10 +35,11 @@ var dangerouslySkipPermissions = false
 var agentName string
 
 var rootCmd = &cobra.Command{
-	Use:   "shan [query]",
-	Short: "Shannon AI agent CLI",
-	Long:  "Interactive AI agent powered by Shannon. Local file/bash tools + remote research/swarm orchestration.",
-	Args:  cobra.ArbitraryArgs,
+	Use:     "shan [query]",
+	Short:   "Shannon AI agent CLI",
+	Long:    "Interactive AI agent powered by Shannon. Local file/bash tools + remote research/swarm orchestration.",
+	Version: Version,
+	Args:    cobra.ArbitraryArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := config.Load()
 		if err != nil {

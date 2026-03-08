@@ -32,18 +32,6 @@ changelog:
       - "^docs:"
       - "^test:"
 
-brews:
-  - name: shan
-    repository:
-      owner: Kocoro-lab
-      name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    homepage: "https://github.com/Kocoro-lab/shan"
-    description: "AI-powered CLI agent with local tools, permissions, and session management"
-    install: |
-      bin.install "shan"
-      (lib/"shan"/"scripts").install "scripts/ax_helper.swift"
-
 release:
   github:
     owner: Kocoro-lab

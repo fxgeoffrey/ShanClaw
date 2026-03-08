@@ -12,13 +12,7 @@ npm install -g @kocoro/shan
 
 Auto-updates on every launch — no manual upgrading needed.
 
-### Option B: Homebrew
-
-```bash
-brew install Kocoro-lab/tap/shan
-```
-
-### Option C: Install Script
+### Option B: Install Script
 
 Downloads the latest release binary to `/usr/local/bin`:
 
@@ -26,7 +20,7 @@ Downloads the latest release binary to `/usr/local/bin`:
 curl -fsSL https://raw.githubusercontent.com/Kocoro-lab/shan/main/install.sh | sh
 ```
 
-### Option D: Build from Source
+### Option C: Build from Source
 
 Requires **Go 1.25+**:
 
@@ -56,8 +50,7 @@ shan auto-updates when you launch it. You can also update explicitly:
 
 ```bash
 shan update              # manual update
-brew upgrade shan        # if installed via Homebrew
-npm update -g @kocoro/shan  # if installed via npm
+npm update -g @kocoro/shan  # if installed via npm (re-runs postinstall to fetch latest)
 ```
 
 ## Setup

@@ -114,13 +114,9 @@ func AutoUpdate(currentVersion, shannonDir string) string {
 
 	cache.Record(release.Version())
 
-	// Homebrew detection — don't self-replace, just notify
 	exe, err := selfupdate.ExecutablePath()
 	if err != nil {
 		return fmt.Sprintf("Update available: v%s — run \"shan update\" or download from GitHub", release.Version())
-	}
-	if IsHomebrewPath(exe) {
-		return fmt.Sprintf("Update available: v%s — run \"brew upgrade shan\"", release.Version())
 	}
 
 	// Auto-download and replace

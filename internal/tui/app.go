@@ -27,6 +27,7 @@ import (
 	"github.com/Kocoro-lab/shan/internal/hooks"
 	"github.com/Kocoro-lab/shan/internal/instructions"
 	"github.com/Kocoro-lab/shan/internal/session"
+	"github.com/Kocoro-lab/shan/internal/skills"
 	"github.com/Kocoro-lab/shan/internal/tools"
 	"github.com/Kocoro-lab/shan/internal/update"
 )
@@ -283,11 +284,34 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 
 	// Load custom commands and add to slash command list
 	customCmds, _ := instructions.LoadCustomCommands(shannonDir, ".")
-	for name, _ := range customCmds {
+	if customCmds == nil {
+		customCmds = make(map[string]string)
+	}
+	for name := range customCmds {
 		allSlashCommands = append(allSlashCommands, slashCmd{
 			cmd:  "/" + name,
 			desc: "Custom command",
 		})
+	}
+
+	// Merge agent-scoped commands and prompt-type skills
+	if agentOverride != nil {
+		for name, content := range agentOverride.Commands {
+			customCmds[name] = content
+			allSlashCommands = append(allSlashCommands, slashCmd{
+				cmd:  "/" + name,
+				desc: "Agent command",
+			})
+		}
+		for _, s := range agentOverride.Skills {
+			if s.Type == skills.SkillTypePrompt && s.Prompt != "" {
+				customCmds[s.Name] = s.Prompt
+				allSlashCommands = append(allSlashCommands, slashCmd{
+					cmd:  "/" + s.Name,
+					desc: s.Description,
+				})
+			}
+		}
 	}
 
 	m := &Model{

@@ -56,8 +56,10 @@ func NewToolRegistry() *ToolRegistry {
 
 func (r *ToolRegistry) Register(t Tool) {
 	name := t.Info().Name
+	if _, exists := r.tools[name]; !exists {
+		r.order = append(r.order, name)
+	}
 	r.tools[name] = t
-	r.order = append(r.order, name)
 }
 
 func (r *ToolRegistry) Clone() *ToolRegistry {
@@ -81,6 +83,59 @@ func (r *ToolRegistry) All() []Tool {
 		tools = append(tools, r.tools[name])
 	}
 	return tools
+}
+
+// Remove removes a tool from the registry by name.
+func (r *ToolRegistry) Remove(name string) {
+	if _, ok := r.tools[name]; !ok {
+		return
+	}
+	delete(r.tools, name)
+	for i, n := range r.order {
+		if n == name {
+			r.order = append(r.order[:i], r.order[i+1:]...)
+			return
+		}
+	}
+}
+
+// Names returns the ordered list of tool names.
+func (r *ToolRegistry) Names() []string {
+	out := make([]string, len(r.order))
+	copy(out, r.order)
+	return out
+}
+
+// Len returns the number of registered tools.
+func (r *ToolRegistry) Len() int {
+	return len(r.tools)
+}
+
+// FilterByAllow returns a new registry containing only the named tools.
+// Tools not found are silently skipped.
+func (r *ToolRegistry) FilterByAllow(allow []string) *ToolRegistry {
+	filtered := NewToolRegistry()
+	for _, name := range allow {
+		if t, ok := r.tools[name]; ok {
+			filtered.Register(t)
+		}
+	}
+	return filtered
+}
+
+// FilterByDeny returns a new registry with the named tools removed.
+func (r *ToolRegistry) FilterByDeny(deny []string) *ToolRegistry {
+	denySet := make(map[string]struct{}, len(deny))
+	for _, name := range deny {
+		denySet[name] = struct{}{}
+	}
+	filtered := NewToolRegistry()
+	for _, name := range r.order {
+		if _, blocked := denySet[name]; !blocked {
+			filtered.Register(r.tools[name])
+		}
+	}
+	return filtered
 }
 
 func (r *ToolRegistry) Schemas() []client.Tool {

@@ -125,7 +125,7 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 	}
 
 	gw := client.NewGatewayClient(cfg.Endpoint, cfg.APIKey)
-	reg, cleanup, serverErr := tools.RegisterAll(gw, cfg)
+	reg, cleanup, serverErr := tools.RegisterAll(gw, cfg, agentOverride)
 	defer cleanup()
 	if serverErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: %v\n", serverErr)
@@ -154,6 +154,9 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 		defer auditor.Close()
 	}
 
+	// Resolve scoped MCP context
+	scopedMCPCtx := tools.ResolveMCPContext(cfg, agentOverride)
+
 	hookRunner := hooks.NewHookRunner(cfg.Hooks)
 	loop := agent.NewAgentLoop(gw, reg, cfg.ModelTier, shannonDir, cfg.Agent.MaxIterations, cfg.Tools.ResultTruncation, cfg.Tools.ArgsTruncation, &cfg.Permissions, auditor, hookRunner)
 	loop.SetMaxTokens(cfg.Agent.MaxTokens)
@@ -172,13 +175,31 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 	if cfg.Agent.ReasoningEffort != "" {
 		loop.SetReasoningEffort(cfg.Agent.ReasoningEffort)
 	}
+	// Per-agent model config overrides
+	if agentOverride != nil && agentOverride.Config != nil && agentOverride.Config.Agent != nil {
+		ac := agentOverride.Config.Agent
+		if ac.Model != nil {
+			loop.SetSpecificModel(*ac.Model)
+		}
+		if ac.MaxIterations != nil {
+			loop.SetMaxIterations(*ac.MaxIterations)
+		}
+		if ac.Temperature != nil {
+			loop.SetTemperature(*ac.Temperature)
+		}
+		if ac.MaxTokens != nil {
+			loop.SetMaxTokens(*ac.MaxTokens)
+		}
+		if ac.ContextWindow != nil {
+			loop.SetContextWindow(*ac.ContextWindow)
+		}
+	}
 	loop.SetHandler(&cliEventHandler{autoApprove: autoApprove})
 	loop.SetBypassPermissions(dangerouslySkipPermissions)
 	if agentOverride != nil {
-		loop.SetAgentOverride(agentOverride.Prompt, agentOverride.Memory)
-	}
-	if mcpCtx := mcppkg.BuildContext(cfg.MCPServers); mcpCtx != "" {
-		loop.SetMCPContext(mcpCtx)
+		loop.SwitchAgent(agentOverride.Prompt, agentOverride.Memory, nil, scopedMCPCtx)
+	} else if scopedMCPCtx != "" {
+		loop.SetMCPContext(scopedMCPCtx)
 	}
 	// Create session for persistence
 	var sessDir string

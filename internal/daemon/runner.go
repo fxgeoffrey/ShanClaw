@@ -12,7 +12,6 @@ import (
 	"github.com/Kocoro-lab/shan/internal/client"
 	"github.com/Kocoro-lab/shan/internal/config"
 	"github.com/Kocoro-lab/shan/internal/hooks"
-	mcppkg "github.com/Kocoro-lab/shan/internal/mcp"
 	"github.com/Kocoro-lab/shan/internal/session"
 	"github.com/Kocoro-lab/shan/internal/tools"
 )
@@ -123,7 +122,12 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 	sess := sessMgr.Current()
 	history := sess.Messages
 
-	loop := agent.NewAgentLoop(deps.GW, deps.Registry, cfg.ModelTier, deps.ShannonDir,
+	// Clone and apply per-agent tool filter
+	reg := deps.Registry
+	if agentOverride != nil {
+		reg = tools.ApplyToolFilter(deps.Registry.Clone(), agentOverride)
+	}
+	loop := agent.NewAgentLoop(deps.GW, reg, cfg.ModelTier, deps.ShannonDir,
 		cfg.Agent.MaxIterations, cfg.Tools.ResultTruncation, cfg.Tools.ArgsTruncation,
 		&cfg.Permissions, deps.Auditor, deps.HookRunner)
 	loop.SetMaxTokens(cfg.Agent.MaxTokens)
@@ -131,7 +135,13 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 	loop.SetContextWindow(cfg.Agent.ContextWindow)
 	loop.SetEnableStreaming(false)
 	if agentOverride != nil {
-		loop.SetAgentOverride(agentOverride.Prompt, agentOverride.Memory)
+		scopedMCPCtx := tools.ResolveMCPContext(cfg, agentOverride)
+		loop.SwitchAgent(agentOverride.Prompt, agentOverride.Memory, nil, scopedMCPCtx)
+	} else {
+		scopedMCPCtx := tools.ResolveMCPContext(cfg)
+		if scopedMCPCtx != "" {
+			loop.SetMCPContext(scopedMCPCtx)
+		}
 	}
 	if cfg.Agent.Model != "" {
 		loop.SetSpecificModel(cfg.Agent.Model)
@@ -146,8 +156,24 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 	if cfg.Agent.ReasoningEffort != "" {
 		loop.SetReasoningEffort(cfg.Agent.ReasoningEffort)
 	}
-	if mcpCtx := mcppkg.BuildContext(cfg.MCPServers); mcpCtx != "" {
-		loop.SetMCPContext(mcpCtx)
+	// Per-agent model config overrides
+	if agentOverride != nil && agentOverride.Config != nil && agentOverride.Config.Agent != nil {
+		ac := agentOverride.Config.Agent
+		if ac.Model != nil {
+			loop.SetSpecificModel(*ac.Model)
+		}
+		if ac.MaxIterations != nil {
+			loop.SetMaxIterations(*ac.MaxIterations)
+		}
+		if ac.Temperature != nil {
+			loop.SetTemperature(*ac.Temperature)
+		}
+		if ac.MaxTokens != nil {
+			loop.SetMaxTokens(*ac.MaxTokens)
+		}
+		if ac.ContextWindow != nil {
+			loop.SetContextWindow(*ac.ContextWindow)
+		}
 	}
 	loop.SetHandler(handler)
 

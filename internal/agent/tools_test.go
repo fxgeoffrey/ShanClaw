@@ -99,6 +99,125 @@ func TestToolRegistry_SchemasIncludesNativeTool(t *testing.T) {
 	}
 }
 
+func TestToolRegistry_Remove(t *testing.T) {
+	r := NewToolRegistry()
+	r.Register(&mockTool{name: "a"})
+	r.Register(&mockTool{name: "b"})
+	r.Register(&mockTool{name: "c"})
+
+	r.Remove("b")
+
+	if _, ok := r.Get("b"); ok {
+		t.Error("b should be removed")
+	}
+	if r.Len() != 2 {
+		t.Errorf("Len() = %d, want 2", r.Len())
+	}
+	names := r.Names()
+	if len(names) != 2 || names[0] != "a" || names[1] != "c" {
+		t.Errorf("names = %v, want [a c]", names)
+	}
+}
+
+func TestToolRegistry_RemoveNonexistent(t *testing.T) {
+	r := NewToolRegistry()
+	r.Register(&mockTool{name: "a"})
+	r.Remove("nonexistent") // should not panic
+	if r.Len() != 1 {
+		t.Errorf("Len() = %d, want 1", r.Len())
+	}
+}
+
+func TestToolRegistry_FilterByAllow(t *testing.T) {
+	r := NewToolRegistry()
+	r.Register(&mockTool{name: "file_read"})
+	r.Register(&mockTool{name: "bash"})
+	r.Register(&mockTool{name: "computer"})
+	r.Register(&mockTool{name: "browser"})
+
+	filtered := r.FilterByAllow([]string{"file_read", "bash"})
+	if filtered.Len() != 2 {
+		t.Errorf("filtered Len() = %d, want 2", filtered.Len())
+	}
+	if _, ok := filtered.Get("computer"); ok {
+		t.Error("computer should be filtered out")
+	}
+	if _, ok := filtered.Get("file_read"); !ok {
+		t.Error("file_read should be present")
+	}
+}
+
+func TestToolRegistry_FilterByDeny(t *testing.T) {
+	r := NewToolRegistry()
+	r.Register(&mockTool{name: "file_read"})
+	r.Register(&mockTool{name: "bash"})
+	r.Register(&mockTool{name: "computer"})
+	r.Register(&mockTool{name: "browser"})
+
+	filtered := r.FilterByDeny([]string{"computer", "browser"})
+	if filtered.Len() != 2 {
+		t.Errorf("filtered Len() = %d, want 2", filtered.Len())
+	}
+	if _, ok := filtered.Get("computer"); ok {
+		t.Error("computer should be denied")
+	}
+	if _, ok := filtered.Get("file_read"); !ok {
+		t.Error("file_read should be present")
+	}
+}
+
+func TestToolRegistry_CloneIndependence(t *testing.T) {
+	r := NewToolRegistry()
+	r.Register(&mockTool{name: "a"})
+	r.Register(&mockTool{name: "b"})
+
+	c := r.Clone()
+	c.Remove("a")
+
+	if _, ok := r.Get("a"); !ok {
+		t.Error("original should still have 'a'")
+	}
+	if c.Len() != 1 {
+		t.Errorf("clone Len() = %d, want 1", c.Len())
+	}
+}
+
+func TestToolRegistry_RegisterOverwrite(t *testing.T) {
+	r := NewToolRegistry()
+	r.Register(&mockTool{name: "a"})
+	r.Register(&mockTool{name: "b"})
+	r.Register(&mockTool{name: "a"}) // overwrite
+
+	names := r.Names()
+	if len(names) != 2 {
+		t.Errorf("expected 2 names after overwrite, got %d: %v", len(names), names)
+	}
+	if r.Len() != 2 {
+		t.Errorf("Len() = %d, want 2", r.Len())
+	}
+	schemas := r.Schemas()
+	if len(schemas) != 2 {
+		t.Errorf("expected 2 schemas, got %d", len(schemas))
+	}
+}
+
+func TestToolRegistry_RemoveAndReRegister(t *testing.T) {
+	r := NewToolRegistry()
+	r.Register(&mockTool{name: "a"})
+	r.Register(&mockTool{name: "b"})
+	r.Remove("a")
+	r.Register(&mockTool{name: "a"})
+
+	names := r.Names()
+	if len(names) != 2 {
+		t.Errorf("expected 2 names, got %d: %v", len(names), names)
+	}
+	schemas := r.Schemas()
+	if len(schemas) != 2 {
+		t.Errorf("expected 2 schemas, got %d", len(schemas))
+	}
+}
+
 func TestToolResult_ImagesField(t *testing.T) {
 	result := ToolResult{
 		Content: "Screenshot captured",

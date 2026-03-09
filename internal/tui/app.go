@@ -26,8 +26,8 @@ import (
 	"github.com/Kocoro-lab/shan/internal/config"
 	"github.com/Kocoro-lab/shan/internal/hooks"
 	"github.com/Kocoro-lab/shan/internal/instructions"
-	"github.com/Kocoro-lab/shan/internal/mcp"
 	"github.com/Kocoro-lab/shan/internal/session"
+	"github.com/Kocoro-lab/shan/internal/skills"
 	"github.com/Kocoro-lab/shan/internal/tools"
 	"github.com/Kocoro-lab/shan/internal/update"
 )
@@ -60,6 +60,7 @@ type healthCheckMsg struct {
 
 type serverToolsLoadedMsg struct {
 	registry *agent.ToolRegistry
+	cleanup  func()
 	err      error
 }
 
@@ -120,6 +121,8 @@ type Model struct {
 	serverToolErr        error // non-nil if server tools failed to load
 	customCommands       map[string]string // name → prompt content from commands/*.md
 	bypassPermissions    bool
+	agentOverride        *agents.Agent  // per-agent override for re-application after async tool load
+	remoteCleanup        func()         // cleanup for MCP connections from async load
 	cancelRun            context.CancelFunc // cancels the running agent loop
 	// Tool result display
 	pendingToolName   string
@@ -232,32 +235,8 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 		}
 	}
 
+	// Local tools only (fast, sync) — MCP + gateway loaded async in Init
 	reg, toolCleanup := tools.RegisterLocalTools(cfg)
-
-	// Connect MCP servers (best-effort, before TUI starts)
-	var mcpMgr *mcp.ClientManager
-	if len(cfg.MCPServers) > 0 {
-		mcpMgr = mcp.NewClientManager()
-		mcpTools, mcpErr := mcpMgr.ConnectAll(context.Background(), cfg.MCPServers)
-		if mcpErr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: MCP servers: %v\n", mcpErr)
-		}
-		for _, t := range mcpTools {
-			if _, exists := reg.Get(t.Tool.Name); exists {
-				continue
-			}
-			reg.Register(tools.NewMCPTool(t.ServerName, t.Tool, mcpMgr))
-		}
-		_ = len(mcpTools)
-	}
-
-	origCleanup := toolCleanup
-	toolCleanup = func() {
-		origCleanup()
-		if mcpMgr != nil {
-			mcpMgr.Close()
-		}
-	}
 
 	hookRunner := hooks.NewHookRunner(cfg.Hooks)
 	loop := agent.NewAgentLoop(gateway, reg, cfg.ModelTier, shannonDir, cfg.Agent.MaxIterations, cfg.Tools.ResultTruncation, cfg.Tools.ArgsTruncation, &cfg.Permissions, auditor, hookRunner)
@@ -277,23 +256,73 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 	if cfg.Agent.ReasoningEffort != "" {
 		loop.SetReasoningEffort(cfg.Agent.ReasoningEffort)
 	}
+	// Per-agent model config overrides
+	if agentOverride != nil && agentOverride.Config != nil && agentOverride.Config.Agent != nil {
+		ac := agentOverride.Config.Agent
+		if ac.Model != nil {
+			loop.SetSpecificModel(*ac.Model)
+		}
+		if ac.MaxIterations != nil {
+			loop.SetMaxIterations(*ac.MaxIterations)
+		}
+		if ac.Temperature != nil {
+			loop.SetTemperature(*ac.Temperature)
+		}
+		if ac.MaxTokens != nil {
+			loop.SetMaxTokens(*ac.MaxTokens)
+		}
+		if ac.ContextWindow != nil {
+			loop.SetContextWindow(*ac.ContextWindow)
+		}
+	}
 	if agentOverride != nil {
-		loop.SetAgentOverride(agentOverride.Prompt, agentOverride.Memory)
+		loop.SwitchAgent(agentOverride.Prompt, agentOverride.Memory, nil, "")
 	}
 	loop.SetEnableStreaming(true) // streaming enabled but deltas are suppressed — only final text rendered
-	if mcpCtx := mcp.BuildContext(cfg.MCPServers); mcpCtx != "" {
-		loop.SetMCPContext(mcpCtx)
-	}
 
 	settings := config.LoadSettings()
 
 	// Load custom commands and add to slash command list
 	customCmds, _ := instructions.LoadCustomCommands(shannonDir, ".")
-	for name, _ := range customCmds {
+	if customCmds == nil {
+		customCmds = make(map[string]string)
+	}
+	for name := range customCmds {
 		allSlashCommands = append(allSlashCommands, slashCmd{
 			cmd:  "/" + name,
 			desc: "Custom command",
 		})
+	}
+
+	// Built-in command names that agent commands/skills must not overwrite.
+	builtinCmds := map[string]bool{
+		"quit": true, "exit": true, "help": true, "clear": true,
+		"sessions": true, "session": true, "model": true, "config": true,
+		"setup": true, "update": true, "copy": true, "research": true,
+		"swarm": true,
+	}
+
+	// Merge agent-scoped commands and prompt-type skills
+	if agentOverride != nil {
+		for name, content := range agentOverride.Commands {
+			if builtinCmds[name] {
+				continue
+			}
+			customCmds[name] = content
+			allSlashCommands = append(allSlashCommands, slashCmd{
+				cmd:  "/" + name,
+				desc: "Agent command",
+			})
+		}
+		for _, s := range agentOverride.Skills {
+			if s.Type == skills.SkillTypePrompt && s.Prompt != "" && !builtinCmds[s.Name] {
+				customCmds[s.Name] = s.Prompt
+				allSlashCommands = append(allSlashCommands, slashCmd{
+					cmd:  "/" + s.Name,
+					desc: s.Description,
+				})
+			}
+		}
 	}
 
 	m := &Model{
@@ -312,6 +341,7 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 		auditor:        auditor,
 		hookRunner:     hookRunner,
 		customCommands: customCmds,
+		agentOverride:  agentOverride,
 	}
 
 	return m
@@ -338,15 +368,22 @@ func (m *Model) loadServerTools() tea.Cmd {
 			return serverToolsLoadedMsg{err: fmt.Errorf("tool registry not initialized")}
 		}
 
-		reg := m.toolRegistry.Clone()
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		err := tools.RegisterServerTools(ctx, m.gateway, reg)
-		// Cloud delegation tool (uses same gateway, agent forwarding not needed — loop already has override)
-		tools.RegisterCloudDelegate(reg, m.gateway, m.cfg, nil, "", "")
+		reg, cleanup, err := tools.CompleteRegistration(ctx, m.gateway, m.cfg, m.toolRegistry, m.agentOverride)
+
+		// Cloud delegation tool
+		var cloudAgentName, cloudAgentPrompt string
+		if m.agentOverride != nil {
+			cloudAgentName = m.agentOverride.Name
+			cloudAgentPrompt = m.agentOverride.Prompt
+		}
+		tools.RegisterCloudDelegate(reg, m.gateway, m.cfg, nil, cloudAgentName, cloudAgentPrompt)
+
 		return serverToolsLoadedMsg{
 			registry: reg,
+			cleanup:  cleanup,
 			err:      err,
 		}
 	}
@@ -393,6 +430,9 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sessions.Save()
 			if m.toolCleanup != nil {
 				m.toolCleanup()
+			}
+			if m.remoteCleanup != nil {
+				m.remoteCleanup()
 			}
 			return m, tea.Quit
 		case tea.KeyEscape:
@@ -585,12 +625,14 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case serverToolsLoadedMsg:
+		if msg.cleanup != nil {
+			m.remoteCleanup = msg.cleanup
+		}
 		if msg.err != nil {
 			m.serverToolErr = msg.err
 			if m.headerDone {
 				m.appendOutput(fmt.Sprintf("  %v", msg.err))
 			}
-			return m, nil
 		}
 		if msg.registry != nil {
 			m.toolRegistry = msg.registry
@@ -611,9 +653,40 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.cfg.Agent.ReasoningEffort != "" {
 				m.agentLoop.SetReasoningEffort(m.cfg.Agent.ReasoningEffort)
 			}
+			// Per-agent model config overrides
+			if m.agentOverride != nil && m.agentOverride.Config != nil && m.agentOverride.Config.Agent != nil {
+				ac := m.agentOverride.Config.Agent
+				if ac.Model != nil {
+					m.agentLoop.SetSpecificModel(*ac.Model)
+				}
+				if ac.MaxIterations != nil {
+					m.agentLoop.SetMaxIterations(*ac.MaxIterations)
+				}
+				if ac.Temperature != nil {
+					m.agentLoop.SetTemperature(*ac.Temperature)
+				}
+				if ac.MaxTokens != nil {
+					m.agentLoop.SetMaxTokens(*ac.MaxTokens)
+				}
+				if ac.ContextWindow != nil {
+					m.agentLoop.SetContextWindow(*ac.ContextWindow)
+				}
+			}
 			m.agentLoop.SetBypassPermissions(m.bypassPermissions)
 			m.agentLoop.SetEnableStreaming(true)
-			m.serverToolErr = nil
+			// Re-apply agent override (prompt, memory, MCP context)
+			if m.agentOverride != nil {
+				scopedMCPCtx := tools.ResolveMCPContext(m.cfg, m.agentOverride)
+				m.agentLoop.SwitchAgent(m.agentOverride.Prompt, m.agentOverride.Memory, nil, scopedMCPCtx)
+			} else {
+				mcpCtx := tools.ResolveMCPContext(m.cfg)
+				if mcpCtx != "" {
+					m.agentLoop.SetMCPContext(mcpCtx)
+				}
+			}
+			if msg.err == nil {
+				m.serverToolErr = nil
+			}
 		}
 		return m, nil
 
@@ -944,6 +1017,9 @@ func (m *Model) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 		m.sessions.Save()
 		if m.toolCleanup != nil {
 			m.toolCleanup()
+		}
+		if m.remoteCleanup != nil {
+			m.remoteCleanup()
 		}
 		return m, tea.Quit
 	case "/help":

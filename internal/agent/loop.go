@@ -262,9 +262,21 @@ func (a *AgentLoop) SetContextWindow(tokens int) {
 	a.contextWindow = tokens
 }
 
-func (a *AgentLoop) SetAgentOverride(basePrompt, memory string) {
+// SetMaxIterations overrides the maximum number of agent loop iterations.
+func (a *AgentLoop) SetMaxIterations(n int) {
+	a.maxIter = n
+}
+
+// SwitchAgent applies full per-agent scoping: prompt, memory, tool registry,
+// and MCP context. Pass a new ToolRegistry and MCP context string built from
+// the agent's scoped MCP servers. If reg is nil, the existing registry is kept.
+func (a *AgentLoop) SwitchAgent(basePrompt, memory string, reg *ToolRegistry, mcpCtx string) {
 	a.agentBasePrompt = basePrompt
 	a.agentMemory = memory
+	if reg != nil {
+		a.tools = reg
+	}
+	a.mcpContext = mcpCtx
 }
 
 func (a *AgentLoop) SetEnableStreaming(enable bool) {

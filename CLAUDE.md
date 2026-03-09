@@ -25,13 +25,13 @@ cmd/
 
 internal/
   agent/
-    loop.go            # AgentLoop.Run() — core agentic loop, SetAgentOverride()
-    tools.go           # Tool interface, ToolRegistry, Schemas()
+    loop.go            # AgentLoop.Run() — core agentic loop, SwitchAgent()
+    tools.go           # Tool interface, ToolRegistry, FilterByAllow/Deny, Schemas()
     loopdetect.go      # 9 stuck-loop detectors
     readtracker.go     # read-before-edit enforcement
     approval_cache.go  # per-turn approval caching
   agents/
-    loader.go          # LoadAgent, ListAgents, ParseAgentMention, ValidateAgentName
+    loader.go          # LoadAgent (config.yaml, commands/, skills/), ListAgents, ParseAgentMention
   client/
     gateway.go         # GatewayClient: Complete, CompleteStream, ListTools
     sse.go             # SSE event parsing
@@ -62,8 +62,11 @@ internal/
   mcp/
     client.go          # MCP client manager (stdio + HTTP transports)
     server.go          # MCP server (JSON-RPC 2.0 over stdio)
+  skills/
+    registry.go        # Skill type, SkillTypePrompt constant
+    loader.go          # LoadSkills from agent skills/*.yaml
   tools/
-    register.go        # RegisterLocalTools, RegisterAll (local > MCP > gateway)
+    register.go        # RegisterLocalTools, RegisterAll, CompleteRegistration, ApplyToolFilter
     # 18 tool files: file_read, file_write, file_edit, glob, grep, bash,
     # directory_list, think, http, system_info, clipboard, notify, process,
     # applescript, accessibility, browser, screenshot, computer
@@ -98,7 +101,7 @@ Unknown tools → denied by default (fail-safe).
 Scalars override, lists merge+dedup, structs field-level merge. MCP server env var casing preserved via direct YAML re-read.
 
 ### File Paths
-- Agent definitions: `~/.shannon/agents/<name>/AGENT.md` + `MEMORY.md`
+- Agent definitions: `~/.shannon/agents/<name>/AGENT.md` + `MEMORY.md` + `config.yaml` + `commands/*.md` + `skills/*.yaml`
 - Sessions: `~/.shannon/sessions/` (default) or `~/.shannon/agents/<name>/sessions/` (per-agent)
 - Schedule index: `~/.shannon/schedules.json`
 - Schedule plists: `~/Library/LaunchAgents/com.shannon.schedule.<id>.plist`

@@ -239,7 +239,7 @@ Type `/` in the TUI to see the interactive command menu:
 | `/update` | Self-update from GitHub releases |
 | `/setup` | Reconfigure endpoint & API key |
 | `/quit` | Exit (alias: `/exit`) |
-| `/<custom>` | Custom commands from `.shannon/commands/*.md` |
+| `/<custom>` | Custom commands from `.shannon/commands/*.md` or agent `commands/` and `skills/` |
 
 ### Subcommands
 
@@ -734,19 +734,21 @@ Conversations are persisted as JSON files in `~/.shannon/sessions/` (or `~/.shan
 
 ## Named Agents
 
-Create independent agents with their own instructions and memory:
+Create independent agents with their own instructions, memory, tools, MCP servers, and model settings:
 
 ```
 ~/.shannon/agents/
   ops-bot/
     AGENT.md          # agent instructions (replaces default system prompt)
     MEMORY.md         # agent-specific memory (persists across sessions)
-  code-reviewer/
-    AGENT.md
-    MEMORY.md
+    config.yaml       # optional: tool filtering, MCP scoping, model overrides
+    commands/          # optional: agent-scoped slash commands (*.md)
+    skills/            # optional: agent-scoped skills (*.yaml)
 ```
 
 ### Creating an Agent
+
+Minimal agent — just `AGENT.md`:
 
 ```bash
 mkdir -p ~/.shannon/agents/ops-bot
@@ -758,13 +760,104 @@ You are ops-bot, a production operations assistant.
 EOF
 ```
 
+Agents without `config.yaml` inherit all tools, global MCP servers, and default model settings.
+
+### Agent Config
+
+Create `config.yaml` to scope an agent's capabilities:
+
+```yaml
+# Tool allow list — agent can ONLY use these tools
+tools:
+  allow:
+    - file_read
+    - grep
+    - glob
+    - bash
+    - think
+    - directory_list
+
+# Per-agent MCP servers
+# _inherit: false → only these servers (ignore global config)
+# _inherit: true  → merge on top of global servers
+mcp_servers:
+  _inherit: false
+  github:
+    command: mcp-server-github
+    env:
+      GITHUB_TOKEN: "${GITHUB_TOKEN}"
+
+# Model and behavior overrides
+agent:
+  model: "claude-sonnet-4-6"
+  max_iterations: 10
+  temperature: 0.2
+  max_tokens: 16000
+  context_window: 64000
+```
+
+**Tool filtering options:**
+
+```yaml
+# Allow list — only these tools available
+tools:
+  allow: [file_read, grep, glob, bash]
+
+# OR deny list — all tools EXCEPT these
+tools:
+  deny: [computer, browser, screenshot, applescript]
+
+# Omit tools section entirely → all tools available
+```
+
+The filter applies to all tool sources (local, MCP, gateway). If both `allow` and `deny` are set, `allow` takes precedence.
+
+### Agent Commands
+
+Create `.md` files in the `commands/` directory to add agent-scoped slash commands:
+
+```bash
+mkdir -p ~/.shannon/agents/reviewer/commands
+
+cat > ~/.shannon/agents/reviewer/commands/review.md << 'EOF'
+Review the code in $ARGUMENTS for:
+- Correctness and logic errors
+- Security vulnerabilities
+- Performance issues
+Focus on bugs that matter, skip nitpicks.
+EOF
+```
+
+Use in the TUI: `/review src/auth/login.go`
+
+`$ARGUMENTS` is replaced with everything after the command name. Agent commands cannot overwrite built-in commands (`/help`, `/quit`, etc.).
+
+### Agent Skills
+
+Create `.yaml` files in the `skills/` directory for reusable prompt templates:
+
+```bash
+mkdir -p ~/.shannon/agents/reviewer/skills
+
+cat > ~/.shannon/agents/reviewer/skills/summarize.yaml << 'EOF'
+name: summarize
+description: Summarize codebase architecture
+type: prompt
+prompt: |
+  Provide a concise summary of the architecture and key decisions.
+  Focus on: entry points, data flow, error handling patterns.
+EOF
+```
+
+Skills appear as `/summarize` in the TUI. Only `type: prompt` is supported.
+
 ### Using Agents
 
 ```bash
 # One-shot mode
 shan --agent ops-bot "check error rate in prod"
 
-# Interactive TUI
+# Interactive TUI (with agent commands and skills as /slash commands)
 shan --agent ops-bot
 
 # In daemon mode, @mention routes to agents:

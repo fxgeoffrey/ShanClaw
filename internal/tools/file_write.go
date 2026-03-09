@@ -37,6 +37,7 @@ func (t *FileWriteTool) Run(ctx context.Context, argsJSON string) (agent.ToolRes
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return agent.ToolResult{Content: fmt.Sprintf("invalid arguments: %v", err), IsError: true}, nil
 	}
+	args.Path = ExpandHome(args.Path)
 
 	// Enforce read-before-write for existing files (new files are fine)
 	if _, err := os.Stat(args.Path); err == nil {

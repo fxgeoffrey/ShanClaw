@@ -56,7 +56,7 @@ func (t *ScreenshotTool) Run(ctx context.Context, argsJSON string) (agent.ToolRe
 		}, nil
 	}
 
-	path := args.Path
+	path := ExpandHome(args.Path)
 	if path == "" {
 		f, err := os.CreateTemp("", "shannon-screenshot-*.png")
 		if err != nil {

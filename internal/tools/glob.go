@@ -42,7 +42,7 @@ func (t *GlobTool) Run(ctx context.Context, argsJSON string) (agent.ToolResult, 
 
 	root := "."
 	if args.Path != "" {
-		root = args.Path
+		root = ExpandHome(args.Path)
 	}
 
 	matches, err := doublestar.Glob(os.DirFS(root), args.Pattern)

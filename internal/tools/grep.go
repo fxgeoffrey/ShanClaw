@@ -41,7 +41,7 @@ func (t *GrepTool) Run(ctx context.Context, argsJSON string) (agent.ToolResult, 
 		return agent.ToolResult{Content: fmt.Sprintf("invalid arguments: %v", err), IsError: true}, nil
 	}
 
-	path := args.Path
+	path := ExpandHome(args.Path)
 	if path == "" {
 		path = "."
 	}

@@ -36,7 +36,7 @@ func (t *DirectoryListTool) Run(ctx context.Context, argsJSON string) (agent.Too
 		return agent.ToolResult{Content: fmt.Sprintf("invalid arguments: %v", err), IsError: true}, nil
 	}
 
-	path := args.Path
+	path := ExpandHome(args.Path)
 	if path == "" {
 		path = "."
 	}

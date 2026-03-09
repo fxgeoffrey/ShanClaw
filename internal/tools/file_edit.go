@@ -39,6 +39,7 @@ func (t *FileEditTool) Run(ctx context.Context, argsJSON string) (agent.ToolResu
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return agent.ToolResult{Content: fmt.Sprintf("invalid arguments: %v", err), IsError: true}, nil
 	}
+	args.Path = ExpandHome(args.Path)
 
 	// Enforce read-before-edit
 	if err := agent.CheckReadBeforeWrite(ctx, args.Path); err != nil {

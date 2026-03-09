@@ -22,8 +22,8 @@ var mentionRe = regexp.MustCompile(`^@([a-zA-Z0-9][a-zA-Z0-9_-]*)(?:\s|$)`)
 // If Deny is non-empty, all tools except those are available.
 // If both are empty, all tools are available (backwards-compatible).
 type AgentToolsFilter struct {
-	Allow []string `yaml:"allow,omitempty"`
-	Deny  []string `yaml:"deny,omitempty"`
+	Allow []string `yaml:"allow,omitempty" json:"allow,omitempty"`
+	Deny  []string `yaml:"deny,omitempty" json:"deny,omitempty"`
 }
 
 // AgentMCPConfig holds MCP server configs with an optional inherit flag.
@@ -39,13 +39,13 @@ type AgentMCPConfig struct {
 // AgentMCPServerRef mirrors the fields needed for per-agent MCP server config.
 // We keep it simple — the full MCPServerConfig is resolved at merge time.
 type AgentMCPServerRef struct {
-	Command  string            `yaml:"command"`
-	Args     []string          `yaml:"args,omitempty"`
-	Env      map[string]string `yaml:"env,omitempty"`
-	Type     string            `yaml:"type,omitempty"`
-	URL      string            `yaml:"url,omitempty"`
-	Disabled bool              `yaml:"disabled,omitempty"`
-	Context  string            `yaml:"context,omitempty"`
+	Command  string            `yaml:"command" json:"command,omitempty"`
+	Args     []string          `yaml:"args,omitempty" json:"args,omitempty"`
+	Env      map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
+	Type     string            `yaml:"type,omitempty" json:"type,omitempty"`
+	URL      string            `yaml:"url,omitempty" json:"url,omitempty"`
+	Disabled bool              `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+	Context  string            `yaml:"context,omitempty" json:"context,omitempty"`
 }
 
 // AgentConfig is the per-agent config overlay loaded from config.yaml.
@@ -57,11 +57,11 @@ type AgentConfig struct {
 
 // AgentModelConfig holds per-agent model/iteration overrides.
 type AgentModelConfig struct {
-	Model          *string  `yaml:"model"`
-	MaxIterations  *int     `yaml:"max_iterations"`
-	Temperature    *float64 `yaml:"temperature"`
-	MaxTokens      *int     `yaml:"max_tokens"`
-	ContextWindow  *int     `yaml:"context_window"`
+	Model          *string  `yaml:"model" json:"model,omitempty"`
+	MaxIterations  *int     `yaml:"max_iterations" json:"max_iterations,omitempty"`
+	Temperature    *float64 `yaml:"temperature" json:"temperature,omitempty"`
+	MaxTokens      *int     `yaml:"max_tokens" json:"max_tokens,omitempty"`
+	ContextWindow  *int     `yaml:"context_window" json:"context_window,omitempty"`
 }
 
 // Agent represents a loaded agent definition.

@@ -58,9 +58,33 @@ func (m *Manager) Delete(id string) error {
 	return m.store.Delete(id)
 }
 
+func (m *Manager) Search(query string, limit int) ([]SearchResult, error) {
+	return m.store.Search(query, limit)
+}
+
+func (m *Manager) Close() error {
+	return m.store.Close()
+}
+
+func (m *Manager) RebuildIndex() error {
+	return m.store.RebuildIndex()
+}
+
 // ResumeLatest loads the most recently updated session from disk.
 // Returns (nil, nil) if no sessions exist.
 func (m *Manager) ResumeLatest() (*Session, error) {
+	// Fast path: use index to find the latest session by updated_at
+	if m.store.index != nil {
+		id, err := m.store.index.LatestUpdatedID()
+		if err == nil && id != "" {
+			return m.Resume(id)
+		}
+		if err == nil && id == "" {
+			return nil, nil // no sessions
+		}
+		// Fall through to brute-force on index error
+	}
+
 	summaries, err := m.store.List()
 	if err != nil {
 		return nil, err

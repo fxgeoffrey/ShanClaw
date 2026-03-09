@@ -296,12 +296,7 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 	}
 
 	// Built-in command names that agent commands/skills must not overwrite.
-	builtinCmds := map[string]bool{
-		"quit": true, "exit": true, "help": true, "clear": true,
-		"sessions": true, "session": true, "model": true, "config": true,
-		"setup": true, "update": true, "copy": true, "research": true,
-		"swarm": true, "search": true,
-	}
+	builtinCmds := agents.BuiltinCommands
 
 	// Merge agent-scoped commands and prompt-type skills
 	if agentOverride != nil {

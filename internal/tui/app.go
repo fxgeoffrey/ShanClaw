@@ -294,9 +294,20 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 		})
 	}
 
+	// Built-in command names that agent commands/skills must not overwrite.
+	builtinCmds := map[string]bool{
+		"quit": true, "exit": true, "help": true, "clear": true,
+		"sessions": true, "session": true, "model": true, "config": true,
+		"setup": true, "update": true, "copy": true, "research": true,
+		"swarm": true,
+	}
+
 	// Merge agent-scoped commands and prompt-type skills
 	if agentOverride != nil {
 		for name, content := range agentOverride.Commands {
+			if builtinCmds[name] {
+				continue
+			}
 			customCmds[name] = content
 			allSlashCommands = append(allSlashCommands, slashCmd{
 				cmd:  "/" + name,
@@ -304,7 +315,7 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 			})
 		}
 		for _, s := range agentOverride.Skills {
-			if s.Type == skills.SkillTypePrompt && s.Prompt != "" {
+			if s.Type == skills.SkillTypePrompt && s.Prompt != "" && !builtinCmds[s.Name] {
 				customCmds[s.Name] = s.Prompt
 				allSlashCommands = append(allSlashCommands, slashCmd{
 					cmd:  "/" + s.Name,

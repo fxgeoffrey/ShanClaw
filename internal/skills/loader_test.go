@@ -67,3 +67,15 @@ func TestLoadSkills_MissingName(t *testing.T) {
 		t.Error("expected error for missing skill name")
 	}
 }
+
+func TestLoadSkills_UnsupportedType(t *testing.T) {
+	dir := t.TempDir()
+	skillsDir := filepath.Join(dir, "skills")
+	os.MkdirAll(skillsDir, 0700)
+	os.WriteFile(filepath.Join(skillsDir, "bad.yaml"), []byte("name: test\ntype: tool_chain\n"), 0600)
+
+	_, err := LoadSkills(dir, "test")
+	if err == nil {
+		t.Error("expected error for unsupported skill type")
+	}
+}

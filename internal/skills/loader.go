@@ -44,8 +44,8 @@ func loadSkillFile(path, agentName string) (*Skill, error) {
 	if s.Name == "" {
 		return nil, fmt.Errorf("skill name is required")
 	}
-	if s.Type == "" {
-		return nil, fmt.Errorf("skill type is required")
+	if s.Type != SkillTypePrompt {
+		return nil, fmt.Errorf("unsupported skill type %q (only %q is supported)", s.Type, SkillTypePrompt)
 	}
 	s.Source = agentName
 	return &s, nil

@@ -200,6 +200,11 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "session id required")
 		return
 	}
+	// Prevent path traversal — session IDs must be safe filenames.
+	if id != filepath.Base(id) || strings.ContainsAny(id, `/\`) {
+		writeError(w, http.StatusBadRequest, "invalid session id")
+		return
+	}
 	agentName := r.URL.Query().Get("agent")
 	if agentName != "" {
 		if err := agents.ValidateAgentName(agentName); err != nil {
@@ -427,34 +432,41 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, fmt.Sprintf("agent %q already exists", req.Name))
 		return
 	}
+	// Write all agent files — rollback on any failure.
+	rollback := func() { agents.DeleteAgentDir(s.deps.AgentsDir, req.Name) }
 	if err := agents.WriteAgentPrompt(s.deps.AgentsDir, req.Name, req.Prompt); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if req.Memory != nil {
 		if err := agents.WriteAgentMemory(s.deps.AgentsDir, req.Name, *req.Memory); err != nil {
+			rollback()
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("write memory: %v", err))
 			return
 		}
 	}
 	if req.Config != nil {
 		if err := agents.WriteAgentConfig(s.deps.AgentsDir, req.Name, req.Config); err != nil {
+			rollback()
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("write config: %v", err))
 			return
 		}
 	}
 	for name, content := range req.Commands {
 		if err := agents.WriteAgentCommand(s.deps.AgentsDir, req.Name, name, content); err != nil {
+			rollback()
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("write command %s: %v", name, err))
 			return
 		}
 	}
 	for _, skill := range req.Skills {
 		if skill == nil {
+			rollback()
 			writeError(w, http.StatusBadRequest, "skill entry cannot be null")
 			return
 		}
 		if err := agents.WriteAgentSkill(s.deps.AgentsDir, req.Name, skill); err != nil {
+			rollback()
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("write skill %s: %v", skill.Name, err))
 			return
 		}
@@ -782,18 +794,35 @@ func (s *Server) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	globalPath := filepath.Join(s.deps.ShannonDir, "config.yaml")
-	globalData, _ := os.ReadFile(globalPath)
+	globalData, err := os.ReadFile(globalPath)
 	var globalMap map[string]interface{}
-	yaml.Unmarshal(globalData, &globalMap)
+	if err == nil {
+		if yamlErr := yaml.Unmarshal(globalData, &globalMap); yamlErr != nil {
+			log.Printf("daemon: GET /config: global config parse error: %v", yamlErr)
+		}
+	}
 
 	cfg, _ := s.deps.Snapshot()
 	effectiveJSON, _ := json.Marshal(cfg)
 	var effectiveMap map[string]interface{}
 	json.Unmarshal(effectiveJSON, &effectiveMap)
 
+	// Collect unique source files from config merge
+	var sources []string
+	if cfg != nil && cfg.Sources != nil {
+		seen := make(map[string]bool)
+		for _, src := range cfg.Sources {
+			if src.File != "" && !seen[src.File] {
+				seen[src.File] = true
+				sources = append(sources, src.File)
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"global":    globalMap,
 		"effective": effectiveMap,
+		"sources":   sources,
 	})
 }
 
@@ -807,7 +836,12 @@ func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 	globalPath := filepath.Join(s.deps.ShannonDir, "config.yaml")
 	globalData, _ := os.ReadFile(globalPath)
 	var current map[string]interface{}
-	yaml.Unmarshal(globalData, &current)
+	if len(globalData) > 0 {
+		if err := yaml.Unmarshal(globalData, &current); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("existing config is corrupt: %v", err))
+			return
+		}
+	}
 	if current == nil {
 		current = make(map[string]interface{})
 	}

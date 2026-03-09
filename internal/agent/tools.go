@@ -56,8 +56,10 @@ func NewToolRegistry() *ToolRegistry {
 
 func (r *ToolRegistry) Register(t Tool) {
 	name := t.Info().Name
+	if _, exists := r.tools[name]; !exists {
+		r.order = append(r.order, name)
+	}
 	r.tools[name] = t
-	r.order = append(r.order, name)
 }
 
 func (r *ToolRegistry) Clone() *ToolRegistry {

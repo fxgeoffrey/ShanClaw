@@ -182,6 +182,42 @@ func TestToolRegistry_CloneIndependence(t *testing.T) {
 	}
 }
 
+func TestToolRegistry_RegisterOverwrite(t *testing.T) {
+	r := NewToolRegistry()
+	r.Register(&mockTool{name: "a"})
+	r.Register(&mockTool{name: "b"})
+	r.Register(&mockTool{name: "a"}) // overwrite
+
+	names := r.Names()
+	if len(names) != 2 {
+		t.Errorf("expected 2 names after overwrite, got %d: %v", len(names), names)
+	}
+	if r.Len() != 2 {
+		t.Errorf("Len() = %d, want 2", r.Len())
+	}
+	schemas := r.Schemas()
+	if len(schemas) != 2 {
+		t.Errorf("expected 2 schemas, got %d", len(schemas))
+	}
+}
+
+func TestToolRegistry_RemoveAndReRegister(t *testing.T) {
+	r := NewToolRegistry()
+	r.Register(&mockTool{name: "a"})
+	r.Register(&mockTool{name: "b"})
+	r.Remove("a")
+	r.Register(&mockTool{name: "a"})
+
+	names := r.Names()
+	if len(names) != 2 {
+		t.Errorf("expected 2 names, got %d: %v", len(names), names)
+	}
+	schemas := r.Schemas()
+	if len(schemas) != 2 {
+		t.Errorf("expected 2 schemas, got %d", len(schemas))
+	}
+}
+
 func TestToolResult_ImagesField(t *testing.T) {
 	result := ToolResult{
 		Content: "Screenshot captured",

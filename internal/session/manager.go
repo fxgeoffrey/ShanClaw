@@ -73,16 +73,15 @@ func (m *Manager) RebuildIndex() error {
 // ResumeLatest loads the most recently updated session from disk.
 // Returns (nil, nil) if no sessions exist.
 func (m *Manager) ResumeLatest() (*Session, error) {
-	// Fast path: use index to find the latest session by updated_at
+	// Fast path: use index to find the latest session by updated_at.
+	// Only trust a non-empty result — if index says "empty", fall through
+	// to brute-force in case index is stale or partially migrated.
 	if m.store.index != nil {
 		id, err := m.store.index.LatestUpdatedID()
 		if err == nil && id != "" {
 			return m.Resume(id)
 		}
-		if err == nil && id == "" {
-			return nil, nil // no sessions
-		}
-		// Fall through to brute-force on index error
+		// On error or empty result, fall through to JSON scan
 	}
 
 	summaries, err := m.store.List()

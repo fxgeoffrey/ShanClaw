@@ -83,8 +83,10 @@ func (sc *SessionCache) getEntry(agent string) *agentEntry {
 func (sc *SessionCache) CloseAll() {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
-	for _, entry := range sc.agents {
-		entry.mgr.Close()
+	for name, entry := range sc.agents {
+		if err := entry.mgr.Close(); err != nil {
+			log.Printf("daemon: failed to close session manager for agent %q: %v", name, err)
+		}
 	}
 }
 

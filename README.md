@@ -105,6 +105,7 @@ In the TUI (`shan`), type `/` to access built-in commands:
 /copy                                             # copy last response to clipboard
 /sessions                                         # browse and resume past sessions
 /session new                                      # start a fresh session
+/search websocket reconnect                       # search session history
 ```
 
 ### One-Shot Examples
@@ -235,6 +236,7 @@ Type `/` in the TUI to see the interactive command menu:
 | `/sessions` | Interactive session picker |
 | `/session new` | Start new session |
 | `/session resume <n>` | Resume session by number or ID |
+| `/search <query>` | Search session history (keyword, phrase, stemming) |
 | `/clear` | Clear screen |
 | `/update` | Self-update from GitHub releases |
 | `/setup` | Reconfigure endpoint & API key |
@@ -301,6 +303,12 @@ Local tools executed on your macOS machine:
 | `schedule_list` | No | List all scheduled tasks with sync status |
 | `schedule_update` | Yes | Update cron, prompt, or enabled state |
 | `schedule_remove` | Yes | Remove a scheduled task and unload plist |
+
+### Session Search
+
+| Tool | Approval | Description |
+|------|----------|-------------|
+| `session_search` | No | FTS5 keyword search across past session messages |
 
 ### Tool Approval Flow
 
@@ -724,6 +732,7 @@ Conversations are persisted as JSON files in `~/.shannon/sessions/` (or `~/.shan
 - Each session is a `<id>.json` file containing messages, metadata, and remote task IDs
 - Saved after each agent turn and on exit
 - Titles generated from the first user message (truncated to 50 chars)
+- **Search index**: a `sessions.db` (SQLite FTS5) is auto-created alongside JSON files for fast keyword search. Safe to delete — rebuilds automatically on next launch
 
 ```
 /sessions                              # interactive picker
@@ -915,6 +924,7 @@ The daemon exposes a localhost-only HTTP server for native app integration and s
 | `/status` | GET | Connection state, active agent, uptime, version |
 | `/agents` | GET | List named agents from `~/.shannon/agents/` |
 | `/sessions` | GET | List sessions, optional `?agent=` filter |
+| `/sessions/search` | GET | Search session history, `?q=<query>&agent=<name>` |
 | `/message` | POST | Send a message to an agent, get reply |
 | `/shutdown` | POST | Graceful daemon shutdown (used by `shan daemon stop`) |
 

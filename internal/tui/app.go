@@ -355,6 +355,12 @@ func (m *Model) Init() tea.Cmd {
 	m.headerTipIdx = pickTipIdx()
 	m.headerCWD = m.cwd()
 	m.hookRunner.RunSessionStart(context.Background(), "")
+
+	// Auto-set Ghostty tab title + color for this agent
+	if m.agentOverride != nil {
+		tools.SetGhosttyTabAppearance(m.agentOverride.Name)
+	}
+
 	return tea.Batch(
 		textarea.Blink,
 		headerFrameTick(),

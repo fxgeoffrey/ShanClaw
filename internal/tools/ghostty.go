@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"math"
+	"sync"
 )
 
 func agentColor(name string) string {
@@ -37,4 +38,43 @@ func hslToRGB(h, s, l float64) (uint8, uint8, uint8) {
 	return uint8(math.Round((r1 + m) * 255)),
 		uint8(math.Round((g1 + m) * 255)),
 		uint8(math.Round((b1 + m) * 255))
+}
+
+// Tab registry
+
+type tabRef struct {
+	windowIndex int
+	tabIndex    int
+}
+
+type tabRegistry struct {
+	mu   sync.RWMutex
+	tabs map[string]tabRef
+}
+
+func newTabRegistry() *tabRegistry {
+	return &tabRegistry{tabs: make(map[string]tabRef)}
+}
+
+func (r *tabRegistry) add(title string, ref tabRef) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tabs[title] = ref
+}
+
+func (r *tabRegistry) lookup(title string) (tabRef, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	ref, ok := r.tabs[title]
+	return ref, ok
+}
+
+func (r *tabRegistry) list() map[string]tabRef {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]tabRef, len(r.tabs))
+	for k, v := range r.tabs {
+		out[k] = v
+	}
+	return out
 }

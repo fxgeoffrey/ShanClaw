@@ -92,7 +92,7 @@ func PlatformInfo() string {
 
 // AutoUpdate performs a background-safe update check + download.
 // Returns a user-facing message (empty if nothing to report).
-// Skips if: dev build, cache is fresh, or installed via Homebrew.
+// Skips if: dev build or cache is fresh.
 func AutoUpdate(currentVersion, shannonDir string) string {
 	if _, err := semver.NewVersion(currentVersion); err != nil {
 		return ""

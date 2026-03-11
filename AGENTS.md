@@ -129,7 +129,7 @@ Schedule tests use `t.TempDir()` as `plistDir` — they never write to real `~/L
 ## Building & Releasing
 
 - GoReleaser: `.goreleaser.yaml`
-- Tap: `Kocoro-lab/homebrew-tap` → `brew install kocoro-lab/tap/shan`
+- npm: `@kocoro/shan` → `npm install -g @kocoro/shan`
 - **Versioning: PATCH only (0.0.x)** — do NOT bump minor/major unless explicitly asked
 - Release: `git tag -a vX.Y.Z` → `git push origin vX.Y.Z` → CI builds + publishes
 - `docs/plans/` is gitignored — never commit plan files

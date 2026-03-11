@@ -17,7 +17,7 @@ func performClick(pid: Int, path: String, expectedRole: String?) -> (ActionResul
 
     // Auto-fallback: if AXPress fails, try a synthetic mouse click at the element's center
     if let (cx, cy) = elementCenter(el) {
-        let (clickResult, clickErr) = InputDriver.mouseEvent(type: "click", x: cx, y: cy)
+        let (_, clickErr) = InputDriver.mouseEvent(type: "click", x: cx, y: cy)
         if clickErr == nil {
             return (ActionResult(result: "synthetic click on \(role) '\(title)' at (\(Int(cx)), \(Int(cy))) — AXPress failed (error \(err.rawValue))", role: role, context: ctx), nil)
         }

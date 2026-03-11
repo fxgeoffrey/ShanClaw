@@ -94,7 +94,9 @@ func annotateElements(pid: Int, roles: [String]?, maxLabels: Int) -> AnnotateRes
     }
 
     let winTitle = axString(win, "AXTitle") ?? ""
-    let roleFilter: Set<String>? = roles.map { Set($0) }
+    let roleFilter: Set<String>? = roles.flatMap { roles in
+        roles.isEmpty ? nil : Set(roles)
+    }
 
     var annotations: [AnnotationEntry] = []
     var annotateRefPaths: [String: RefEntry] = [:]

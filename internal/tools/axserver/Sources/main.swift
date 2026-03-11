@@ -115,7 +115,9 @@ func dispatch(id: Int64, method: String, params: Params) -> Response {
             clicks: params.clicks ?? 1
         )
         if let err = err { return Response(id: id, error: err) }
-        return Response(id: id, result: AnyCodable(result!))
+        var r = result!
+        r.context = currentContext(pid: frontmostPID())
+        return Response(id: id, result: AnyCodable(r))
 
     case "key_event":
         guard let key = params.key else {
@@ -123,7 +125,9 @@ func dispatch(id: Int64, method: String, params: Params) -> Response {
         }
         let (result, err) = InputDriver.keyEvent(key: key, modifiers: params.modifiers ?? [])
         if let err = err { return Response(id: id, error: err) }
-        return Response(id: id, result: AnyCodable(result!))
+        var r = result!
+        r.context = currentContext(pid: frontmostPID())
+        return Response(id: id, result: AnyCodable(r))
 
     case "type_text":
         guard let text = params.value else {
@@ -131,7 +135,9 @@ func dispatch(id: Int64, method: String, params: Params) -> Response {
         }
         let (result, err) = InputDriver.typeText(text)
         if let err = err { return Response(id: id, error: err) }
-        return Response(id: id, result: AnyCodable(result!))
+        var r = result!
+        r.context = currentContext(pid: frontmostPID())
+        return Response(id: id, result: AnyCodable(r))
 
     case "scroll":
         let dx = params.dx ?? 0

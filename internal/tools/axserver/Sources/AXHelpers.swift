@@ -97,6 +97,83 @@ func elementFrame(_ el: AXUIElement) -> (x: Double, y: Double, width: Double, he
     return (Double(point.x), Double(point.y), Double(size.width), Double(size.height))
 }
 
+/// Returns context about the current state of an app (window title, focused element, browser URL).
+func currentContext(pid: Int) -> AppContext {
+    let appRef = AXUIElementCreateApplication(Int32(pid))
+    let appName: String
+    if let app = NSRunningApplication(processIdentifier: Int32(pid)) {
+        appName = app.localizedName ?? "Unknown"
+    } else {
+        appName = "Unknown"
+    }
+
+    var windowTitle = ""
+    if let windows = axValue(appRef, "AXWindows") as? [AXUIElement],
+       let win = windows.first {
+        windowTitle = axString(win, "AXTitle") ?? ""
+    }
+
+    // Check for browser URL
+    var url: String? = nil
+    if let windows = axValue(appRef, "AXWindows") as? [AXUIElement],
+       let win = windows.first {
+        if let toolbar = findToolbarChild(of: win) {
+            if let urlField = findToolbarURLField(in: toolbar) {
+                if let val = axValue(urlField, "AXValue") {
+                    url = "\(val)"
+                }
+            }
+        }
+    }
+
+    var focused: String? = nil
+    var focusedRef: CFTypeRef?
+    if AXUIElementCopyAttributeValue(appRef, "AXFocusedUIElement" as CFString, &focusedRef) == .success {
+        let el = focusedRef as! AXUIElement
+        let role = axString(el, "AXRole") ?? ""
+        let title = axString(el, "AXTitle") ?? ""
+        if !role.isEmpty {
+            focused = title.isEmpty ? role : "\(role) '\(title)'"
+        }
+    }
+
+    return AppContext(app: appName, window: windowTitle, url: url, focusedElement: focused)
+}
+
+/// Finds a child with AXToolbar role (used by currentContext for browser URL detection).
+private func findToolbarChild(of el: AXUIElement) -> AXUIElement? {
+    guard let children = axChildren(el) else { return nil }
+    for child in children {
+        if axString(child, "AXRole") == "AXToolbar" {
+            return child
+        }
+    }
+    for child in children {
+        guard let grandchildren = axChildren(child) else { continue }
+        for gc in grandchildren {
+            if axString(gc, "AXRole") == "AXToolbar" {
+                return gc
+            }
+        }
+    }
+    return nil
+}
+
+/// Finds a text field inside a toolbar that looks like a URL bar.
+private func findToolbarURLField(in el: AXUIElement) -> AXUIElement? {
+    guard let children = axChildren(el) else { return nil }
+    for child in children {
+        let role = axString(child, "AXRole") ?? ""
+        if role == "AXTextField" || role == "AXComboBox" {
+            return child
+        }
+        if let found = findToolbarURLField(in: child) {
+            return found
+        }
+    }
+    return nil
+}
+
 /// Resolves an app name to its PID via NSWorkspace.
 func resolvePID(appName: String) -> Int? {
     for app in NSWorkspace.shared.runningApplications {

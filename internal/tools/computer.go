@@ -197,7 +197,7 @@ func (t *ComputerTool) click(ctx context.Context, args computerArgs) (agent.Tool
 		clicks = 1
 	}
 
-	_, err := t.client.Call(ctx, "mouse_event", map[string]any{
+	rawResult, err := t.client.Call(ctx, "mouse_event", map[string]any{
 		"type":   "click",
 		"x":      float64(x),
 		"y":      float64(y),
@@ -211,7 +211,9 @@ func (t *ComputerTool) click(ctx context.Context, args computerArgs) (agent.Tool
 		}, nil
 	}
 
-	result := agent.ToolResult{Content: fmt.Sprintf("Clicked %s button %d time(s) at (%d, %d)", button, clicks, x, y)}
+	msg := fmt.Sprintf("Clicked %s button %d time(s) at (%d, %d)", button, clicks, x, y)
+	msg += parseActionContext(rawResult)
+	result := agent.ToolResult{Content: msg}
 	return t.captureAfterAction(result), nil
 }
 
@@ -221,7 +223,7 @@ func (t *ComputerTool) typeText(ctx context.Context, args computerArgs) (agent.T
 	}
 
 	// ax_server handles CJK/non-ASCII via clipboard paste automatically
-	_, err := t.client.Call(ctx, "type_text", map[string]any{
+	rawResult, err := t.client.Call(ctx, "type_text", map[string]any{
 		"value": args.Text,
 	})
 	if err != nil {
@@ -231,7 +233,9 @@ func (t *ComputerTool) typeText(ctx context.Context, args computerArgs) (agent.T
 		}, nil
 	}
 
-	result := agent.ToolResult{Content: fmt.Sprintf("Typed: %s", args.Text)}
+	msg := fmt.Sprintf("Typed: %s", args.Text)
+	msg += parseActionContext(rawResult)
+	result := agent.ToolResult{Content: msg}
 	return t.captureAfterAction(result), nil
 }
 
@@ -251,7 +255,7 @@ func (t *ComputerTool) hotkey(ctx context.Context, args computerArgs) (agent.Too
 		modifiers = append(modifiers, strings.TrimSpace(part))
 	}
 
-	_, err := t.client.Call(ctx, "key_event", map[string]any{
+	rawResult, err := t.client.Call(ctx, "key_event", map[string]any{
 		"key":       key,
 		"modifiers": modifiers,
 	})
@@ -262,14 +266,16 @@ func (t *ComputerTool) hotkey(ctx context.Context, args computerArgs) (agent.Too
 		}, nil
 	}
 
-	result := agent.ToolResult{Content: fmt.Sprintf("Pressed: %s", args.Keys)}
+	msg := fmt.Sprintf("Pressed: %s", args.Keys)
+	msg += parseActionContext(rawResult)
+	result := agent.ToolResult{Content: msg}
 	return t.captureAfterAction(result), nil
 }
 
 func (t *ComputerTool) move(ctx context.Context, args computerArgs) (agent.ToolResult, error) {
 	x, y := t.scaleXY(args.X, args.Y)
 
-	_, err := t.client.Call(ctx, "mouse_event", map[string]any{
+	rawResult, err := t.client.Call(ctx, "mouse_event", map[string]any{
 		"type": "move",
 		"x":    float64(x),
 		"y":    float64(y),
@@ -281,6 +287,20 @@ func (t *ComputerTool) move(ctx context.Context, args computerArgs) (agent.ToolR
 		}, nil
 	}
 
-	result := agent.ToolResult{Content: fmt.Sprintf("Moved cursor to (%d, %d)", x, y)}
+	msg := fmt.Sprintf("Moved cursor to (%d, %d)", x, y)
+	msg += parseActionContext(rawResult)
+	result := agent.ToolResult{Content: msg}
 	return t.captureAfterAction(result), nil
+}
+
+// parseActionContext extracts the context field from an ax_server action response
+// and formats it as a human-readable string.
+func parseActionContext(raw json.RawMessage) string {
+	var resp struct {
+		Context *appContext `json:"context,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return ""
+	}
+	return formatContext(resp.Context)
 }

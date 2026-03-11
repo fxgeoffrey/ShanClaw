@@ -121,9 +121,22 @@ struct FindResult: Encodable {
     var value: String?
 }
 
+struct AppContext: Encodable {
+    let app: String
+    let window: String
+    var url: String?
+    var focusedElement: String?
+
+    enum CodingKeys: String, CodingKey {
+        case app, window, url
+        case focusedElement = "focused_element"
+    }
+}
+
 struct ActionResult: Encodable {
     let result: String
     var role: String?
+    var context: AppContext?
 }
 
 /// Type-erased Encodable wrapper for JSON responses.

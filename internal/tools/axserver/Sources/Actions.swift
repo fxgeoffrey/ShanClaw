@@ -9,16 +9,17 @@ func performClick(pid: Int, path: String, expectedRole: String?) -> (ActionResul
         return (nil, ErrorInfo(code: -1, message: "Expected \(expected) but found \(role) at path. UI may have changed — call read_tree to refresh."))
     }
     let title = axString(el, "AXTitle") ?? ""
+    let ctx = currentContext(pid: pid)
     let err = AXUIElementPerformAction(el, "AXPress" as CFString)
     if err == .success {
-        return (ActionResult(result: "pressed \(role) '\(title)'", role: role), nil)
+        return (ActionResult(result: "pressed \(role) '\(title)'", role: role, context: ctx), nil)
     }
 
     // Auto-fallback: if AXPress fails, try a synthetic mouse click at the element's center
     if let (cx, cy) = elementCenter(el) {
         let (clickResult, clickErr) = InputDriver.mouseEvent(type: "click", x: cx, y: cy)
         if clickErr == nil {
-            return (ActionResult(result: "synthetic click on \(role) '\(title)' at (\(Int(cx)), \(Int(cy))) — AXPress failed (error \(err.rawValue))", role: role), nil)
+            return (ActionResult(result: "synthetic click on \(role) '\(title)' at (\(Int(cx)), \(Int(cy))) — AXPress failed (error \(err.rawValue))", role: role, context: ctx), nil)
         }
     }
 
@@ -36,7 +37,8 @@ func setValue(pid: Int, path: String, value: String, expectedRole: String?) -> (
     AXUIElementSetAttributeValue(el, "AXFocused" as CFString, true as CFTypeRef)
     let err = AXUIElementSetAttributeValue(el, "AXValue" as CFString, value as CFTypeRef)
     if err == .success {
-        return (ActionResult(result: "set value on \(role) to '\(value)'", role: role), nil)
+        let ctx = currentContext(pid: pid)
+        return (ActionResult(result: "set value on \(role) to '\(value)'", role: role, context: ctx), nil)
     }
     return (nil, ErrorInfo(code: Int(err.rawValue), message: "set_value failed on \(role) (error \(err.rawValue)). Element may not be settable."))
 }
@@ -59,5 +61,6 @@ func performScroll(pid: Int, path: String?, dx: Int, dy: Int) -> (ActionResult?,
         }
     }
     InputDriver.scroll(dx: dx, dy: dy)
-    return (ActionResult(result: "scrolled dx=\(dx) dy=\(dy)"), nil)
+    let ctx = currentContext(pid: pid)
+    return (ActionResult(result: "scrolled dx=\(dx) dy=\(dy)", context: ctx), nil)
 }

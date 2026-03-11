@@ -4,9 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/png"
+	"math"
+	"os"
 	"regexp"
 	"runtime"
 	"strings"
+
+	_ "image/jpeg"
 
 	"github.com/Kocoro-lab/shan/internal/agent"
 )
@@ -15,6 +23,28 @@ type refEntry struct {
 	path string
 	role string
 	pid  int
+}
+
+type appContext struct {
+	App            string `json:"app"`
+	Window         string `json:"window"`
+	URL            string `json:"url,omitempty"`
+	FocusedElement string `json:"focused_element,omitempty"`
+}
+
+func formatContext(ctx *appContext) string {
+	if ctx == nil {
+		return ""
+	}
+	msg := fmt.Sprintf("\n[context: %s — %s", ctx.App, ctx.Window)
+	if ctx.URL != "" {
+		msg += fmt.Sprintf(" (%s)", ctx.URL)
+	}
+	if ctx.FocusedElement != "" {
+		msg += fmt.Sprintf(", focused: %s", ctx.FocusedElement)
+	}
+	msg += "]"
+	return msg
 }
 
 type AccessibilityTool struct {
@@ -244,10 +274,11 @@ func (t *AccessibilityTool) performAction(ctx context.Context, action string, re
 	}
 
 	var actionResult struct {
-		Result string `json:"result"`
+		Result  string      `json:"result"`
+		Context *appContext `json:"context,omitempty"`
 	}
 	json.Unmarshal(result, &actionResult)
-	return agent.ToolResult{Content: actionResult.Result}, nil
+	return agent.ToolResult{Content: actionResult.Result + formatContext(actionResult.Context)}, nil
 }
 
 func (t *AccessibilityTool) setValue(ctx context.Context, ref string, value *string) (agent.ToolResult, error) {
@@ -274,10 +305,11 @@ func (t *AccessibilityTool) setValue(ctx context.Context, ref string, value *str
 	}
 
 	var actionResult struct {
-		Result string `json:"result"`
+		Result  string      `json:"result"`
+		Context *appContext `json:"context,omitempty"`
 	}
 	json.Unmarshal(result, &actionResult)
-	return agent.ToolResult{Content: actionResult.Result}, nil
+	return agent.ToolResult{Content: actionResult.Result + formatContext(actionResult.Context)}, nil
 }
 
 func (t *AccessibilityTool) getValue(ctx context.Context, ref string) (agent.ToolResult, error) {
@@ -297,14 +329,16 @@ func (t *AccessibilityTool) getValue(ctx context.Context, ref string) (agent.Too
 	}
 
 	var actionResult struct {
-		Result string `json:"result"`
-		Role   string `json:"role"`
+		Result  string      `json:"result"`
+		Role    string      `json:"role"`
+		Context *appContext `json:"context,omitempty"`
 	}
 	json.Unmarshal(result, &actionResult)
 	msg := actionResult.Result
 	if actionResult.Role != "" {
 		msg = fmt.Sprintf("%s (role: %s)", msg, actionResult.Role)
 	}
+	msg += formatContext(actionResult.Context)
 	return agent.ToolResult{Content: msg}, nil
 }
 
@@ -368,17 +402,8 @@ func (t *AccessibilityTool) annotate(ctx context.Context, args accessibilityArgs
 		App         string                       `json:"app"`
 		PID         int                          `json:"pid"`
 		Window      string                       `json:"window"`
-		Annotations []struct {
-			Label  int     `json:"label"`
-			Ref    string  `json:"ref"`
-			Role   string  `json:"role"`
-			Title  string  `json:"title,omitempty"`
-			X      float64 `json:"x"`
-			Y      float64 `json:"y"`
-			Width  float64 `json:"width"`
-			Height float64 `json:"height"`
-		} `json:"annotations"`
-		RefPaths map[string]map[string]string `json:"ref_paths"`
+		Annotations []annotationEntry            `json:"annotations"`
+		RefPaths    map[string]map[string]string `json:"ref_paths"`
 	}
 	if err := json.Unmarshal(result, &annotateResult); err != nil {
 		return agent.ToolResult{Content: fmt.Sprintf("parse error: %v", err), IsError: true}, nil
@@ -407,10 +432,18 @@ func (t *AccessibilityTool) annotate(ctx context.Context, args accessibilityArgs
 	}
 	content := strings.Join(lines, "\n")
 
-	// Take a screenshot alongside the annotation data
-	_, imgBlock, captureErr := CaptureAndEncode(DefaultAPIWidth)
+	// Take a screenshot and draw annotation markers on it
+	screenshotPath, imgBlock, captureErr := CaptureAndEncode(DefaultAPIWidth)
 	var images []agent.ImageBlock
 	if captureErr == nil {
+		// Get screen dimensions for coordinate mapping
+		screenW, screenH, dimErr := GetScreenDimensions()
+		if dimErr == nil && len(annotateResult.Annotations) > 0 {
+			annotatedBlock, annotErr := drawAnnotations(screenshotPath, annotateResult.Annotations, screenW, screenH)
+			if annotErr == nil {
+				imgBlock = annotatedBlock
+			}
+		}
 		images = append(images, imgBlock)
 	}
 
@@ -449,8 +482,141 @@ func (t *AccessibilityTool) scroll(ctx context.Context, args accessibilityArgs) 
 	}
 
 	var actionResult struct {
-		Result string `json:"result"`
+		Result  string      `json:"result"`
+		Context *appContext `json:"context,omitempty"`
 	}
 	json.Unmarshal(result, &actionResult)
-	return agent.ToolResult{Content: actionResult.Result}, nil
+	return agent.ToolResult{Content: actionResult.Result + formatContext(actionResult.Context)}, nil
+}
+
+type annotationEntry struct {
+	Label  int     `json:"label"`
+	Ref    string  `json:"ref"`
+	Role   string  `json:"role"`
+	Title  string  `json:"title,omitempty"`
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
+}
+
+// drawAnnotations loads a screenshot image and draws numbered markers at each
+// annotation's center position. Returns the annotated image as an ImageBlock.
+func drawAnnotations(imgPath string, annotations []annotationEntry, screenW, screenH int) (agent.ImageBlock, error) {
+	f, err := os.Open(imgPath)
+	if err != nil {
+		return agent.ImageBlock{}, err
+	}
+	defer f.Close()
+
+	img, _, err := image.Decode(f)
+	if err != nil {
+		return agent.ImageBlock{}, err
+	}
+
+	bounds := img.Bounds()
+	annotated := image.NewRGBA(bounds)
+	draw.Draw(annotated, bounds, img, image.Point{}, draw.Src)
+
+	// Scale: screen coordinates -> image coordinates
+	scaleX := float64(bounds.Dx()) / float64(screenW)
+	scaleY := float64(bounds.Dy()) / float64(screenH)
+
+	for _, a := range annotations {
+		// Center of element in screen coords -> image coords
+		cx := int((a.X + a.Width/2) * scaleX)
+		cy := int((a.Y + a.Height/2) * scaleY)
+		drawMarker(annotated, cx, cy, a.Label)
+	}
+
+	// Write annotated image to a temp file
+	outFile, err := os.CreateTemp("", "shannon-annotated-*.png")
+	if err != nil {
+		return agent.ImageBlock{}, err
+	}
+	defer outFile.Close()
+
+	if err := png.Encode(outFile, annotated); err != nil {
+		os.Remove(outFile.Name())
+		return agent.ImageBlock{}, err
+	}
+
+	block, err := EncodeImage(outFile.Name())
+	if err != nil {
+		os.Remove(outFile.Name())
+		return agent.ImageBlock{}, err
+	}
+	return block, nil
+}
+
+// drawMarker draws a filled circle with a contrasting border at (x, y) on the image.
+func drawMarker(img *image.RGBA, x, y, label int) {
+	radius := 10
+	bounds := img.Bounds()
+	red := color.RGBA{R: 255, G: 50, B: 50, A: 230}
+	white := color.RGBA{R: 255, G: 255, B: 255, A: 255}
+
+	for dy := -radius; dy <= radius; dy++ {
+		for dx := -radius; dx <= radius; dx++ {
+			dist := math.Sqrt(float64(dx*dx + dy*dy))
+			if dist > float64(radius) {
+				continue
+			}
+			px, py := x+dx, y+dy
+			if px < bounds.Min.X || px >= bounds.Max.X || py < bounds.Min.Y || py >= bounds.Max.Y {
+				continue
+			}
+			if dist > float64(radius-2) {
+				img.Set(px, py, white)
+			} else {
+				img.Set(px, py, red)
+			}
+		}
+	}
+
+	// Draw label number using simple pixel font
+	drawLabelNumber(img, x, y, label, white)
+}
+
+// digitPatterns contains 5x7 bitmap patterns for digits 0-9.
+// Each digit is a 5-wide, 7-tall grid stored as 7 bytes where bits 4..0 represent columns.
+var digitPatterns = [10][7]byte{
+	{0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E}, // 0
+	{0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E}, // 1
+	{0x0E, 0x11, 0x01, 0x06, 0x08, 0x10, 0x1F}, // 2
+	{0x0E, 0x11, 0x01, 0x06, 0x01, 0x11, 0x0E}, // 3
+	{0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02}, // 4
+	{0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E}, // 5
+	{0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E}, // 6
+	{0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08}, // 7
+	{0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E}, // 8
+	{0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C}, // 9
+}
+
+// drawLabelNumber renders a number at position (cx, cy) using a simple bitmap font.
+func drawLabelNumber(img *image.RGBA, cx, cy, num int, col color.RGBA) {
+	s := fmt.Sprintf("%d", num)
+	totalW := len(s) * 6 // 5px wide + 1px gap per digit
+	startX := cx - totalW/2
+	startY := cy - 3 // center vertically (7px tall / 2)
+	bounds := img.Bounds()
+
+	for i, ch := range s {
+		d := int(ch - '0')
+		if d < 0 || d > 9 {
+			continue
+		}
+		ox := startX + i*6
+		for row := 0; row < 7; row++ {
+			bits := digitPatterns[d][row]
+			for colIdx := 0; colIdx < 5; colIdx++ {
+				if bits&(1<<uint(4-colIdx)) != 0 {
+					px, py := ox+colIdx, startY+row
+					if px >= bounds.Min.X && px < bounds.Max.X && py >= bounds.Min.Y && py < bounds.Max.Y {
+						img.Set(px, py, col)
+					}
+				}
+			}
+		}
+	}
 }

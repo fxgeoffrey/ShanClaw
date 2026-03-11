@@ -7,6 +7,16 @@ func waitFor(pid: Int, condition: String, value: String?, query: String?, role: 
 
     let deadline = Date().addingTimeInterval(timeout)
     let appRef = AXUIElementCreateApplication(Int32(pid))
+    let hasElementSelector = !(query == nil || query!.isEmpty) || !(role == nil || role!.isEmpty)
+
+    guard condition == "titleContains" || condition == "urlContains" ||
+        condition == "titleChanged" || condition == "urlChanged" ||
+        hasElementSelector else {
+        return (nil, ErrorInfo(
+            code: -1,
+            message: "elementExists/elementGone require at least one of 'query' or 'role'"
+        ))
+    }
 
     // Capture initial values for "changed" conditions
     let initialTitle: String?
@@ -21,6 +31,13 @@ func waitFor(pid: Int, condition: String, value: String?, query: String?, role: 
     default:
         initialTitle = nil
         initialURL = nil
+    }
+
+    // Validate: elementExists/elementGone require at least a query or role
+    if condition == "elementExists" || condition == "elementGone" {
+        if (query == nil || query!.isEmpty) && (role == nil || role!.isEmpty) {
+            return (nil, ErrorInfo(code: -1, message: "\(condition) requires at least 'query' or 'role' to identify the target element"))
+        }
     }
 
     while Date() < deadline {

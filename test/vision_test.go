@@ -34,7 +34,7 @@ func TestVisionLoop_ScreenshotReturnsImage(t *testing.T) {
 
 func TestVisionLoop_ComputerScreenshotAction(t *testing.T) {
 	// Screenshot action doesn't use ax_server, so nil client is fine
-	reg, cleanup := tools.RegisterLocalTools(nil)
+	reg, _, cleanup := tools.RegisterLocalTools(nil)
 	defer cleanup()
 	ct, _ := reg.Get("computer")
 	result, err := ct.Run(context.Background(), `{"action":"screenshot"}`)
@@ -55,7 +55,7 @@ func TestVisionLoop_ComputerNativeLeftClick(t *testing.T) {
 	// Test that Anthropic native left_click with coordinate array parses correctly
 	// Will fail with ax_server error since we're not in a real GUI context,
 	// but that's fine — it means the action was correctly mapped to "click"
-	reg, cleanup := tools.RegisterLocalTools(nil)
+	reg, _, cleanup := tools.RegisterLocalTools(nil)
 	defer cleanup()
 	ct, _ := reg.Get("computer")
 	result, err := ct.Run(context.Background(), `{"action":"left_click","coordinate":[640,400]}`)

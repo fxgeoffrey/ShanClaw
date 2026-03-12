@@ -29,7 +29,7 @@ func TestRegisterAll_WithServerTools(t *testing.T) {
 	}
 
 	// Check local tools are registered
-	for _, name := range []string{"file_read", "file_write", "file_edit", "glob", "grep", "bash", "think", "directory_list", "http", "system_info", "clipboard", "notify", "process", "applescript", "accessibility", "ghostty", "browser", "screenshot", "computer", "wait_for", "schedule_create", "schedule_list", "schedule_update", "schedule_remove"} {
+	for _, name := range []string{"use_skill", "file_read", "file_write", "file_edit", "glob", "grep", "bash", "think", "directory_list", "http", "system_info", "clipboard", "notify", "process", "applescript", "accessibility", "ghostty", "browser", "screenshot", "computer", "wait_for", "schedule_create", "schedule_list", "schedule_update", "schedule_remove"} {
 		if _, ok := reg.Get(name); !ok {
 			t.Errorf("local tool %q not registered", name)
 		}
@@ -42,10 +42,10 @@ func TestRegisterAll_WithServerTools(t *testing.T) {
 		}
 	}
 
-	// Total: 24 local + 2 server = 26
+	// Total: 25 local + 2 server = 27
 	schemas := reg.Schemas()
-	if len(schemas) != 26 {
-		t.Errorf("expected 26 tools, got %d", len(schemas))
+	if len(schemas) != 27 {
+		t.Errorf("expected 27 tools, got %d", len(schemas))
 	}
 }
 
@@ -69,8 +69,8 @@ func TestRegisterAll_ServerUnavailable(t *testing.T) {
 	}
 
 	schemas := reg.Schemas()
-	if len(schemas) != 24 {
-		t.Errorf("expected 24 local tools, got %d", len(schemas))
+	if len(schemas) != 25 {
+		t.Errorf("expected 25 local tools, got %d", len(schemas))
 	}
 }
 
@@ -112,9 +112,9 @@ func TestRegisterAll_LocalPriority(t *testing.T) {
 		t.Error("web_search should be a server tool")
 	}
 
-	// 24 local + 1 server (bash skipped) = 25
+	// 25 local + 1 server (bash skipped) = 26
 	schemas := reg.Schemas()
-	if len(schemas) != 25 {
-		t.Errorf("expected 25 tools, got %d", len(schemas))
+	if len(schemas) != 26 {
+		t.Errorf("expected 26 tools, got %d", len(schemas))
 	}
 }

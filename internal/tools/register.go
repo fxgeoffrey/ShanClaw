@@ -14,6 +14,7 @@ import (
 	"github.com/Kocoro-lab/shan/internal/mcp"
 	"github.com/Kocoro-lab/shan/internal/schedule"
 	"github.com/Kocoro-lab/shan/internal/session"
+	"github.com/Kocoro-lab/shan/internal/skills"
 )
 
 // RegisterLocalTools registers only the local tools.
@@ -21,8 +22,11 @@ import (
 // are passed to the BashTool so they skip approval.
 // Returns the registry and a cleanup function that shuts down any active
 // tool resources (e.g. browser process).
-func RegisterLocalTools(cfg *config.Config) (*agent.ToolRegistry, func()) {
+func RegisterLocalTools(cfg *config.Config) (*agent.ToolRegistry, *[]*skills.Skill, func()) {
 	reg := agent.NewToolRegistry()
+
+	skillsPtr := &[]*skills.Skill{}
+	reg.Register(newUseSkillTool(skillsPtr))
 
 	reg.Register(&FileReadTool{})
 	reg.Register(&FileWriteTool{})
@@ -71,7 +75,7 @@ func RegisterLocalTools(cfg *config.Config) (*agent.ToolRegistry, func()) {
 		browser.Cleanup()
 		axClient.Close()
 	}
-	return reg, cleanup
+	return reg, skillsPtr, cleanup
 }
 
 // RegisterServerTools fetches server-side tools from the gateway and appends
@@ -152,7 +156,7 @@ func CompleteRegistration(ctx context.Context, gw *client.GatewayClient, cfg *co
 // If agentDef is non-nil, tool filtering and MCP scoping are applied per-agent.
 // The returned cleanup function must be called on shutdown.
 func RegisterAll(gw *client.GatewayClient, cfg *config.Config, agentDef ...*agents.Agent) (*agent.ToolRegistry, func(), error) {
-	reg, baseCleanup := RegisterLocalTools(cfg)
+	reg, _, baseCleanup := RegisterLocalTools(cfg)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

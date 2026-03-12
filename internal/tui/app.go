@@ -253,7 +253,7 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 	}
 
 	// Local tools only (fast, sync) — MCP + gateway loaded async in Init
-	reg, toolCleanup := tools.RegisterLocalTools(cfg)
+	reg, _, toolCleanup := tools.RegisterLocalTools(cfg)
 	tools.RegisterSessionSearch(reg, sessMgr)
 
 	hookRunner := hooks.NewHookRunner(cfg.Hooks)

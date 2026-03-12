@@ -388,7 +388,7 @@ var mcpServeCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("config: %w", err)
 		}
-		reg, cleanup := tools.RegisterLocalTools(cfg)
+		reg, _, cleanup := tools.RegisterLocalTools(cfg)
 		defer cleanup()
 
 		shannonDir := config.ShannonDir()

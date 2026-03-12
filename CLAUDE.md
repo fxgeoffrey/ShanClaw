@@ -14,6 +14,7 @@ Go CLI tool (`shan`) — the command-line interface to the Shannon AI platform. 
 - **modernc.org/sqlite** — pure-Go SQLite for session FTS5 search index
 - **chromedp** — browser automation (isolated Chrome profile)
 - **mcp-go** — MCP client/server
+- **adrg/frontmatter** — YAML frontmatter parsing for SKILL.md files
 
 ## Project Structure
 
@@ -65,7 +66,7 @@ internal/
   instructions/
     loader.go          # LoadInstructions, LoadMemory, LoadCustomCommands
   prompt/
-    builder.go         # BuildSystemPrompt — 6 layers, token-budgeted
+    builder.go         # BuildSystemPrompt — 7 layers (includes skill catalog), token-budgeted
   session/
     store.go           # Session JSON persistence + SQLite index integration
     manager.go         # NewSession, Resume, Save, List, Search, Close
@@ -75,14 +76,15 @@ internal/
     client.go          # MCP client manager (stdio + HTTP transports)
     server.go          # MCP server (JSON-RPC 2.0 over stdio)
   skills/
-    registry.go        # Skill type, SkillTypePrompt constant
-    loader.go          # LoadSkills from agent skills/*.yaml
+    registry.go        # Skill struct (Anthropic spec), SkillMeta DTO
+    loader.go          # LoadSkills from SKILL.md dirs (agent > global > bundled)
+    validate.go        # ValidateSkillName (Anthropic spec regex)
   tools/
     register.go        # RegisterLocalTools, RegisterAll, CompleteRegistration, ApplyToolFilter
-    # 22 tool files: file_read, file_write, file_edit, glob, grep, bash,
+    # 23 tool files: file_read, file_write, file_edit, glob, grep, bash,
     # directory_list, think, http, system_info, clipboard, notify, process,
     # applescript, accessibility, browser, screenshot, computer,
-    # cloud_delegate, imaging, pinchtab, safe_path
+    # cloud_delegate, imaging, pinchtab, safe_path, skill (use_skill)
     schedule.go        # schedule_create/list/update/remove tools
     session_search.go  # session_search tool (FTS5 keyword search)
     mcp_tool.go        # MCPTool adapter
@@ -115,7 +117,8 @@ Unknown tools → denied by default (fail-safe).
 Scalars override, lists merge+dedup, structs field-level merge. MCP server env var casing preserved via direct YAML re-read.
 
 ### File Paths
-- Agent definitions: `~/.shannon/agents/<name>/AGENT.md` + `MEMORY.md` + `config.yaml` + `commands/*.md` + `skills/*.yaml`
+- Agent definitions: `~/.shannon/agents/<name>/AGENT.md` + `MEMORY.md` + `config.yaml` + `commands/*.md` + `skills/<skill-name>/SKILL.md`
+- Global skills: `~/.shannon/skills/<skill-name>/SKILL.md` (shared across agents)
 - Sessions: `~/.shannon/sessions/` (default) or `~/.shannon/agents/<name>/sessions/` (per-agent)
 - Session index: `<sessions-dir>/sessions.db` (SQLite FTS5, auto-rebuilt from JSON if deleted)
 - Schedule index: `~/.shannon/schedules.json`
@@ -152,11 +155,12 @@ Schedule tests use `t.TempDir()` as `plistDir` — they never write to real `~/L
 - Release: `git tag -a vX.Y.Z` → `git push origin vX.Y.Z` → CI builds + publishes
 - `docs/plans/` is gitignored — never commit plan files
 
-## 24 Local Tools
+## 25 Local Tools
 
 **File ops:** file_read, file_write, file_edit, glob, grep, directory_list
 **Shell/system:** bash, system_info, process, http, think
 **macOS GUI:** accessibility (primary), applescript, screenshot, computer, clipboard, notify, browser
 **Schedule:** schedule_create, schedule_list, schedule_update, schedule_remove
 **Session:** session_search
+**Skills:** use_skill
 **Cloud:** cloud_delegate

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Kocoro-lab/shan/internal/agent"
@@ -33,6 +34,9 @@ type Server struct {
 	approvalBroker         *ApprovalBroker
 	eventBus               *EventBus
 	notifyApprovalResolved func(p ApprovalResolvedPayload) error
+	// pendingBrokers maps requestID → per-request ApprovalBroker.
+	// SSE handlers register here so POST /approval can find the right broker.
+	pendingBrokers sync.Map // map[string]*ApprovalBroker
 }
 
 func NewServer(port int, client *Client, deps *ServerDeps, version string) *Server {
@@ -154,7 +158,12 @@ func (s *Server) handleApproval(w http.ResponseWriter, r *http.Request) {
 		s.eventBus.Emit(Event{Type: EventApprovalResolved, Payload: payload})
 	}
 
-	s.approvalBroker.Resolve(req.RequestID, req.Decision)
+	// Look up the per-request broker (SSE path) or fall back to server broker (WS path).
+	if b, ok := s.pendingBrokers.Load(req.RequestID); ok {
+		b.(*ApprovalBroker).Resolve(req.RequestID, req.Decision)
+	} else {
+		s.approvalBroker.Resolve(req.RequestID, req.Decision)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"ok":true}`))
@@ -412,6 +421,9 @@ func (s *Server) handleMessageSSE(w http.ResponseWriter, r *http.Request, req Ru
 	})
 	// Inherit onRequest callback from the server broker for EventBus emission.
 	reqBroker.onRequest = s.approvalBroker.onRequest
+	// Register pending requestIDs so POST /approval can find this broker.
+	reqBroker.onRegister = func(requestID string) { s.pendingBrokers.Store(requestID, reqBroker) }
+	reqBroker.onDeregister = func(requestID string) { s.pendingBrokers.Delete(requestID) }
 
 	// Cancel only this request's pending approvals when the SSE stream ends.
 	defer reqBroker.CancelAll()

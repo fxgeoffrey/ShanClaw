@@ -25,6 +25,8 @@ type ApprovalBroker struct {
 	toolAutoApprove map[string]bool // in-memory only, non-bash "always allow"
 	sendFn          func(req ApprovalRequest) error
 	onRequest       func(requestID, tool, args string)
+	onRegister      func(requestID string) // called when a pending entry is created
+	onDeregister    func(requestID string) // called when a pending entry is cleaned up
 }
 
 // NewApprovalBroker creates a broker. sendFn sends an approval_request over WS.
@@ -57,7 +59,14 @@ func (b *ApprovalBroker) Request(ctx context.Context, channel, threadID, agent, 
 	b.pending[reqID] = ch
 	b.mu.Unlock()
 
+	if b.onRegister != nil {
+		b.onRegister(reqID)
+	}
+
 	defer func() {
+		if b.onDeregister != nil {
+			b.onDeregister(reqID)
+		}
 		b.mu.Lock()
 		delete(b.pending, reqID)
 		b.mu.Unlock()

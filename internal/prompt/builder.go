@@ -1,9 +1,12 @@
 package prompt
 
 import (
+	"fmt"
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/Kocoro-lab/shan/internal/skills"
 )
 
 // Layer character budgets.
@@ -21,8 +24,9 @@ type PromptOptions struct {
 	ToolNames    []string // from ToolRegistry, auto-generated
 	ServerTools  []string // server tool names (optional)
 	MCPContext   string   // context from MCP servers (auth info, usage hints)
-	CWD          string   // current working directory
-	SessionInfo  string   // optional session context
+	Skills       []*skills.Skill
+	CWD          string // current working directory
+	SessionInfo  string // optional session context
 }
 
 // BuildSystemPrompt assembles the complete system prompt from layers.
@@ -60,19 +64,31 @@ func BuildSystemPrompt(opts PromptOptions) string {
 		sb.WriteString(".")
 	}
 
-	// 5. macOS automation guidance (only on darwin with relevant tools)
+	// 5. Available Skills
+	if len(opts.Skills) > 0 {
+		sb.WriteString("\n\n## Available Skills\n\n")
+		sb.WriteString("You can activate a skill by calling the `use_skill` tool with the skill name.\n")
+		sb.WriteString("Only activate a skill when the user's request matches the skill's purpose.\n\n")
+		sb.WriteString("| Skill | Description |\n")
+		sb.WriteString("|-------|-------------|\n")
+		for _, s := range opts.Skills {
+			sb.WriteString(fmt.Sprintf("| %s | %s |\n", s.Name, s.Description))
+		}
+	}
+
+	// 6. macOS automation guidance (only on darwin with relevant tools)
 	if guidance := macOSAutomationGuidance(opts.ToolNames); guidance != "" {
 		sb.WriteString("\n\n")
 		sb.WriteString(guidance)
 	}
 
-	// 6. MCP server context
+	// 7. MCP server context
 	if mcp := strings.TrimSpace(opts.MCPContext); mcp != "" {
 		sb.WriteString("\n\n## MCP Server Context\n")
 		sb.WriteString(mcp)
 	}
 
-	// 7. Context
+	// 8. Context
 	contextParts := buildContext(opts.CWD, opts.SessionInfo)
 	if contextParts != "" {
 		sb.WriteString("\n\n## Context\n")

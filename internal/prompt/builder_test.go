@@ -3,6 +3,8 @@ package prompt
 import (
 	"strings"
 	"testing"
+
+	"github.com/Kocoro-lab/shan/internal/skills"
 )
 
 func TestBuildSystemPrompt_FullAssembly(t *testing.T) {
@@ -225,5 +227,38 @@ func TestTruncate(t *testing.T) {
 				t.Errorf("truncate(%q, %d) = %q, want %q", tt.input, tt.max, got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestBuildSystemPrompt_SkillCatalog(t *testing.T) {
+	opts := PromptOptions{
+		BasePrompt: "Base prompt.",
+		Skills: []*skills.Skill{
+			{Name: "pdf", Description: "Extract text from PDFs"},
+			{Name: "mcp-builder", Description: "Guide for creating MCP servers"},
+		},
+	}
+	result := BuildSystemPrompt(opts)
+	if !strings.Contains(result, "## Available Skills") {
+		t.Error("missing Available Skills section")
+	}
+	if !strings.Contains(result, "| pdf") {
+		t.Error("missing pdf skill in catalog")
+	}
+	if !strings.Contains(result, "| mcp-builder") {
+		t.Error("missing mcp-builder skill in catalog")
+	}
+	if !strings.Contains(result, "use_skill") {
+		t.Error("missing use_skill instruction")
+	}
+}
+
+func TestBuildSystemPrompt_NoSkills(t *testing.T) {
+	opts := PromptOptions{
+		BasePrompt: "Base prompt.",
+	}
+	result := BuildSystemPrompt(opts)
+	if strings.Contains(result, "## Available Skills") {
+		t.Error("should not have Available Skills section when no skills")
 	}
 }

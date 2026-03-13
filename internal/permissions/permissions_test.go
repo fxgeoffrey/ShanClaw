@@ -92,7 +92,8 @@ func TestCheckCommand_DeniedCommands(t *testing.T) {
 	}{
 		{"apt-get install vim", "deny"},
 		{"yum install curl", "deny"},
-		{"ls -la", "ask"},
+		{"ls -la", "allow"},       // built-in safe default
+		{"some-unknown", "ask"},   // not denied, not safe → ask
 	}
 
 	for _, tt := range tests {
@@ -146,7 +147,7 @@ func TestCheckCommand_CompoundCommands(t *testing.T) {
 		{"ls -la; echo test", "allow"},          // both allowed
 		{"ls || echo fallback", "allow"},        // both allowed
 		{"ls && someunknown", "ask"},            // second not in allowed list
-		{"cat foo.txt | grep bar", "ask"},       // grep not allowed
+		{"cat foo.txt | grep bar", "allow"},     // both are built-in safe defaults
 	}
 
 	for _, tt := range tests {
@@ -445,16 +446,117 @@ func TestIsSensitiveFileWithConfig_NilConfig(t *testing.T) {
 func TestCheckCommand_EmptyConfig(t *testing.T) {
 	cfg := &PermissionsConfig{}
 
-	// With empty allowed/denied lists, everything goes to "ask"
+	// Built-in safe commands are allowed even with empty config
 	decision, _ := CheckCommand("ls -la", cfg)
+	if decision != "allow" {
+		t.Errorf("built-in safe 'ls' should be allowed, got %q", decision)
+	}
+
+	// Unknown commands still go to "ask"
+	decision, _ = CheckCommand("some-unknown-tool --flag", cfg)
 	if decision != "ask" {
-		t.Errorf("empty config should return ask, got %q", decision)
+		t.Errorf("unknown command should return ask, got %q", decision)
 	}
 
 	// Hard blocks still work
 	decision, _ = CheckCommand("rm -rf /", cfg)
 	if decision != "deny" {
 		t.Errorf("hard block should still deny with empty config, got %q", decision)
+	}
+}
+
+func TestCheckCommand_DefaultSafeCommands(t *testing.T) {
+	cfg := &PermissionsConfig{}
+
+	tests := []struct {
+		cmd      string
+		decision string
+	}{
+		// Tier 1: read-only
+		{"ls", "allow"},
+		{"ls -la /tmp", "allow"},
+		{"pwd", "allow"},
+		{"whoami", "allow"},
+		{"cat /etc/hosts", "allow"},
+		{"grep pattern file.txt", "allow"},
+		{"ps aux", "allow"},
+		{"git status", "allow"},
+		{"git log --oneline", "allow"},
+		{"docker ps -a", "allow"},
+		{"kubectl get pods", "allow"},
+		{"top -l 1 -n 5", "allow"},
+		{"jq .name package.json", "allow"},
+		{"diff file1 file2", "allow"},
+		{"sw_vers", "allow"},
+		{"defaults read com.apple.Finder", "allow"},
+		{"gh pr list", "allow"},
+		{"terraform state list", "allow"},
+		{"brew list", "allow"},
+
+		// Tier 2: dev-trusted
+		{"go build ./...", "allow"},
+		{"go test ./internal/...", "allow"},
+		{"make test", "allow"},
+		{"cargo test --release", "allow"},
+		{"npm test", "allow"},
+		{"npm run lint", "allow"},
+		{"pytest -v", "allow"},
+		{"eslint src/", "allow"},
+
+		// Exact match: env without args is safe
+		{"env", "allow"},
+
+		// Should NOT be safe
+		{"curl https://example.com", "ask"},
+		{"wget https://example.com", "ask"},
+		{"rm /tmp/test", "ask"},         // rm without -rf is not hard-blocked, just "ask"
+		{"kill 1234", "ask"},
+		{"sudo ls", "ask"},
+		{"ssh user@host", "ask"},
+		{"npm install express", "ask"},
+		{"git push origin main", "ask"},
+		{"git commit -m test", "ask"},
+		{"docker run ubuntu", "ask"},
+		{"kubectl apply -f deploy.yaml", "ask"},
+		{"terraform apply", "ask"},
+		{"brew install wget", "ask"},
+		{"pip install requests", "ask"},
+		{"open https://example.com", "ask"},
+	}
+
+	for _, tt := range tests {
+		decision, _ := CheckCommand(tt.cmd, cfg)
+		if decision != tt.decision {
+			t.Errorf("CheckCommand(%q) = %q, want %q", tt.cmd, decision, tt.decision)
+		}
+	}
+}
+
+func TestCheckCommand_DeniedOverridesDefaultSafe(t *testing.T) {
+	cfg := &PermissionsConfig{
+		DeniedCommands: []string{"ls *"},
+	}
+
+	// User denied_commands should override built-in safe defaults
+	decision, _ := CheckCommand("ls -la", cfg)
+	if decision != "deny" {
+		t.Errorf("denied_commands should override default safe, got %q", decision)
+	}
+}
+
+func TestCheckCommand_EnvExactMatchOnly(t *testing.T) {
+	cfg := &PermissionsConfig{}
+
+	// "env" alone is safe (prints environment)
+	decision, _ := CheckCommand("env", cfg)
+	if decision != "allow" {
+		t.Errorf("bare 'env' should be allowed, got %q", decision)
+	}
+
+	// "env CMD" runs a command — should NOT be safe
+	decision, _ = CheckCommand("env MALICIOUS=1 bash", cfg)
+	if decision != "ask" {
+		t.Errorf("'env CMD' should require approval, got %q", decision)
 	}
 }
 

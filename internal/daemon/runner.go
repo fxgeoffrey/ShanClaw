@@ -111,7 +111,11 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 	}
 	agentName := req.Agent
 	prompt := req.Text
-	explicitAgent := req.Agent != "" // explicitly requested, not parsed from @mention
+	// "default" is not a real agent — it means "use base agent, no --agent flag".
+	if agentName == "default" {
+		agentName = ""
+	}
+	explicitAgent := agentName != "" // explicitly requested, not parsed from @mention
 
 	// Parse @mention if no explicit agent was provided.
 	if agentName == "" {

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -387,6 +388,12 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 
 	// Read tracker: enforces read-before-edit for file_edit/file_write
 	readTracker := NewReadTracker()
+	// Pre-seed MEMORY.md as "read" — its content is already in the system prompt,
+	// so the agent can file_edit it directly without a redundant file_read.
+	if a.memoryDir != "" {
+		readTracker.MarkRead(filepath.Join(a.memoryDir, "MEMORY.md"))
+		ctx = WithMemoryDir(ctx, a.memoryDir)
+	}
 	ctx = context.WithValue(ctx, readTrackerKey{}, readTracker)
 
 	// Loop behavior constants

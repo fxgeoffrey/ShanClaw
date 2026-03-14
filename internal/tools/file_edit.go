@@ -46,6 +46,15 @@ func (t *FileEditTool) Run(ctx context.Context, argsJSON string) (agent.ToolResu
 		return agent.ToolResult{Content: err.Error(), IsError: true}, nil
 	}
 
+	// Block file_edit on the agent's MEMORY.md — use memory_append instead.
+	// file_edit is a read-modify-write that races under concurrent sessions.
+	if agent.IsMemoryFile(ctx, args.Path) {
+		return agent.ToolResult{
+			Content: "Cannot edit MEMORY.md with file_edit — it races under concurrent sessions. Use the memory_append tool instead.",
+			IsError: true,
+		}, nil
+	}
+
 	data, err := os.ReadFile(args.Path)
 	if err != nil {
 		return agent.ToolResult{Content: fmt.Sprintf("error reading file: %v", err), IsError: true}, nil

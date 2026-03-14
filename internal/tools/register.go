@@ -40,6 +40,7 @@ func RegisterLocalTools(cfg *config.Config) (*agent.ToolRegistry, *[]*skills.Ski
 	}
 	reg.Register(bashTool)
 
+	reg.Register(&MemoryAppendTool{})
 	reg.Register(&ThinkTool{})
 	reg.Register(&DirectoryListTool{})
 	reg.Register(&HTTPTool{})

@@ -44,6 +44,14 @@ func (t *FileWriteTool) Run(ctx context.Context, argsJSON string) (agent.ToolRes
 		if err := agent.CheckReadBeforeWrite(ctx, args.Path); err != nil {
 			return agent.ToolResult{Content: err.Error(), IsError: true}, nil
 		}
+		// Block file_write on the agent's MEMORY.md — use memory_append instead.
+		// Prevents one session from clobbering another session's memory entries.
+		if agent.IsMemoryFile(ctx, args.Path) {
+			return agent.ToolResult{
+				Content: "Cannot overwrite MEMORY.md with file_write — it destroys entries from other sessions. Use the memory_append tool instead.",
+				IsError: true,
+			}, nil
+		}
 	}
 
 	if err := os.MkdirAll(filepath.Dir(args.Path), 0755); err != nil {

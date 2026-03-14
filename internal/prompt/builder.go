@@ -91,9 +91,10 @@ func BuildSystemPrompt(opts PromptOptions) string {
 
 	// 8. Memory Persistence guidance
 	if opts.MemoryDir != "" {
-		memPath := opts.MemoryDir + "/MEMORY.md"
 		sb.WriteString("\n\n## Memory Persistence\n")
-		sb.WriteString(fmt.Sprintf("When you discover something worth remembering across future conversations, write it to `%s` using file_write or file_edit. Good candidates:\n", memPath))
+		sb.WriteString("Your current memory is shown above in the Memory section. When you discover something worth remembering across future conversations, use the `memory_append` tool to add new entries.\n")
+		sb.WriteString("IMPORTANT: NEVER use file_write or file_edit on MEMORY.md — they race under concurrent sessions. The memory_append tool is flock-protected and safe.\n")
+		sb.WriteString("Good candidates for memory:\n")
 		sb.WriteString("- Decisions the user made (technical, design, or preferences)\n")
 		sb.WriteString("- User corrections about how they want to work\n")
 		sb.WriteString("- Important facts about projects, people, or systems\n")

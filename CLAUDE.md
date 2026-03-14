@@ -164,12 +164,13 @@ Schedule tests use `t.TempDir()` as `plistDir` — they never write to real `~/L
 - Release: `git tag -a vX.Y.Z` → `git push origin vX.Y.Z` → CI builds + publishes
 - `docs/plans/` is gitignored — never commit plan files
 
-## 25 Local Tools
+## 26 Local Tools
 
 **File ops:** file_read, file_write, file_edit, glob, grep, directory_list
 **Shell/system:** bash, system_info, process, http, think
 **macOS GUI:** accessibility (primary), applescript, screenshot, computer, clipboard, notify, browser
 **Schedule:** schedule_create, schedule_list, schedule_update, schedule_remove
 **Session:** session_search
+**Memory:** memory_append (flock-protected append to MEMORY.md)
 **Skills:** use_skill
 **Cloud:** cloud_delegate

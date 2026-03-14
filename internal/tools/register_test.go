@@ -42,10 +42,10 @@ func TestRegisterAll_WithServerTools(t *testing.T) {
 		}
 	}
 
-	// Total: 25 local + 2 server = 27
+	// Total: 26 local + 2 server = 28
 	schemas := reg.Schemas()
-	if len(schemas) != 27 {
-		t.Errorf("expected 27 tools, got %d", len(schemas))
+	if len(schemas) != 28 {
+		t.Errorf("expected 28 tools, got %d", len(schemas))
 	}
 }
 
@@ -69,8 +69,8 @@ func TestRegisterAll_ServerUnavailable(t *testing.T) {
 	}
 
 	schemas := reg.Schemas()
-	if len(schemas) != 25 {
-		t.Errorf("expected 25 local tools, got %d", len(schemas))
+	if len(schemas) != 26 {
+		t.Errorf("expected 26 local tools, got %d", len(schemas))
 	}
 }
 
@@ -112,10 +112,10 @@ func TestRegisterAll_LocalPriority(t *testing.T) {
 		t.Error("web_search should be a server tool")
 	}
 
-	// 25 local + 1 server (bash skipped) = 26
+	// 26 local + 1 server (bash skipped) = 27
 	schemas := reg.Schemas()
-	if len(schemas) != 26 {
-		t.Errorf("expected 26 tools, got %d", len(schemas))
+	if len(schemas) != 27 {
+		t.Errorf("expected 27 tools, got %d", len(schemas))
 	}
 }
 

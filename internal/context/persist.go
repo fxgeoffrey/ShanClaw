@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Kocoro-lab/shan/internal/client"
@@ -150,8 +151,22 @@ func writeDetailFile(memoryDir, content string) (string, error) {
 	return filename, nil
 }
 
-// appendToFile appends content to a file, creating it if needed.
+// appendToFile appends content to a file under an exclusive flock,
+// creating the file if needed. The lock file (<path>.lock) is persistent
+// and must not be deleted (same lock used by memory_append tool).
 func appendToFile(path, content string) error {
+	lockPath := path + ".lock"
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return fmt.Errorf("open lock: %w", err)
+	}
+	defer lockFile.Close()
+
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("flock: %w", err)
+	}
+	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
+
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return err

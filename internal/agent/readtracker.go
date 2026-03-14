@@ -5,10 +5,38 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // readTrackerKey is the context key for ReadTracker.
 type readTrackerKey struct{}
+
+// memoryDirKey is the context key for the agent's memory directory path.
+type memoryDirKey struct{}
+
+// WithMemoryDir returns a new context with the memory directory set.
+func WithMemoryDir(ctx context.Context, dir string) context.Context {
+	return context.WithValue(ctx, memoryDirKey{}, dir)
+}
+
+// MemoryDirFromContext returns the memory directory from context, or "".
+func MemoryDirFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(memoryDirKey{}).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// IsMemoryFile returns true if path resolves to the MEMORY.md inside the
+// agent's configured memory directory. Returns false when no memory dir
+// is set in context (e.g. tool called outside agent loop).
+func IsMemoryFile(ctx context.Context, path string) bool {
+	dir, ok := ctx.Value(memoryDirKey{}).(string)
+	if !ok || dir == "" {
+		return false
+	}
+	return strings.EqualFold(normalizePath(path), normalizePath(filepath.Join(dir, "MEMORY.md")))
+}
 
 // ReadTrackerKey returns the context key used to store a ReadTracker.
 // Exported for use in tests that need to inject a tracker into context.

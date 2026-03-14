@@ -232,19 +232,20 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		route.injectCh = make(chan string, 10) // buffered for async sends
 		ctx = reqCtx
 		defer func() {
-			route.mu.Lock()
-			sessionID := ""
+			// route.mu is already held from LockRouteWithManager — do NOT
+			// re-acquire it (sync.Mutex is not reentrant; that deadlocks).
+			// Clean up under the existing lock, then release via UnlockRoute.
 			if route.done != nil {
 				close(route.done)
 			}
 			route.done = nil
 			route.cancel = nil
-			route.injectCh = nil // clear after run completes
-			route.mu.Unlock()
+			route.injectCh = nil
+			// Set sessionID directly — do NOT call SetRouteSessionID which
+			// would try to acquire route.mu again (same deadlock).
 			if current := sessMgr.Current(); current != nil {
-				sessionID = current.ID
+				route.sessionID = current.ID
 			}
-			deps.SessionCache.SetRouteSessionID(req.RouteKey, sessionID)
 			deps.SessionCache.UnlockRoute(req.RouteKey)
 		}()
 	} else {

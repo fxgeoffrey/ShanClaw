@@ -145,6 +145,7 @@ type Model struct {
 	skillsPtr            *[]*skills.Skill // pointer into use_skill tool's skills slice
 	remoteCleanup        func()         // cleanup for MCP connections from async load
 	cancelRun            context.CancelFunc // cancels the running agent loop
+	injectCh             chan string        // injection channel for mid-run messages
 	// Tool result display
 	pendingToolName   string
 	pendingToolArgs   string
@@ -490,6 +491,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.cancelRun != nil {
 					m.cancelRun()
 					m.cancelRun = nil
+					m.injectCh = nil
 				}
 				// Unblock approval goroutine if waiting
 				if m.state == stateApproval {
@@ -651,6 +653,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.state = stateInput
 		m.cancelRun = nil
+		m.injectCh = nil
 		if msg.err != nil && !errors.Is(msg.err, context.Canceled) {
 			m.appendOutput("Error: " + msg.err.Error())
 		}
@@ -926,6 +929,21 @@ func (m *Model) handleSubmit() (tea.Model, tea.Cmd) {
 		return m.handleSlashCommand(input)
 	}
 
+	// If already processing, inject into running loop instead of blocking
+	if m.state == stateProcessing && m.injectCh != nil {
+		select {
+		case m.injectCh <- input:
+			// Append to session messages for context persistence
+			sess := m.sessions.Current()
+			sess.Messages = append(sess.Messages, client.Message{
+				Role: "user", Content: client.NewTextContent(input),
+			})
+		default:
+			m.appendOutput("(injection queue full — message dropped)")
+		}
+		return m, nil
+	}
+
 	// Local agent loop
 	m.state = stateProcessing
 	m.lastToolResults = nil
@@ -946,6 +964,8 @@ func (m *Model) handleSubmit() (tea.Model, tea.Cmd) {
 func (m *Model) runAgentLoop(query string, history []client.Message) tea.Cmd {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancelRun = cancel
+	m.injectCh = make(chan string, 10)
+	m.agentLoop.SetInjectCh(m.injectCh)
 	return func() tea.Msg {
 		handler := &tuiEventHandler{model: m}
 		m.agentLoop.SetHandler(handler)

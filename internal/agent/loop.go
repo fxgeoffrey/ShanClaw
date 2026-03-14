@@ -199,7 +199,9 @@ type AgentLoop struct {
 	agentBasePrompt string
 	agentSkills     []*skills.Skill
 	contextWindow   int
-	memoryDir       string // directory containing MEMORY.md; re-read each Run(), write-before-compact target
+	memoryDir        string // directory containing MEMORY.md; re-read each Run(), write-before-compact target
+	injectCh         chan string   // receives user messages injected mid-run
+	injectedMessages []string     // messages injected during the last Run(); cleared on each Run() call
 }
 
 func NewAgentLoop(gw *client.GatewayClient, tools *ToolRegistry, modelTier string, shannonDir string, maxIter int, resultTrunc int, argsTrunc int, perms *permissions.PermissionsConfig, auditor *audit.AuditLogger, hookRunner *hooks.HookRunner) *AgentLoop {
@@ -278,6 +280,20 @@ func (a *AgentLoop) SetMemoryDir(dir string) {
 	a.memoryDir = dir
 }
 
+// SetInjectCh sets the channel for mid-run message injection.
+// Messages sent to this channel are appended as user turns at the
+// next iteration boundary. The channel is drained (non-blocking)
+// so multiple messages are batched.
+func (a *AgentLoop) SetInjectCh(ch chan string) {
+	a.injectCh = ch
+}
+
+// InjectedMessages returns the user messages that were injected during the
+// last Run() call. Callers should persist these to session history.
+func (a *AgentLoop) InjectedMessages() []string {
+	return a.injectedMessages
+}
+
 // SwitchAgent applies full per-agent scoping: prompt, memory directory, tool registry,
 // and MCP context. Pass a new ToolRegistry and MCP context string built from
 // the agent's scoped MCP servers. If reg is nil, the existing registry is kept.
@@ -318,6 +334,8 @@ type approvedToolCall struct {
 }
 
 func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []client.Message) (string, *TurnUsage, error) {
+	a.injectedMessages = nil // reset for this run
+
 	// Build system prompt using prompt builder with instructions/memory
 	var toolNames []string
 	for _, t := range a.tools.All() {
@@ -421,6 +439,32 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		// Check for context cancellation (e.g. user pressed Esc)
 		if ctx.Err() != nil {
 			return lastText, usage, ctx.Err()
+		}
+
+		// Drain injected user messages (non-blocking).
+		// Multiple pending messages are batched into one user turn.
+		if a.injectCh != nil {
+			var injected []string
+		drain:
+			for {
+				select {
+				case msg := <-a.injectCh:
+					injected = append(injected, msg)
+				default:
+					break drain
+				}
+			}
+			if len(injected) > 0 {
+				combined := strings.Join(injected, "\n\n")
+				messages = append(messages, client.Message{
+					Role:    "user",
+					Content: client.NewTextContent("[New message from user]\n" + combined),
+				})
+				a.injectedMessages = append(a.injectedMessages, injected...)
+				if a.handler != nil {
+					a.handler.OnText("")
+				}
+			}
 		}
 
 		// Filter old screenshots to stay within context budget

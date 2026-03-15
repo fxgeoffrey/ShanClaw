@@ -12,14 +12,15 @@ import (
 )
 
 type routeEntry struct {
-	mu         sync.Mutex
-	cancel     context.CancelFunc
-	done       chan struct{}
-	sessionID  string
-	lastAccess time.Time
-	injectCh   chan string // buffered channel for mid-run message injection
-	evicting   bool
-	manager    *session.Manager
+	mu            sync.Mutex
+	cancel        context.CancelFunc
+	cancelPending bool       // set under sc.mu when CancelRoute fires before cancel is assigned
+	done          chan struct{}
+	sessionID     string
+	lastAccess    time.Time
+	injectCh      chan string // buffered channel for mid-run message injection
+	evicting      bool
+	manager       *session.Manager
 }
 
 // SessionCache separates route-level locking from session storage.
@@ -102,6 +103,10 @@ func (sc *SessionCache) LockRouteWithManager(key, sessionsDir string) *routeEntr
 	}
 	cancel := entry.cancel
 	done := entry.done
+	// Clear any stale pending cancel from when the route was idle. A cancel
+	// arriving after this point (during the startup window before SetRouteCancel
+	// is called) will set cancelPending again and be picked up correctly.
+	entry.cancelPending = false
 	sc.mu.Unlock()
 
 	if cancel != nil && done != nil {
@@ -128,6 +133,7 @@ func (sc *SessionCache) UnlockRoute(key string) {
 	// Check evicting flag under the already-held lock.
 	var mgr *session.Manager
 	entry.cancel = nil
+	entry.cancelPending = false
 	entry.lastAccess = time.Now()
 	if entry.evicting {
 		mgr = entry.manager
@@ -143,6 +149,28 @@ func (sc *SessionCache) UnlockRoute(key string) {
 		if err := mgr.Close(); err != nil {
 			log.Printf("daemon: failed to close session for evicted route %q: %v", key, err)
 		}
+	}
+}
+
+// SetRouteCancel registers the cancel function for the active run under sc.mu,
+// making it immediately visible to CancelRoute. If a cancel was already
+// requested (cancelPending), cancel is called before returning.
+//
+// Called by the runner while entry.mu is held — sc.mu may be acquired while
+// entry.mu is held because all other callers release sc.mu before acquiring
+// entry.mu (same pattern as UnlockRoute).
+func (sc *SessionCache) SetRouteCancel(key string, cancel context.CancelFunc) {
+	sc.mu.Lock()
+	entry, ok := sc.routes[key]
+	var pending bool
+	if ok && entry != nil {
+		entry.cancel = cancel
+		pending = entry.cancelPending
+		entry.cancelPending = false
+	}
+	sc.mu.Unlock()
+	if pending {
+		cancel()
 	}
 }
 
@@ -214,18 +242,34 @@ func (sc *SessionCache) InjectMessage(key, text string) InjectResult {
 
 // CancelRoute cancels the in-flight run for a route without waiting.
 // Used by the hard cancel API endpoint.
+//
+// entry.mu is held for the entire duration of an in-flight run (acquired by
+// LockRouteWithManager, released by UnlockRoute). We must NOT acquire it here
+// — that would block until the run finishes, making cancel a no-op.
+//
+// Instead, we operate entirely under sc.mu:
+//   - If entry.cancel is set, call it immediately (run is active).
+//   - If entry.cancel is nil but the entry exists, set cancelPending so the
+//     runner picks it up via SetRouteCancel before entering loop.Run. This
+//     covers the narrow window between LockRouteWithManager returning and
+//     route.cancel being registered.
+//   - If the route key has no entry in the cache yet, this is a no-op (the
+//     API layer still returns "cancelled" for idempotency, but no pending
+//     intent is stored — the key must appear in sc.routes for pending to work).
 func (sc *SessionCache) CancelRoute(key string) {
 	sc.mu.Lock()
 	entry, ok := sc.routes[key]
+	var cancel context.CancelFunc
+	if ok && entry != nil {
+		cancel = entry.cancel
+		if cancel == nil {
+			entry.cancelPending = true
+		}
+	}
 	sc.mu.Unlock()
-	if !ok || entry == nil {
-		return
+	if cancel != nil {
+		cancel()
 	}
-	entry.mu.Lock()
-	if entry.cancel != nil {
-		entry.cancel()
-	}
-	entry.mu.Unlock()
 }
 
 // Evict closes and removes the manager for this agent and drops matching route

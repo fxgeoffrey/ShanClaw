@@ -228,9 +228,11 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		sessMgr = route.manager
 		reqCtx, cancel := context.WithCancel(ctx)
 		route.done = make(chan struct{})
-		route.cancel = cancel
 		route.injectCh = make(chan string, 10) // buffered for async sends
 		ctx = reqCtx
+		// Register cancel under sc.mu so CancelRoute sees it immediately.
+		// Also fires cancel right away if CancelRoute already set cancelPending.
+		deps.SessionCache.SetRouteCancel(req.RouteKey, cancel)
 	defer func() {
 			// route.mu is already held from LockRouteWithManager — do NOT
 			// re-acquire it (sync.Mutex is not reentrant; that deadlocks).

@@ -308,6 +308,49 @@ func TestServer_CreateAgent_RollbackOnWriteFailure(t *testing.T) {
 	}
 }
 
+func TestServer_CreateAgent_DoesNotCreateSessionManager(t *testing.T) {
+	agentsDir := t.TempDir()
+	sessDir := t.TempDir()
+	sessionCache := NewSessionCache(sessDir)
+	deps := &ServerDeps{
+		AgentsDir:    agentsDir,
+		ShannonDir:   t.TempDir(),
+		SessionCache: sessionCache,
+	}
+	c := NewClient("ws://localhost:1/x", "", func(msg MessagePayload) string { return "" }, nil)
+	srv := NewServer(0, c, deps, "test")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Start(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	body := `{"name":"cache-test","prompt":"hello world"}`
+	resp, err := http.Post(
+		fmt.Sprintf("http://127.0.0.1:%d/agents", srv.Port()),
+		"application/json",
+		strings.NewReader(body),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d", resp.StatusCode)
+	}
+
+	sessionCache.mu.Lock()
+	route, ok := sessionCache.routes["agent:cache-test"]
+	sessionCache.mu.Unlock()
+	if !ok {
+		t.Fatalf("expected route cache entry for agent:cache-test to exist")
+	}
+	if route.manager != nil {
+		t.Fatalf("expected create path to avoid creating a route manager")
+	}
+}
+
 // --- deepMerge unit tests ---
 
 func TestDeepMerge(t *testing.T) {

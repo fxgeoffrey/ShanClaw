@@ -116,6 +116,8 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("GET /sessions", s.handleSessions)
 	mux.HandleFunc("DELETE /sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("GET /sessions/search", s.handleSessionSearch)
+	mux.HandleFunc("GET /permissions", s.handlePermissions)
+	mux.HandleFunc("POST /permissions/request", s.handlePermissionsRequest)
 	mux.HandleFunc("POST /approval", s.handleApproval)
 	mux.HandleFunc("POST /message", s.handleMessage)
 	mux.HandleFunc("POST /cancel", s.handleCancel)
@@ -516,7 +518,16 @@ func (s *Server) handleMessageSSE(w http.ResponseWriter, r *http.Request, req Ru
 	// Cancel only this request's pending approvals when the SSE stream ends.
 	defer reqBroker.CancelAll()
 
-	handler := &sseEventHandler{w: w, flusher: flusher, broker: reqBroker, ctx: r.Context()}
+	// Resolve auto_approve: per-agent overrides global
+	cfg, _ := s.deps.Snapshot()
+	autoApprove := cfg.Daemon.AutoApprove
+	if req.Agent != "" {
+		if a, err := agents.LoadAgent(s.deps.AgentsDir, req.Agent); err == nil && a.Config != nil && a.Config.AutoApprove != nil {
+			autoApprove = *a.Config.AutoApprove
+		}
+	}
+
+	handler := &sseEventHandler{w: w, flusher: flusher, broker: reqBroker, ctx: r.Context(), autoApprove: autoApprove}
 	result, err := RunAgent(r.Context(), s.deps, req, handler)
 	if err != nil {
 		fmt.Fprintf(w, "event: error\ndata: %s\n\n", mustJSON(map[string]string{"error": err.Error()}))
@@ -526,6 +537,36 @@ func (s *Server) handleMessageSSE(w http.ResponseWriter, r *http.Request, req Ru
 
 	fmt.Fprintf(w, "event: done\ndata: %s\n\n", mustJSON(result))
 	flusher.Flush()
+}
+
+// handlePermissions returns current macOS TCC permission status.
+func (s *Server) handlePermissions(w http.ResponseWriter, r *http.Request) {
+	result := probePermissions(r.Context())
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+// handlePermissionsRequest triggers macOS permission dialogs for the requested permission.
+func (s *Server) handlePermissionsRequest(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Permission string `json:"permission"` // "screen_recording" or "accessibility"
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		return
+	}
+	switch req.Permission {
+	case "screen_recording", "accessibility":
+		// valid
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "unsupported permission: " + req.Permission})
+		return
+	}
+	result := requestPermission(r.Context(), req.Permission)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
 }
 
 // httpEventHandler is an EventHandler for synchronous HTTP responses.
@@ -549,10 +590,11 @@ func (h *httpEventHandler) OnApprovalNeeded(tool string, args string) bool {
 
 // sseEventHandler streams agent events as SSE to an HTTP response.
 type sseEventHandler struct {
-	w       http.ResponseWriter
-	flusher http.Flusher
-	broker  *ApprovalBroker
-	ctx     context.Context
+	w           http.ResponseWriter
+	flusher     http.Flusher
+	broker      *ApprovalBroker
+	ctx         context.Context
+	autoApprove bool
 }
 
 func (h *sseEventHandler) OnToolCall(name string, args string) {
@@ -584,6 +626,10 @@ func (h *sseEventHandler) OnUsage(usage agent.TurnUsage) {}
 // OnApprovalNeeded sends an approval request over SSE and blocks until the
 // client responds via POST /approval or the request context is cancelled.
 func (h *sseEventHandler) OnApprovalNeeded(tool string, args string) bool {
+	if h.autoApprove {
+		log.Printf("sse: auto-approving %s (auto_approve=true)", tool)
+		return true
+	}
 	decision := h.broker.Request(h.ctx, "", "", "", tool, args)
 	if decision == DecisionAlwaysAllow {
 		h.broker.SetToolAutoApprove(tool)
@@ -848,8 +894,9 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Serialize creates for the same agent name to prevent concurrent rollback races.
-	s.deps.SessionCache.Lock(req.Name)
-	defer s.deps.SessionCache.Unlock(req.Name)
+	routeKey := "agent:" + req.Name
+	s.deps.SessionCache.LockRoute(routeKey)
+	defer s.deps.SessionCache.UnlockRoute(routeKey)
 
 	agentDir := filepath.Join(s.deps.AgentsDir, req.Name)
 	if _, err := os.Stat(filepath.Join(agentDir, "AGENT.md")); err == nil {

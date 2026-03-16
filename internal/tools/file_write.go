@@ -20,7 +20,7 @@ type fileWriteArgs struct {
 func (t *FileWriteTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
 		Name:        "file_write",
-		Description: "Write content to a file. Creates parent directories if needed. Overwrites existing files.",
+		Description: "Write complete content to a file (overwrites entirely). Use for creating new files or as fallback when file_edit fails due to non-unique text. Always file_read first if the file already exists.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

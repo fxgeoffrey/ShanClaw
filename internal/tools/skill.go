@@ -29,7 +29,7 @@ func newUseSkillTool(s *[]*skills.Skill) *useSkillTool {
 func (t *useSkillTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
 		Name:        "use_skill",
-		Description: "Activate a skill to get specialized instructions for a task",
+		Description: "Activate a named skill to load its specialized instructions. Only call this when the user's request clearly matches a skill's purpose. Returns the full skill content as your working instructions.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

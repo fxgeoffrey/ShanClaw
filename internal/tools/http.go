@@ -68,7 +68,7 @@ func (t *HTTPTool) Run(ctx context.Context, argsJSON string) (agent.ToolResult, 
 
 	req, err := http.NewRequestWithContext(ctx, method, args.URL, bodyReader)
 	if err != nil {
-		return agent.ToolResult{Content: fmt.Sprintf("error creating request: %v", err), IsError: true}, nil
+		return agent.ValidationError(fmt.Sprintf("error creating request: %v", err)), nil
 	}
 
 	for k, v := range args.Headers {
@@ -78,13 +78,13 @@ func (t *HTTPTool) Run(ctx context.Context, argsJSON string) (agent.ToolResult, 
 	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		return agent.ToolResult{Content: fmt.Sprintf("request error: %v", err), IsError: true}, nil
+		return agent.TransientError(fmt.Sprintf("request failed: %v", err)), nil
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 10240))
 	if err != nil {
-		return agent.ToolResult{Content: fmt.Sprintf("error reading response: %v", err), IsError: true}, nil
+		return agent.TransientError(fmt.Sprintf("error reading response body: %v", err)), nil
 	}
 
 	var sb strings.Builder

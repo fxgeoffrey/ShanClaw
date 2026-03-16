@@ -28,6 +28,9 @@ type PromptOptions struct {
 	CWD          string // current working directory
 	SessionInfo  string // optional session context
 	MemoryDir    string // directory containing MEMORY.md for agent memory writes
+	StickyContext string // Session-scoped facts injected verbatim — never truncated or compacted.
+	// Use for key transactional data (IDs, amounts, names) that must survive context compaction.
+	// Typically populated by the daemon runner with session source/channel/task metadata.
 }
 
 // BuildSystemPrompt assembles the complete system prompt from layers.
@@ -37,19 +40,32 @@ func BuildSystemPrompt(opts PromptOptions) string {
 	// 1. Base prompt (unlimited)
 	sb.WriteString(opts.BasePrompt)
 
-	// 2. Memory
+	// 2. Context (date/CWD/session — operationally critical, placed early to avoid "lost in the middle")
+	contextParts := buildContext(opts.CWD, opts.SessionInfo)
+	if contextParts != "" {
+		sb.WriteString("\n\n## Context\n")
+		sb.WriteString(truncate(contextParts, maxContextChars))
+	}
+
+	// 3. Memory
 	if mem := strings.TrimSpace(opts.Memory); mem != "" {
 		sb.WriteString("\n\n## Memory\n")
 		sb.WriteString(truncate(mem, maxMemoryChars))
 	}
 
-	// 3. Instructions
+	// 4. Sticky Context (never truncated — session-critical facts that must survive compaction)
+	if sticky := strings.TrimSpace(opts.StickyContext); sticky != "" {
+		sb.WriteString("\n\n## Session Facts\n")
+		sb.WriteString(sticky)
+	}
+
+	// 5. Instructions
 	if inst := strings.TrimSpace(opts.Instructions); inst != "" {
 		sb.WriteString("\n\n## Instructions\n")
 		sb.WriteString(truncate(inst, maxInstructionsChars))
 	}
 
-	// 4. Available Tools (unlimited, auto-generated)
+	// 6. Available Tools (unlimited, auto-generated)
 	sb.WriteString("\n\n## Available Tools\n")
 	if len(opts.ToolNames) > 0 {
 		sb.WriteString("You have these local tools: ")
@@ -65,7 +81,7 @@ func BuildSystemPrompt(opts PromptOptions) string {
 		sb.WriteString(".")
 	}
 
-	// 5. Available Skills
+	// 7. Available Skills
 	if len(opts.Skills) > 0 {
 		sb.WriteString("\n\n## Available Skills\n\n")
 		sb.WriteString("You can activate a skill by calling the `use_skill` tool with the skill name.\n")
@@ -77,19 +93,19 @@ func BuildSystemPrompt(opts PromptOptions) string {
 		}
 	}
 
-	// 6. macOS automation guidance (only on darwin with relevant tools)
+	// 8. macOS automation guidance (only on darwin with relevant tools)
 	if guidance := macOSAutomationGuidance(opts.ToolNames); guidance != "" {
 		sb.WriteString("\n\n")
 		sb.WriteString(guidance)
 	}
 
-	// 7. MCP server context
+	// 9. MCP server context
 	if mcp := strings.TrimSpace(opts.MCPContext); mcp != "" {
 		sb.WriteString("\n\n## MCP Server Context\n")
 		sb.WriteString(mcp)
 	}
 
-	// 8. Memory Persistence guidance
+	// 10. Memory Persistence guidance
 	if opts.MemoryDir != "" {
 		sb.WriteString("\n\n## Memory Persistence\n")
 		sb.WriteString("Your current memory is shown above in the Memory section. When you discover something worth remembering across future conversations, use the `memory_append` tool to add new entries.\n")
@@ -101,13 +117,6 @@ func BuildSystemPrompt(opts PromptOptions) string {
 		sb.WriteString("- Patterns, gotchas, or insights you discovered together\n")
 		sb.WriteString("- Configuration or reference information that was hard to find\n\n")
 		sb.WriteString("Keep entries as short one-line bullets. Do NOT save ephemeral task status, code snippets, or things already documented in project files. Your context is automatically compacted in long sessions — anything not written to memory may be lost.")
-	}
-
-	// 9. Context
-	contextParts := buildContext(opts.CWD, opts.SessionInfo)
-	if contextParts != "" {
-		sb.WriteString("\n\n## Context\n")
-		sb.WriteString(truncate(contextParts, maxContextChars))
 	}
 
 	return sb.String()

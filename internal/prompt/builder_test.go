@@ -18,12 +18,15 @@ func TestBuildSystemPrompt_FullAssembly(t *testing.T) {
 		SessionInfo:  "Session: abc123",
 	})
 
-	// Verify assembly order
+	// Verify assembly order: base → context → memory → instructions → tools
 	sections := []struct {
 		name    string
 		content string
 	}{
 		{"base", "You are Shannon."},
+		{"context header", "## Context"},
+		{"cwd", "Working directory: /home/user/project"},
+		{"session", "Session: abc123"},
 		{"memory header", "## Memory"},
 		{"memory content", "User prefers Go."},
 		{"instructions header", "## Instructions"},
@@ -31,9 +34,6 @@ func TestBuildSystemPrompt_FullAssembly(t *testing.T) {
 		{"tools header", "## Available Tools"},
 		{"local tools", "You have these local tools: file_read, file_write, bash."},
 		{"server tools", "You also have server-side tools: web_search, code_review."},
-		{"context header", "## Context"},
-		{"cwd", "Working directory: /home/user/project"},
-		{"session", "Session: abc123"},
 	}
 
 	lastIdx := -1
@@ -204,6 +204,56 @@ func TestBuildSystemPrompt_SessionInfoOnly(t *testing.T) {
 
 	if !strings.Contains(result, "Resuming session X") {
 		t.Errorf("expected session info in context")
+	}
+}
+
+func TestBuildSystemPrompt_StickyContext(t *testing.T) {
+	result := BuildSystemPrompt(PromptOptions{
+		BasePrompt:    "Base.",
+		Memory:        "Some memory.",
+		StickyContext: "Customer: Alice. Order #8891. Refund amount: $247.83.",
+	})
+
+	memIdx := strings.Index(result, "## Memory")
+	stickyIdx := strings.Index(result, "## Session Facts")
+	toolsIdx := strings.Index(result, "## Available Tools")
+
+	if stickyIdx == -1 {
+		t.Fatal("missing ## Session Facts section")
+	}
+	if memIdx != -1 && stickyIdx < memIdx {
+		t.Errorf("Session Facts appears before Memory (sticky=%d, mem=%d)", stickyIdx, memIdx)
+	}
+	if stickyIdx > toolsIdx {
+		t.Errorf("Session Facts appears after Available Tools (sticky=%d, tools=%d)", stickyIdx, toolsIdx)
+	}
+	if !strings.Contains(result, "Customer: Alice. Order #8891. Refund amount: $247.83.") {
+		t.Error("StickyContext content not found verbatim in output")
+	}
+}
+
+func TestBuildSystemPrompt_StickyContext_NeverTruncated(t *testing.T) {
+	longFacts := strings.Repeat("fact: x. ", 500) // ~4500 chars, well over any limit
+	result := BuildSystemPrompt(PromptOptions{
+		BasePrompt:    "Base.",
+		StickyContext: longFacts,
+	})
+
+	if strings.Contains(result, "[truncated]") {
+		t.Error("StickyContext must never be truncated")
+	}
+	// TrimSpace is applied before injection, so check trimmed content
+	if !strings.Contains(result, strings.TrimSpace(longFacts)) {
+		t.Error("StickyContext full content must appear verbatim")
+	}
+}
+
+func TestBuildSystemPrompt_NoStickyContext(t *testing.T) {
+	result := BuildSystemPrompt(PromptOptions{
+		BasePrompt: "Base.",
+	})
+	if strings.Contains(result, "## Session Facts") {
+		t.Error("unexpected Session Facts section when StickyContext is empty")
 	}
 }
 

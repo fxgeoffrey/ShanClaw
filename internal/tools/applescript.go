@@ -20,7 +20,7 @@ type appleScriptArgs struct {
 func (t *AppleScriptTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
 		Name:        "applescript",
-		Description: "Execute an AppleScript script via osascript. Can control macOS apps, UI automation, and system features.",
+		Description: "Execute an AppleScript script via osascript. Use for opening/activating apps, window management, calendar events, and macOS-specific operations. NOT for web page interaction — use browser tool for web content.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

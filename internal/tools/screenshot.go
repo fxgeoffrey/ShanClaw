@@ -22,7 +22,7 @@ type screenshotArgs struct {
 func (t *ScreenshotTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
 		Name:        "screenshot",
-		Description: "Capture the macOS screen using the built-in screencapture command. Supports fullscreen, window, or region capture.",
+		Description: "Capture the macOS desktop screen (fullscreen, window, or region). Use ONLY for native macOS UI. For web page screenshots use browser(action=screenshot) — this tool captures the macOS screen, not browser content.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

@@ -19,7 +19,7 @@ type dirListArgs struct {
 func (t *DirectoryListTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
 		Name:        "directory_list",
-		Description: "List files and directories in a path.",
+		Description: "List files and directories at a specific path. Use for exploring one directory. Use glob to find files by pattern across subdirectories.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

@@ -18,10 +18,64 @@ type ImageBlock struct {
 	Data      string // base64-encoded
 }
 
+// ErrorCategory classifies the nature of a tool failure so the agent
+// can make informed retry decisions.
+type ErrorCategory string
+
+const (
+	// ErrCategoryTransient indicates a timeout or network error. Retry may help.
+	ErrCategoryTransient ErrorCategory = "transient"
+	// ErrCategoryValidation indicates the tool arguments were invalid. Fix before retrying.
+	ErrCategoryValidation ErrorCategory = "validation"
+	// ErrCategoryBusiness indicates a policy or constraint violation. Do not retry.
+	ErrCategoryBusiness ErrorCategory = "business"
+	// ErrCategoryPermission indicates access was denied. Escalate to user.
+	ErrCategoryPermission ErrorCategory = "permission"
+)
+
 type ToolResult struct {
-	Content string
-	IsError bool
-	Images  []ImageBlock
+	Content       string
+	IsError       bool
+	ErrorCategory ErrorCategory // empty when IsError is false
+	IsRetryable   bool          // true only for transient errors
+	Images        []ImageBlock
+}
+
+// TransientError returns a ToolResult for timeout/network failures where retry may help.
+func TransientError(msg string) ToolResult {
+	return ToolResult{
+		Content:       "[transient] " + msg,
+		IsError:       true,
+		ErrorCategory: ErrCategoryTransient,
+		IsRetryable:   true,
+	}
+}
+
+// ValidationError returns a ToolResult for invalid tool arguments.
+func ValidationError(msg string) ToolResult {
+	return ToolResult{
+		Content:       "[validation error] " + msg,
+		IsError:       true,
+		ErrorCategory: ErrCategoryValidation,
+	}
+}
+
+// BusinessError returns a ToolResult for policy/constraint violations that must not be retried.
+func BusinessError(msg string) ToolResult {
+	return ToolResult{
+		Content:       "[business error] " + msg,
+		IsError:       true,
+		ErrorCategory: ErrCategoryBusiness,
+	}
+}
+
+// PermissionError returns a ToolResult for access denied scenarios requiring escalation.
+func PermissionError(msg string) ToolResult {
+	return ToolResult{
+		Content:       "[permission error] " + msg,
+		IsError:       true,
+		ErrorCategory: ErrCategoryPermission,
+	}
 }
 
 type Tool interface {

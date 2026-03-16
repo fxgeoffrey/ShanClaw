@@ -22,7 +22,7 @@ type globArgs struct {
 func (t *GlobTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
 		Name:        "glob",
-		Description: "Find files matching a glob pattern (e.g. '**/*.go', 'src/*.ts').",
+		Description: "Find files by path pattern (e.g. '**/*.csv', 'reports/*.pdf', 'src/**/*.go'). Matches file NAMES/paths — not file contents. Use grep to search inside files.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

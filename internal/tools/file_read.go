@@ -43,6 +43,9 @@ func (t *FileReadTool) Run(ctx context.Context, argsJSON string) (agent.ToolResu
 
 	data, err := os.ReadFile(args.Path)
 	if err != nil {
+		if os.IsPermission(err) {
+			return agent.PermissionError(fmt.Sprintf("cannot read %s: permission denied", args.Path)), nil
+		}
 		return agent.ToolResult{Content: fmt.Sprintf("error reading file: %v", err), IsError: true}, nil
 	}
 

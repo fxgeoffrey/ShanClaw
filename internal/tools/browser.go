@@ -54,8 +54,9 @@ type browserArgs struct {
 func (t *BrowserTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
 		Name: "browser",
-		Description: "Control a headless browser with an isolated profile (no access to user's logged-in sessions or saved data). " +
-			"Best for: web scraping, searching, reading public pages, testing. " +
+		Description: "Control a headless browser with an isolated profile. " +
+			"FIRST CHOICE for any web page interaction: navigating, clicking, reading, scraping, screenshots of web content. " +
+			"Only skip this for pages requiring user login/authentication — use GUI tools for those. " +
 			"Actions: navigate, click, type, scroll, screenshot, read_page, execute_js, wait, snapshot, find, close. " +
 			"Use 'snapshot' to get the accessibility tree with element refs (e1, e2, ...), then use 'ref' parameter with click/type/scroll actions. " +
 			"Use 'find' to search for elements by natural language description.",

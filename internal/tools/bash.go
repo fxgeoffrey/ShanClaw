@@ -58,7 +58,7 @@ func isSafeCommand(cmd string, extraSafe []string) bool {
 func (t *BashTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
 		Name:        "bash",
-		Description: "Execute a shell command. Use for running tests, builds, git operations, and system commands.",
+		Description: "Execute a shell command. Use for running scripts, data processing, file management, automation, and system operations.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -96,6 +96,10 @@ func (t *BashTool) Run(ctx context.Context, argsJSON string) (agent.ToolResult, 
 	}
 
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			timeoutSecs := int(timeout.Seconds())
+			return agent.TransientError(fmt.Sprintf("command timed out after %ds\n%s", timeoutSecs, result)), nil
+		}
 		return agent.ToolResult{
 			Content: fmt.Sprintf("exit code: %v\n%s", err, result),
 			IsError: true,

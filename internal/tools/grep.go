@@ -21,13 +21,13 @@ type grepArgs struct {
 func (t *GrepTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
 		Name:        "grep",
-		Description: "Search file contents using regex. Uses ripgrep if available, falls back to grep.",
+		Description: "Search file CONTENTS using a regex pattern. Returns matching lines with filenames and line numbers. Use glob to find files by name pattern instead.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"pattern":     map[string]any{"type": "string", "description": "Regex pattern to search"},
 				"path":        map[string]any{"type": "string", "description": "Directory or file to search (default: current dir)"},
-				"glob":        map[string]any{"type": "string", "description": "File glob filter (e.g. '*.go')"},
+				"glob":        map[string]any{"type": "string", "description": "File glob filter (e.g. '*.csv', '*.txt', '*.go')"},
 				"max_results": map[string]any{"type": "integer", "description": "Max results (default: 100)"},
 			},
 		},

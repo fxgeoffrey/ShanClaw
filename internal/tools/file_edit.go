@@ -21,7 +21,7 @@ type fileEditArgs struct {
 func (t *FileEditTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
 		Name:        "file_edit",
-		Description: "Replace an exact string in a file. The old_string must appear exactly once.",
+		Description: "Replace an exact string in a file (old_string must appear exactly once). Prefer this over file_write for targeted edits. If old_string is not unique, use file_read then file_write instead.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

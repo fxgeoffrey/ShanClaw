@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/Kocoro-lab/shan/internal/client"
@@ -215,6 +216,80 @@ func TestToolRegistry_RemoveAndReRegister(t *testing.T) {
 	schemas := r.Schemas()
 	if len(schemas) != 2 {
 		t.Errorf("expected 2 schemas, got %d", len(schemas))
+	}
+}
+
+func TestToolResultErrorHelpers(t *testing.T) {
+	tests := []struct {
+		name        string
+		result      ToolResult
+		wantIsError bool
+		wantCat     ErrorCategory
+		wantRetry   bool
+		wantPrefix  string
+	}{
+		{
+			name:        "TransientError",
+			result:      TransientError("connection timed out"),
+			wantIsError: true,
+			wantCat:     ErrCategoryTransient,
+			wantRetry:   true,
+			wantPrefix:  "[transient]",
+		},
+		{
+			name:        "ValidationError",
+			result:      ValidationError("invalid URL format"),
+			wantIsError: true,
+			wantCat:     ErrCategoryValidation,
+			wantRetry:   false,
+			wantPrefix:  "[validation error]",
+		},
+		{
+			name:        "BusinessError",
+			result:      BusinessError("refund exceeds policy limit"),
+			wantIsError: true,
+			wantCat:     ErrCategoryBusiness,
+			wantRetry:   false,
+			wantPrefix:  "[business error]",
+		},
+		{
+			name:        "PermissionError",
+			result:      PermissionError("access denied"),
+			wantIsError: true,
+			wantCat:     ErrCategoryPermission,
+			wantRetry:   false,
+			wantPrefix:  "[permission error]",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.result.IsError != tt.wantIsError {
+				t.Errorf("IsError = %v, want %v", tt.result.IsError, tt.wantIsError)
+			}
+			if tt.result.ErrorCategory != tt.wantCat {
+				t.Errorf("ErrorCategory = %q, want %q", tt.result.ErrorCategory, tt.wantCat)
+			}
+			if tt.result.IsRetryable != tt.wantRetry {
+				t.Errorf("IsRetryable = %v, want %v", tt.result.IsRetryable, tt.wantRetry)
+			}
+			if !strings.HasPrefix(tt.result.Content, tt.wantPrefix) {
+				t.Errorf("Content = %q, want prefix %q", tt.result.Content, tt.wantPrefix)
+			}
+		})
+	}
+}
+
+func TestToolResult_ZeroValueNotError(t *testing.T) {
+	r := ToolResult{Content: "some output"}
+	if r.IsError {
+		t.Error("zero-value ToolResult must not be an error")
+	}
+	if r.ErrorCategory != "" {
+		t.Errorf("zero-value ErrorCategory must be empty, got %q", r.ErrorCategory)
+	}
+	if r.IsRetryable {
+		t.Error("zero-value IsRetryable must be false")
 	}
 }
 

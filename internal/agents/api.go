@@ -26,6 +26,8 @@ type AgentConfigAPI struct {
 	Tools      *AgentToolsFilter  `json:"tools,omitempty"`
 	MCPServers *AgentMCPConfigAPI `json:"mcp_servers,omitempty"`
 	Agent      *AgentModelConfig  `json:"agent,omitempty"`
+	Watch      []WatchEntry       `json:"watch,omitempty"`
+	Heartbeat  *HeartbeatConfig   `json:"heartbeat,omitempty"`
 }
 
 // AgentMCPConfigAPI is the JSON-friendly MCP config.
@@ -55,6 +57,8 @@ func (a *Agent) ToAPI() *AgentAPI {
 				Servers: a.Config.MCPServers.Servers,
 			}
 		}
+		api.Config.Watch = a.Config.Watch
+		api.Config.Heartbeat = a.Config.Heartbeat
 	}
 	if len(a.Commands) > 0 {
 		api.Commands = a.Commands
@@ -108,6 +112,12 @@ func WriteAgentConfig(agentsDir, name string, cfg *AgentConfigAPI) error {
 			servers[k] = v
 		}
 		m["mcp_servers"] = servers
+	}
+	if len(cfg.Watch) > 0 {
+		m["watch"] = cfg.Watch
+	}
+	if cfg.Heartbeat != nil {
+		m["heartbeat"] = cfg.Heartbeat
 	}
 	data, err := yaml.Marshal(m)
 	if err != nil {

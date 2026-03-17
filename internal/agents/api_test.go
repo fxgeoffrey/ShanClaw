@@ -132,3 +132,29 @@ func TestAgentCreateRequest_Validate(t *testing.T) {
 		t.Error("expected error for null skill entry")
 	}
 }
+
+func TestAgentConfigAPI_WatchHeartbeatRoundTrip(t *testing.T) {
+	agent := &Agent{
+		Name:   "test",
+		Prompt: "test prompt",
+		Config: &AgentConfig{
+			Watch: []WatchEntry{{Path: "~/Code", Glob: "*.go"}},
+			Heartbeat: &HeartbeatConfig{
+				Every: "30m",
+			},
+		},
+	}
+	api := agent.ToAPI()
+	if api.Config == nil {
+		t.Fatal("expected config")
+	}
+	if len(api.Config.Watch) != 1 {
+		t.Fatalf("expected 1 watch entry, got %d", len(api.Config.Watch))
+	}
+	if api.Config.Heartbeat == nil {
+		t.Fatal("expected heartbeat config")
+	}
+	if api.Config.Heartbeat.Every != "30m" {
+		t.Errorf("expected 30m, got %s", api.Config.Heartbeat.Every)
+	}
+}

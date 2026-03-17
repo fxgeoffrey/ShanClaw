@@ -73,10 +73,17 @@ func New(agentWatches map[string][]WatchEntry, runFn RunFunc) (*Watcher, error) 
 				Glob:  entry.Glob,
 			})
 
+			// Verify the root watch path exists before walking.
+			if _, statErr := os.Stat(expanded); statErr != nil {
+				log.Printf("watcher: watch path %s for agent %s is not accessible: %v", expanded, agent, statErr)
+				continue
+			}
+
 			// Walk to add all subdirectories for recursive watching.
 			_ = filepath.Walk(expanded, func(path string, info os.FileInfo, err error) error {
 				if err != nil {
-					return nil // skip inaccessible paths
+					log.Printf("watcher: skipping inaccessible path %s: %v", path, err)
+					return nil
 				}
 				if info.IsDir() && !added[path] {
 					added[path] = true

@@ -76,6 +76,22 @@ func TestReadChecklist(t *testing.T) {
 	}
 }
 
+func TestReadChecklist_PermissionError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "HEARTBEAT.md")
+	os.WriteFile(path, []byte("- Check disk"), 0644)
+	os.Chmod(path, 0000)
+	defer os.Chmod(path, 0644) // restore for cleanup
+
+	content, err := ReadChecklist(path)
+	if err == nil {
+		t.Fatal("expected error for unreadable file")
+	}
+	if content != "" {
+		t.Errorf("expected empty content on error, got %q", content)
+	}
+}
+
 func TestReadChecklist_MaxSize(t *testing.T) {
 	dir := t.TempDir()
 	big := strings.Repeat("x", 5000)

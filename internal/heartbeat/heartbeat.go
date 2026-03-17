@@ -33,12 +33,16 @@ Checklist:
 }
 
 // ReadChecklist reads HEARTBEAT.md at the given path.
-// Missing, unreadable, or empty files return ("", nil).
+// Missing file returns ("", nil) — this is the expected "disabled" state.
+// Other read errors return ("", error) so callers can detect degraded monitoring.
 // Content exceeding maxChecklistChars is truncated with a warning.
 func ReadChecklist(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", nil
+		if os.IsNotExist(err) {
+			return "", nil // missing = heartbeat disabled for this agent
+		}
+		return "", fmt.Errorf("read HEARTBEAT.md: %w", err)
 	}
 	content := strings.TrimSpace(string(data))
 	if content == "" {

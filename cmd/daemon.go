@@ -217,8 +217,6 @@ var daemonStartCmd = &cobra.Command{
 			}
 			log.Printf("daemon: watcher agent %q reply (%d tokens): %s", agentName, result.Usage.TotalTokens, truncateReply(result.Reply, 200))
 		}
-		_ = watchRunFn // used by reload callback in next commit
-
 		agentWatches := collectAgentWatches(agentsDir)
 		if len(agentWatches) > 0 {
 			fw, err := watcher.New(agentWatches, watchRunFn)
@@ -239,6 +237,43 @@ var daemonStartCmd = &cobra.Command{
 			hbManager = hbMgr
 			log.Printf("daemon: heartbeat manager started")
 		}
+
+		localServer.SetOnReload(func() {
+			triggerMu.Lock()
+			defer triggerMu.Unlock()
+
+			// Close old watcher/heartbeat.
+			if fileWatcher != nil {
+				fileWatcher.Close()
+				fileWatcher = nil
+			}
+			if hbManager != nil {
+				hbManager.Close()
+				hbManager = nil
+			}
+
+			// Rebuild from fresh agent configs.
+			newWatches := collectAgentWatches(agentsDir)
+			if len(newWatches) > 0 {
+				fw, err := watcher.New(newWatches, watchRunFn)
+				if err != nil {
+					log.Printf("daemon: reload watcher init failed: %v", err)
+				} else {
+					fw.Start(ctx)
+					fileWatcher = fw
+					log.Printf("daemon: file watcher restarted (%d agents)", len(newWatches))
+				}
+			}
+
+			newHb, err := heartbeat.New(agentsDir, deps)
+			if err != nil {
+				log.Printf("daemon: reload heartbeat init failed: %v", err)
+			} else {
+				newHb.Start(ctx)
+				hbManager = newHb
+				log.Printf("daemon: heartbeat manager restarted")
+			}
+		})
 
 		broker.SetOnRequest(func(requestID, tool, args string) {
 			if localServer.EventBus() != nil {

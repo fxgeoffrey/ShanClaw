@@ -41,6 +41,7 @@ type Server struct {
 	// pendingBrokers maps requestID → per-request ApprovalBroker.
 	// SSE handlers register here so POST /approval can find the right broker.
 	pendingBrokers sync.Map // map[string]*ApprovalBroker
+	onReload       func()   // called after config reload to restart watchers/heartbeat
 }
 
 func NewServer(port int, client *Client, deps *ServerDeps, version string) *Server {
@@ -71,6 +72,11 @@ func (s *Server) Port() int {
 // SetCancelFunc sets a cancel function that handleShutdown will call to stop the daemon.
 func (s *Server) SetCancelFunc(cancel context.CancelFunc) {
 	s.cancel = cancel
+}
+
+// SetOnReload sets a callback invoked after config reload to restart watchers/heartbeat.
+func (s *Server) SetOnReload(fn func()) {
+	s.onReload = fn
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -1829,6 +1835,10 @@ func (s *Server) handleConfigReload(w http.ResponseWriter, r *http.Request) {
 
 	if oldCleanup != nil {
 		oldCleanup()
+	}
+
+	if s.onReload != nil {
+		go s.onReload()
 	}
 
 	resp := map[string]interface{}{"status": "reloaded"}

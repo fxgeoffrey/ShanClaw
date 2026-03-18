@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -210,16 +212,6 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 	// Recomputing here avoids cross-route contamination.
 	req.RouteKey = ComputeRouteKey(req)
 
-	if deps.EventBus != nil {
-		payload, _ := json.Marshal(map[string]string{
-			"agent":        agentName,
-			"source":       req.Source,
-			"sender":       req.Sender,
-			"text_preview": truncate(prompt, 100),
-		})
-		deps.EventBus.Emit(Event{Type: EventMessageReceived, Payload: payload})
-	}
-
 	sessionsDir := deps.SessionCache.SessionsDir(agentName)
 	var sessMgr *session.Manager
 
@@ -304,7 +296,42 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		}
 	}
 
+	// Snapshot history BEFORE appending the user message so loop.Run(prompt, history)
+	// does not receive the user message twice (once as prompt, once in history).
 	history := sess.Messages
+
+	// For externally-sourced messages (Slack, LINE, etc.), persist the user message
+	// before the agent loop so the UI can display it immediately on notification.
+	// preLoopUserAppended tracks the in-memory append (not save success) to prevent
+	// double-appending in the post-loop persist block.
+	var preLoopUserAppended bool
+	if !req.Ephemeral && req.Source != "" {
+		source := req.Source
+		if source == "" {
+			source = "unknown"
+		}
+		msgID := generateMessageID()
+		sess.Messages = append(sess.Messages,
+			client.Message{Role: "user", Content: client.NewTextContent(prompt)},
+		)
+		sess.MessageMeta = append(sess.MessageMeta,
+			session.MessageMeta{Source: source, MessageID: msgID},
+		)
+		preLoopUserAppended = true
+		if err := sessMgr.Save(); err != nil {
+			log.Printf("daemon: failed to pre-save user message: %v", err)
+		} else if deps.EventBus != nil {
+			payload, _ := json.Marshal(map[string]any{
+				"agent":      agentName,
+				"source":     req.Source,
+				"sender":     req.Sender,
+				"session_id": sess.ID,
+				"message_id": msgID,
+				"text":       prompt,
+			})
+			deps.EventBus.Emit(Event{Type: EventMessageReceived, Payload: payload})
+		}
+	}
 
 	// Clone and apply per-agent tool filter
 	reg := baseReg.Clone()
@@ -442,12 +469,15 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		if source == "" {
 			source = "unknown"
 		}
-		sess.Messages = append(sess.Messages,
-			client.Message{Role: "user", Content: client.NewTextContent(prompt)},
-		)
-		sess.MessageMeta = append(sess.MessageMeta,
-			session.MessageMeta{Source: source},
-		)
+		// Skip user message append if already in sess.Messages from pre-loop path.
+		if !preLoopUserAppended {
+			sess.Messages = append(sess.Messages,
+				client.Message{Role: "user", Content: client.NewTextContent(prompt)},
+			)
+			sess.MessageMeta = append(sess.MessageMeta,
+				session.MessageMeta{Source: source},
+			)
+		}
 		// Persist any messages injected mid-run (HITL follow-ups).
 		for _, injMsg := range loop.InjectedMessages() {
 			sess.Messages = append(sess.Messages,
@@ -498,6 +528,12 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 			CostUSD:      usage.CostUSD,
 		},
 	}, nil
+}
+
+func generateMessageID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return "msg-" + hex.EncodeToString(b)
 }
 
 func truncate(s string, n int) string {

@@ -15,7 +15,8 @@ import (
 // MessageMeta holds per-message metadata not sent to the LLM gateway.
 // Indexed parallel to Session.Messages.
 type MessageMeta struct {
-	Source string `json:"source,omitempty"` // "slack", "line", "ptfrog", "webhook"
+	Source    string `json:"source,omitempty"`     // "slack", "line", "ptfrog", "webhook"
+	MessageID string `json:"message_id,omitempty"` // stable ID for dedup (e.g. "msg-<uuid>")
 }
 
 type Session struct {

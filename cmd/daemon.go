@@ -245,6 +245,11 @@ var daemonStartCmd = &cobra.Command{
 			log.Printf("daemon: heartbeat manager started")
 		}
 
+		// Start internal cron scheduler (evaluates schedules each minute).
+		cronScheduler := daemon.NewScheduler(scheduleManager, deps)
+		go cronScheduler.Start(ctx)
+		log.Println("daemon: cron scheduler started")
+
 		localServer.SetOnReload(func() {
 			triggerMu.Lock()
 			defer triggerMu.Unlock()

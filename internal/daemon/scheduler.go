@@ -11,10 +11,7 @@ import (
 	"github.com/adhocore/gronx"
 )
 
-const (
-	maxConcurrentSchedules = 5
-	SourceSchedule         = "schedule"
-)
+const maxConcurrentSchedules = 5
 
 // Scheduler evaluates cron schedules each minute and fires RunAgent for due entries.
 type Scheduler struct {
@@ -66,19 +63,20 @@ func (s *Scheduler) Start(ctx context.Context) {
 }
 
 // tick evaluates due schedules and fires goroutines for each.
+// Non-blocking: if all concurrency slots are full, skip the schedule (log + drop)
+// rather than blocking tick and potentially missing the next minute boundary.
 func (s *Scheduler) tick(ctx context.Context) {
 	due := s.EvaluateDue(time.Now())
 	for _, sched := range due {
-		// Acquire semaphore before spawning goroutine to cap in-flight goroutines.
 		select {
 		case s.sem <- struct{}{}:
-		case <-ctx.Done():
-			return
+			go func(sc schedule.Schedule) {
+				defer func() { <-s.sem }()
+				s.runSchedule(ctx, sc)
+			}(sched)
+		default:
+			log.Printf("scheduler: skipping schedule %s (all %d slots busy)", sched.ID, maxConcurrentSchedules)
 		}
-		go func(sc schedule.Schedule) {
-			defer func() { <-s.sem }()
-			s.runSchedule(ctx, sc)
-		}(sched)
 	}
 }
 
@@ -135,8 +133,8 @@ func (s *Scheduler) runSchedule(ctx context.Context, sched schedule.Schedule) {
 	req := RunAgentRequest{
 		Text:       sched.Prompt,
 		Agent:      sched.Agent,
-		Source:     SourceSchedule,
-		Channel:    SourceSchedule + "-" + sched.ID,
+		Source:     ChannelSchedule,
+		Channel:    ChannelSchedule + "-" + sched.ID,
 		Sender:     "scheduler",
 		NewSession: true,
 	}

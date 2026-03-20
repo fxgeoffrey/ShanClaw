@@ -147,13 +147,14 @@ func (c *pinchtabClient) warnOnPinchtabVersion(version string) {
 	if c.versionChecked {
 		return
 	}
-	c.versionChecked = true
 
 	cleanVersion := normalizePinchtabVersion(version)
 	if cleanVersion == "" {
+		// Don't mark as checked — version may be available on a later call.
 		return
 	}
 
+	c.versionChecked = true
 	if compareVersions(cleanVersion, minPinchtabVersion) < 0 {
 		log.Printf("WARNING: pinchtab %s detected, recommend upgrading to %s+ for best results", version, minPinchtabVersion)
 	}

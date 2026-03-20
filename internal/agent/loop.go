@@ -216,6 +216,7 @@ type AgentLoop struct {
 	contextWindow   int
 	memoryDir        string // directory containing MEMORY.md; re-read each Run(), write-before-compact target
 	stickyContext    string // session-scoped facts injected verbatim into system prompt; never truncated
+	sessionID        string        // session ID for audit log correlation
 	injectCh         chan string   // receives user messages injected mid-run
 	injectedMessages []string     // messages injected during the last Run(); cleared on each Run() call
 }
@@ -335,6 +336,11 @@ func (a *AgentLoop) SwitchAgent(basePrompt string, memoryDir string, reg *ToolRe
 // SetSkills updates the agent's skill catalog without touching other fields.
 func (a *AgentLoop) SetSkills(s []*skills.Skill) {
 	a.agentSkills = s
+}
+
+// SetSessionID sets the session ID used for audit log correlation.
+func (a *AgentLoop) SetSessionID(id string) {
+	a.sessionID = id
 }
 
 func (a *AgentLoop) SetEnableStreaming(enable bool) {
@@ -595,7 +601,8 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		// This prevents the model from answering action requests purely from
 		// training knowledge without grounding in tool results.
 		// Incompatible with extended thinking, so temporarily clear it for this call.
-		if i == 0 && len(toolSchemas) > 0 {
+		firstTurnForced := i == 0 && len(toolSchemas) > 0
+		if firstTurnForced {
 			req.ToolChoice = map[string]string{"type": "any"}
 			req.Thinking = nil
 		}
@@ -609,6 +616,22 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			}
 		} else {
 			resp, err = a.client.Complete(ctx, req)
+		}
+		// If first-turn tool_choice caused the error, retry without it.
+		// The gateway may not support tool_choice — fall back gracefully.
+		if err != nil && firstTurnForced {
+			req.ToolChoice = nil
+			req.Thinking = a.thinking
+			if a.enableStreaming && a.handler != nil {
+				resp, err = a.client.CompleteStream(ctx, req, func(delta client.StreamDelta) {
+					a.handler.OnStreamDelta(delta.Text)
+				})
+				if err != nil {
+					resp, err = a.client.Complete(ctx, req)
+				}
+			} else {
+				resp, err = a.client.Complete(ctx, req)
+			}
 		}
 		if err != nil {
 			return "", usage, fmt.Errorf("LLM call failed: %w", err)
@@ -1233,7 +1256,7 @@ func (a *AgentLoop) logAudit(toolName, argsStr, outputSummary, decision string, 
 	}
 	a.auditor.Log(audit.AuditEntry{
 		Timestamp:     time.Now(),
-		SessionID:     "",
+		SessionID:     a.sessionID,
 		ToolName:      toolName,
 		InputSummary:  argsStr,
 		OutputSummary: outputSummary,

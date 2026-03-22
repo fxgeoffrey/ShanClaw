@@ -253,9 +253,14 @@ func (t *CloudDelegateTool) Run(ctx context.Context, argsJSON string) (agent.Too
 				t.handler.OnCloudAgent("", "tool", statusMsg("", event.Message, "Calling tool..."))
 			}
 
+		case "DATA_PROCESSING":
+			if msg := event.Message; msg != "" && len(msg) <= 150 && t.handler != nil {
+				t.handler.OnCloudAgent("synthesis", "processing", msg)
+			}
+
 		// --- Internal plumbing — silently ignore ---
 		case "WORKFLOW_STARTED", "TOOL_OBSERVATION", "TOOL_COMPLETED",
-			"DELEGATION", "PROGRESS", "STATUS_UPDATE", "DATA_PROCESSING", "WAITING":
+			"DELEGATION", "PROGRESS", "STATUS_UPDATE", "WAITING":
 			// Drop — these are too verbose for the desktop UI
 		case "APPROVAL_DECISION":
 			// no-op

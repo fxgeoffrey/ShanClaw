@@ -39,6 +39,7 @@ type ToolResult struct {
 	ErrorCategory ErrorCategory // empty when IsError is false
 	IsRetryable   bool          // true only for transient errors
 	Images        []ImageBlock
+	CloudResult   bool // true when result is a cloud deliverable (bypass LLM summarization)
 }
 
 // TransientError returns a ToolResult for timeout/network failures where retry may help.

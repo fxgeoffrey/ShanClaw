@@ -679,7 +679,7 @@ agent:
 tools:
   bash_timeout: 120                # seconds (default: 120)
   bash_max_output: 30000           # max chars in bash output (default: 30000)
-  result_truncation: 2000          # max chars in tool result (default: 2000)
+  result_truncation: 30000         # max chars in tool result (default: 30000)
   args_truncation: 200             # max chars in displayed args (default: 200)
   server_tool_timeout: 5           # gateway tool timeout in seconds (default: 5)
   grep_max_results: 100            # max grep results (default: 100)

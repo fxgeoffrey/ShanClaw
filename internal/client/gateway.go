@@ -520,6 +520,40 @@ func (c *GatewayClient) SubmitTaskStream(ctx context.Context, req TaskRequest) (
 	return &result, nil
 }
 
+// GetTask fetches the full task result from the REST API.
+// Unlike SSE events which truncate at 10K chars, the REST response contains
+// the complete untruncated result.
+func (c *GatewayClient) GetTask(ctx context.Context, taskID string) (*TaskStatusResponse, error) {
+	endpoint := fmt.Sprintf("%s/api/v1/tasks/%s", c.baseURL, url.PathEscape(taskID))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	if c.apiKey != "" {
+		req.Header.Set("X-API-Key", c.apiKey)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		errBody := readResponseBody(resp)
+		if errBody != "" {
+			return nil, fmt.Errorf("get task returned %d: %s", resp.StatusCode, errBody)
+		}
+		return nil, fmt.Errorf("get task returned %d", resp.StatusCode)
+	}
+
+	var result TaskStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return &result, nil
+}
+
 // ApproveReviewPlan approves a HITL research plan so the workflow continues.
 func (c *GatewayClient) ApproveReviewPlan(ctx context.Context, workflowID string) error {
 	body, _ := json.Marshal(map[string]string{"action": "approve"})

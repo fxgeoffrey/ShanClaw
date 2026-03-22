@@ -106,7 +106,7 @@ func Load() (*Config, error) {
 	viper.SetDefault("agent.context_window", 128000)
 	viper.SetDefault("tools.bash_timeout", 120)
 	viper.SetDefault("tools.bash_max_output", 30000)
-	viper.SetDefault("tools.result_truncation", 2000)
+	viper.SetDefault("tools.result_truncation", 30000)
 	viper.SetDefault("tools.args_truncation", 200)
 	viper.SetDefault("tools.server_tool_timeout", 5)
 	viper.SetDefault("tools.grep_max_results", 100)

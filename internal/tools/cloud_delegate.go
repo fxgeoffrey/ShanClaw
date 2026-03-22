@@ -82,7 +82,7 @@ func (t *CloudDelegateTool) Info() agent.ToolInfo {
 				"workflow_type": map[string]any{
 					"type":        "string",
 					"enum":        []string{"research", "swarm", "auto"},
-					"description": "Workflow type: 'research' for deep research tasks, 'swarm' for multi-agent collaboration, 'auto' (default) lets the system decide.",
+					"description": "Workflow type: 'research' for deep multi-source research with web search and synthesis. 'swarm' for complex tasks requiring a lead agent coordinating dynamic sub-agents (researcher, coder, analyst) with a shared workspace — best for open-ended analysis, multi-step problem solving, or tasks combining research + computation + writing. 'auto' (default) routes to a fixed DAG plan — good for structured tasks with clear subtask dependencies.",
 				},
 			},
 		},
@@ -324,7 +324,31 @@ func (t *CloudDelegateTool) Run(ctx context.Context, argsJSON string) (agent.Too
 		return agent.ToolResult{Content: "workflow completed but returned no response", IsError: true}, nil
 	}
 
-	return agent.ToolResult{Content: finalResult}, nil
+	// API fallback: SSE events may be truncated (cloud caps at 10K runes).
+	// Always attempt to fetch the full result from the REST API.
+	// Only mark as CloudResult (bypass LLM summarization) when we have
+	// a confirmed full result — either from SSE or from the API fallback.
+	fullResultConfirmed := true
+	taskID := resp.TaskID
+	if taskID == "" {
+		taskID = resp.WorkflowID
+	}
+	if taskID != "" && t.gw != nil {
+		apiCtx, apiCancel := context.WithTimeout(ctx, 10*time.Second)
+		defer apiCancel()
+		if task, apiErr := t.gw.GetTask(apiCtx, taskID); apiErr == nil && task.Result != "" {
+			if len(task.Result) > len(finalResult) {
+				// API returned a longer result — SSE was truncated
+				finalResult = task.Result
+			}
+			// API succeeded: we have the canonical full result
+		} else {
+			// API fallback failed — SSE result may be truncated
+			fullResultConfirmed = false
+		}
+	}
+
+	return agent.ToolResult{Content: finalResult, CloudResult: fullResultConfirmed}, nil
 }
 
 func (t *CloudDelegateTool) RequiresApproval() bool { return true }

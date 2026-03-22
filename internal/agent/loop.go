@@ -156,6 +156,11 @@ PREFER LOCAL (delegate only if struggling):
 - Single web search -> local http tool first
 - Simple Q&A with one source -> local first
 
+WORKFLOW TYPE SELECTION:
+- "research": Deep multi-source research with web search, citation, and synthesis. Use when the user wants thorough investigation of a topic from multiple angles.
+- "swarm": A lead agent dynamically coordinates sub-agents (researcher, coder, analyst) with a shared workspace. Use for open-ended complex tasks that combine research + computation + writing, or when the task scope is unclear and needs adaptive decomposition.
+- "auto": Routes to a fixed DAG plan with parallel subtasks. Good for structured tasks with clear steps.
+
 CRITICAL: Call cloud_delegate ONCE per task. When it returns a result, present the full result to the user — do not summarize or truncate it. The cloud already ran multiple agents and produced a polished deliverable. Never re-call cloud_delegate with the same or similar task.
 
 INDEPENDENT REVIEW: When you need to review code, analysis, or content you just produced in this session, consider delegating to cloud_delegate with workflow_type "review". The cloud agent has no prior context from this session, making it better at catching issues you might overlook due to reasoning inertia. Good candidates: code review of files you just wrote, fact-checking analysis you just produced, second opinion on a design decision.`
@@ -229,7 +234,7 @@ func NewAgentLoop(gw *client.GatewayClient, tools *ToolRegistry, modelTier strin
 		maxIter = 25
 	}
 	if resultTrunc <= 0 {
-		resultTrunc = 2000
+		resultTrunc = 30000
 	}
 	if argsTrunc <= 0 {
 		argsTrunc = 200
@@ -465,8 +470,9 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		compactionSummary    string // cached summary from compaction
 		compactionApplied    bool   // true once messages have been shaped
 		summaryFailures      int    // consecutive summary failures; backs off after 3
-		cloudNudgeFired     bool
-		cloudDelegateClaimed bool // set on first cloud_delegate attempt; blocks subsequent calls unless it fails
+		cloudNudgeFired      bool
+		cloudDelegateClaimed bool   // set on first cloud_delegate attempt; blocks subsequent calls unless it fails
+		cloudResultContent   string // non-empty when a cloud deliverable should bypass LLM summarization
 
 		// Cross-iteration dedup: cache successful results from previous iteration
 		// to prevent re-execution of identical tool calls across consecutive iterations.
@@ -987,8 +993,15 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				}
 			}
 
-			// Record result in context (both resolved and executed, in order)
+			// Record result in context (both resolved and executed, in order).
+			// Cloud deliverables use a higher context limit (60K chars ~15K tokens)
+			// to preserve detail for follow-up turns while still bounding context pressure.
 			cleanResult := stripLineNumbers(result.Content)
+			maxChars := a.resultTrunc
+			if result.CloudResult {
+				maxChars = 60000
+			}
+			contextResult := truncateStr(cleanResult, maxChars)
 			if useNative {
 				if len(result.Images) > 0 {
 					var imageBlocks []client.ContentBlock
@@ -999,14 +1012,14 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 						})
 					}
 					resultBlocks = append(resultBlocks, client.NewToolResultBlockWithImages(
-						fc.ID, truncateStr(cleanResult, a.resultTrunc), imageBlocks, result.IsError))
+						fc.ID, contextResult, imageBlocks, result.IsError))
 				} else {
 					resultBlocks = append(resultBlocks, client.NewToolResultBlock(
-						fc.ID, truncateStr(cleanResult, a.resultTrunc), result.IsError))
+						fc.ID, contextResult, result.IsError))
 				}
 			} else {
 				if len(result.Images) > 0 {
-					text := formatToolExec(fc.Name, truncateStr(argsStr, a.argsTrunc), generateCallID(), truncateStr(cleanResult, a.resultTrunc), false)
+					text := formatToolExec(fc.Name, truncateStr(argsStr, a.argsTrunc), generateCallID(), contextResult, false)
 					var blocks []client.ContentBlock
 					blocks = append(blocks, client.ContentBlock{Type: "text", Text: text})
 					for _, img := range result.Images {
@@ -1020,9 +1033,14 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 						Content: client.NewBlockContent(blocks),
 					})
 				} else {
-					allResults.WriteString(formatToolExec(fc.Name, truncateStr(argsStr, a.argsTrunc), generateCallID(), truncateStr(cleanResult, a.resultTrunc), result.IsError))
+					allResults.WriteString(formatToolExec(fc.Name, truncateStr(argsStr, a.argsTrunc), generateCallID(), contextResult, result.IsError))
 					allResults.WriteString("\n\n")
 				}
+			}
+
+			// Track cloud result for bypass after Phase 3
+			if result.CloudResult && !result.IsError {
+				cloudResultContent = cleanResult
 			}
 
 			// Reset cloud_delegate lock on failure so it can be retried
@@ -1065,6 +1083,18 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				Content: client.NewTextContent(strings.TrimRight(allResults.String(), " \t\n\r")),
 			})
 		}
+
+		// Cloud result bypass: render the deliverable directly to the user
+		// without an additional LLM summarization turn. The full result is
+		// already recorded in messages[] for follow-up context.
+		// Only bypass when cloud_delegate was the sole tool call this iteration.
+		if cloudResultContent != "" && len(toolCalls) == 1 {
+			if a.handler != nil {
+				a.handler.OnText(cloudResultContent)
+			}
+			return cloudResultContent, usage, nil
+		}
+		cloudResultContent = "" // reset if mixed with other tools
 
 		// Handle loop detection results
 		if worstAction == LoopForceStop {

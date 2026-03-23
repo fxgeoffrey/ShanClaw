@@ -171,7 +171,7 @@ shan -y "open Chrome, go to x.com, and post a tweet"
 shan -y "click on the Finder icon in the dock"
 ```
 
-**Browser Automation** — `browser` (pinchtab for real browser, chromedp fallback)
+**Browser Automation** — Playwright MCP (preferred) or legacy `browser` (pinchtab/chromedp fallback)
 ```bash
 shan -y "open https://news.ycombinator.com and get the top 5 stories"
 shan -y "navigate to waylandz.com and take a browser screenshot"
@@ -209,7 +209,7 @@ shan "show all tables in the database"
 - **macOS** (clipboard, notifications, AppleScript, screencapture, accessibility)
 - **Shannon Gateway** at configurable endpoint (for LLM completions + remote tools)
 - **Accessibility permission** granted in System Settings > Privacy & Security > Accessibility (for `accessibility` and `computer` tools)
-- **Chrome** (optional, for `browser` tool — chromedp with isolated profile)
+- **Chrome** (optional, for browser automation — Playwright MCP preferred, chromedp fallback with isolated profile)
 - **[Ghostty](https://ghostty.org) >= 1.3.0** (optional, for `ghostty` tool — terminal tabs, splits, input)
 
 ## CLI Usage
@@ -307,7 +307,7 @@ Local tools executed on your macOS machine:
 | `applescript` | Yes | Execute arbitrary AppleScript. Use for operations with no AX equivalent (e.g., "tell Finder to empty trash") |
 | `screenshot` | Yes | Screen capture (fullscreen/window/region). Visual fallback when accessibility tree is insufficient |
 | `computer` | Yes | Mouse/keyboard via CGEvent (CJK/emoji safe). Click, type, hotkey, move, screenshot. Fallback when accessibility refs don't work or for drag operations. No Python dependency. |
-| `browser` | Yes | Browser automation via pinchtab (preferred) or chromedp fallback. Isolated profile for web scraping; pinchtab connects to user's real browser for authenticated sessions. |
+| `browser` | Yes | Browser automation via Playwright MCP (preferred), pinchtab, or chromedp fallback. When Playwright MCP is configured, the legacy browser tool is auto-disabled. Isolated profile for web scraping; pinchtab connects to user's real browser for authenticated sessions. |
 
 ### Scheduling
 

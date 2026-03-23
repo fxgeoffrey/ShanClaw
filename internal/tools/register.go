@@ -186,6 +186,12 @@ func CompleteRegistration(ctx context.Context, gw *client.GatewayClient, cfg *co
 		}
 		// Disable legacy browser tool when Playwright MCP is available
 		if hasPlaywright {
+			// Shut down any chromedp Chrome instance before removing the tool
+			if bt, ok := reg.Get("browser"); ok {
+				if browserTool, ok := bt.(*BrowserTool); ok {
+					browserTool.Cleanup()
+				}
+			}
 			reg.Remove("browser")
 			log.Printf("Playwright MCP connected — disabled legacy browser tool")
 			// Close the Bridge extension's connect.html tab (safe after connection is established)
@@ -212,6 +218,9 @@ func CompleteRegistration(ctx context.Context, gw *client.GatewayClient, cfg *co
 // If agentDef is non-nil, tool filtering and MCP scoping are applied per-agent.
 // The returned cleanup function must be called on shutdown.
 func RegisterAll(gw *client.GatewayClient, cfg *config.Config, agentDef ...*agents.Agent) (*agent.ToolRegistry, *[]*skills.Skill, func(), error) {
+	// Kill any orphaned chromedp Chrome processes from previous daemon runs
+	CleanupOrphanedChromedp()
+
 	reg, skillsPtr, baseCleanup := RegisterLocalTools(cfg)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

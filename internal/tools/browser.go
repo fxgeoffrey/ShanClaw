@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -775,4 +777,23 @@ func (t *BrowserTool) cleanup() {
 		t.active = false
 	}
 	t.backend = backendNone
+}
+
+// CleanupOrphanedChromedp kills any Chrome processes started by chromedp from
+// previous daemon runs that weren't properly cleaned up (e.g. force-kill, crash).
+// Safe to call at daemon startup before registering tools.
+func CleanupOrphanedChromedp() {
+	// chromedp Chrome instances use --user-data-dir pointing to a temp dir
+	// matching "chromedp-runner*". Find and kill them.
+	out, err := exec.Command("pgrep", "-f", "user-data-dir.*chromedp-runner").Output()
+	if err != nil || strings.TrimSpace(string(out)) == "" {
+		return
+	}
+	pids := strings.Fields(strings.TrimSpace(string(out)))
+	for _, pid := range pids {
+		exec.Command("kill", pid).Run()
+	}
+	if len(pids) > 0 {
+		log.Printf("cleaned up %d orphaned chromedp Chrome process(es)", len(pids))
+	}
 }

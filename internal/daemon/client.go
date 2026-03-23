@@ -26,6 +26,7 @@ type Client struct {
 	sem           chan struct{}
 	pendingClaims sync.Map   // map[string]chan bool
 	activeMsgs    sync.Map   // map[string]context.CancelFunc
+	eventSeqs     sync.Map   // map[string]*atomic.Int64
 	connected     atomic.Bool
 	activeAgent   atomic.Value // stores string
 	startTime     time.Time
@@ -111,8 +112,32 @@ func (c *Client) SendProgressWithWorkflow(messageID, workflowID string) error {
 	return c.sendEnvelope(DaemonMessage{Type: MsgTypeProgress, MessageID: messageID, Payload: payload})
 }
 
+// SendEvent sends a daemon agent loop event to Cloud for channel streaming.
+// Fire-and-forget: errors are returned but callers should log and continue.
+func (c *Client) SendEvent(messageID string, eventType, message string, data map[string]interface{}) error {
+	val, _ := c.eventSeqs.LoadOrStore(messageID, new(atomic.Int64))
+	seq := val.(*atomic.Int64).Add(1)
+
+	payload, err := json.Marshal(DaemonEventPayload{
+		EventType: eventType,
+		Message:   message,
+		Data:      data,
+		Seq:       seq,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		return err
+	}
+	return c.sendEnvelope(DaemonMessage{
+		Type:      MsgTypeEvent,
+		MessageID: messageID,
+		Payload:   payload,
+	})
+}
+
 // SendReply sends the final reply for a message and cancels its heartbeat.
 func (c *Client) SendReply(messageID string, payload ReplyPayload) error {
+	c.eventSeqs.Delete(messageID)
 	if cancel, ok := c.activeMsgs.LoadAndDelete(messageID); ok {
 		cancel.(context.CancelFunc)()
 	}

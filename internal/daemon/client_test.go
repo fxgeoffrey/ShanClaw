@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -277,5 +278,123 @@ func TestClient_SystemMessage(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("system message not received")
+	}
+}
+
+func TestClient_SendEvent_WireFormat(t *testing.T) {
+	received := make(chan DaemonMessage, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var dm DaemonMessage
+		if err := conn.ReadJSON(&dm); err != nil {
+			return
+		}
+		received <- dm
+	}))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	c := NewClient(wsURL, "", nil, nil)
+	if err := c.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	if err := c.SendEvent("msg-100", "tool_start", "running web_search", map[string]interface{}{"tool": "web_search"}); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case dm := <-received:
+		if dm.Type != MsgTypeEvent {
+			t.Errorf("type = %q, want %q", dm.Type, MsgTypeEvent)
+		}
+		if dm.MessageID != "msg-100" {
+			t.Errorf("message_id = %q, want %q", dm.MessageID, "msg-100")
+		}
+		var ep DaemonEventPayload
+		if err := json.Unmarshal(dm.Payload, &ep); err != nil {
+			t.Fatalf("unmarshal payload: %v", err)
+		}
+		if ep.EventType != "tool_start" {
+			t.Errorf("event_type = %q, want %q", ep.EventType, "tool_start")
+		}
+		if ep.Seq != 1 {
+			t.Errorf("seq = %d, want 1", ep.Seq)
+		}
+		if ep.Timestamp == "" {
+			t.Error("timestamp should not be empty")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not receive event")
+	}
+}
+
+func TestClient_SendEvent_SeqIncrementsPerMessage(t *testing.T) {
+	received := make(chan DaemonMessage, 3)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for i := 0; i < 3; i++ {
+			var dm DaemonMessage
+			if err := conn.ReadJSON(&dm); err != nil {
+				return
+			}
+			received <- dm
+		}
+	}))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	c := NewClient(wsURL, "", nil, nil)
+	if err := c.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	// Send 2 events for msg-A, 1 for msg-B.
+	c.SendEvent("msg-A", "step", "one", nil)
+	c.SendEvent("msg-A", "step", "two", nil)
+	c.SendEvent("msg-B", "step", "one", nil)
+
+	seqs := make(map[string][]int64)
+	for i := 0; i < 3; i++ {
+		select {
+		case dm := <-received:
+			var ep DaemonEventPayload
+			json.Unmarshal(dm.Payload, &ep)
+			seqs[dm.MessageID] = append(seqs[dm.MessageID], ep.Seq)
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for events")
+		}
+	}
+
+	if got := seqs["msg-A"]; len(got) != 2 || got[0] != 1 || got[1] != 2 {
+		t.Errorf("msg-A seqs = %v, want [1 2]", got)
+	}
+	if got := seqs["msg-B"]; len(got) != 1 || got[0] != 1 {
+		t.Errorf("msg-B seqs = %v, want [1]", got)
+	}
+}
+
+func TestClient_SendReply_CleansUpSeq(t *testing.T) {
+	c := NewClient("ws://localhost:1/x", "", nil, nil)
+	// Pre-populate a seq counter.
+	c.eventSeqs.Store("msg-cleanup", new(atomic.Int64))
+
+	// SendReply will fail (no connection) but should still clean up eventSeqs.
+	_ = c.SendReply("msg-cleanup", ReplyPayload{Text: "done"})
+
+	if _, loaded := c.eventSeqs.Load("msg-cleanup"); loaded {
+		t.Error("eventSeqs entry should have been deleted by SendReply")
 	}
 }

@@ -116,6 +116,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("PATCH /schedules/{id}", s.handlePatchSchedule)
 	mux.HandleFunc("DELETE /schedules/{id}", s.handleDeleteSchedule)
 	mux.HandleFunc("GET /config", s.handleGetConfig)
+	mux.HandleFunc("GET /config/status", s.handleConfigStatus)
 	mux.HandleFunc("PATCH /config", s.handlePatchConfig)
 	mux.HandleFunc("POST /config/reload", s.handleConfigReload)
 	mux.HandleFunc("GET /instructions", s.handleGetInstructions)
@@ -1871,6 +1872,26 @@ func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+// handleConfigStatus returns current MCP server status without restarting processes.
+func (s *Server) handleConfigStatus(w http.ResponseWriter, r *http.Request) {
+	cfg, _ := s.deps.Snapshot()
+	resp := make(map[string]interface{})
+
+	if cfg != nil && len(cfg.MCPServers) > 0 {
+		mcpStatus := make(map[string]string, len(cfg.MCPServers))
+		for name, srv := range cfg.MCPServers {
+			if srv.Disabled {
+				mcpStatus[name] = "disabled"
+			} else {
+				mcpStatus[name] = "connected"
+			}
+		}
+		resp["mcp_servers"] = mcpStatus
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleConfigReload(w http.ResponseWriter, r *http.Request) {

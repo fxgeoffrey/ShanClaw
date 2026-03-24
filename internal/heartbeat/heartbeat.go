@@ -77,14 +77,12 @@ func ReadChecklist(path string) (string, error) {
 
 // agentHeartbeat holds per-agent heartbeat state.
 type agentHeartbeat struct {
-	name            string
-	interval        time.Duration
-	activeHours     string
-	model           string
-	isolatedSession bool
-	goalDriven      bool
-	agentDir        string
-	mu              sync.Mutex // overlap prevention
+	name        string
+	interval    time.Duration
+	activeHours string
+	model       string
+	agentDir    string
+	mu          sync.Mutex // overlap prevention
 }
 
 // Manager runs periodic heartbeat checks for all configured agents.
@@ -125,19 +123,13 @@ func New(agentsDir string, deps *daemon.ServerDeps) (*Manager, error) {
 			continue
 		}
 
-		ah := &agentHeartbeat{
-			name:            name,
-			interval:        interval,
-			activeHours:     hb.ActiveHours,
-			model:           hb.Model,
-			isolatedSession: hb.IsIsolatedSession(),
-			goalDriven:      true,
-			agentDir:        filepath.Join(agentsDir, name),
-		}
-		if ah.goalDriven {
-			ah.isolatedSession = false
-		}
-		entries = append(entries, ah)
+		entries = append(entries, &agentHeartbeat{
+			name:        name,
+			interval:    interval,
+			activeHours: hb.ActiveHours,
+			model:       hb.Model,
+			agentDir:    filepath.Join(agentsDir, name),
+		})
 	}
 
 	return &Manager{
@@ -203,13 +195,7 @@ func (m *Manager) tick(ctx context.Context, ah *agentHeartbeat) {
 		return
 	}
 
-	start := time.Now()
-
-	if ah.goalDriven {
-		m.tickGoalDriven(ctx, ah, checklist, start)
-	} else {
-		m.tickChecklist(ctx, ah, checklist, start)
-	}
+	m.tickGoalDriven(ctx, ah, checklist, time.Now())
 }
 
 // tickGoalDriven runs a goal-driven heartbeat with session context.
@@ -219,7 +205,11 @@ func (m *Manager) tickGoalDriven(ctx context.Context, ah *agentHeartbeat, goals 
 
 	sessionID, history, err := m.deps.SessionCache.ResolveLatestSession(routeKey, sessionsDir)
 	if err != nil {
-		log.Printf("heartbeat: %q skipped_no_session: %v", ah.name, err)
+		if errors.Is(err, daemon.ErrRouteActive) {
+			log.Printf("heartbeat: skip %q (run in progress)", ah.name)
+		} else {
+			log.Printf("heartbeat: %q skipped_no_session: %v", ah.name, err)
+		}
 		return
 	}
 
@@ -255,11 +245,24 @@ func (m *Manager) tickGoalDriven(ctx context.Context, ah *agentHeartbeat, goals 
 		return
 	}
 
-	// Only persist the agent's response (not the heartbeat system prompt).
-	// The prompt is an internal mechanism — users should only see the agent's proactive message.
-	appendErr := m.deps.SessionCache.AppendToSession(routeKey, sessionsDir, sessionID, collector.Messages)
+	// Only persist the final assistant message — tool calls and tool results
+	// are internal mechanics and should not appear in the user's conversation.
+	var finalMsgs []client.Message
+	for i := len(collector.Messages) - 1; i >= 0; i-- {
+		if collector.Messages[i].Role == "assistant" {
+			finalMsgs = []client.Message{collector.Messages[i]}
+			break
+		}
+	}
+	if len(finalMsgs) == 0 {
+		log.Printf("heartbeat: %q action but no assistant message to persist", ah.name)
+		return
+	}
+	appendErr := m.deps.SessionCache.AppendToSession(routeKey, sessionsDir, sessionID, finalMsgs)
 	if appendErr != nil {
-		if errors.Is(appendErr, daemon.ErrSessionChanged) {
+		if errors.Is(appendErr, daemon.ErrRouteActive) {
+			log.Printf("heartbeat: %q skipped_append (run in progress, session=%s, duration=%dms)", ah.name, sessionID, elapsed)
+		} else if errors.Is(appendErr, daemon.ErrSessionChanged) {
 			log.Printf("heartbeat: %q session_changed (session=%s, duration=%dms)", ah.name, sessionID, elapsed)
 			m.emitAlert(ah.name, "Heartbeat completed but session changed — turn dropped", "")
 		} else {
@@ -277,31 +280,6 @@ func (m *Manager) tickGoalDriven(ctx context.Context, ah *agentHeartbeat, goals 
 			log.Printf("heartbeat: %q proactive send failed: %v", ah.name, err)
 		}
 	}
-}
-
-// tickChecklist runs a legacy checklist-based heartbeat.
-func (m *Manager) tickChecklist(ctx context.Context, ah *agentHeartbeat, checklist string, start time.Time) {
-	prompt := FormatPrompt(checklist)
-	req := daemon.RunAgentRequest{
-		Agent:         ah.name,
-		Source:        "heartbeat",
-		Text:          prompt,
-		NewSession:    ah.isolatedSession,
-		Ephemeral:     true,
-		ModelOverride: ah.model,
-	}
-	collector := &TranscriptCollector{}
-	result, err := daemon.RunAgent(ctx, m.deps, req, collector)
-	if err != nil {
-		log.Printf("heartbeat: agent %q error: %v", ah.name, err)
-		return
-	}
-	if IsHeartbeatOK(result.Reply) {
-		log.Printf("heartbeat: agent %q OK", ah.name)
-		return
-	}
-	log.Printf("heartbeat: agent %q alert: %s", ah.name, result.Reply)
-	m.emitAlert(ah.name, result.Reply, result.SessionID)
 }
 
 // emitAlert sends a heartbeat alert event via the event bus.
@@ -333,11 +311,8 @@ type TranscriptCollector struct {
 	Messages []client.Message
 }
 
-func (tc *TranscriptCollector) OnToolCall(name string, args string) {
-	tc.Messages = append(tc.Messages, client.Message{Role: "assistant", Content: client.NewTextContent(fmt.Sprintf("[tool_call: %s]", name))})
-}
+func (tc *TranscriptCollector) OnToolCall(name string, args string) {}
 func (tc *TranscriptCollector) OnToolResult(name string, args string, result agent.ToolResult, elapsed time.Duration) {
-	tc.Messages = append(tc.Messages, client.Message{Role: "tool", Content: client.NewTextContent(result.Content)})
 }
 func (tc *TranscriptCollector) OnText(text string) {
 	tc.Messages = append(tc.Messages, client.Message{Role: "assistant", Content: client.NewTextContent(text)})

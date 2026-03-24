@@ -13,6 +13,7 @@ import (
 
 	"github.com/Kocoro-lab/ShanClaw/internal/agent"
 	"github.com/Kocoro-lab/ShanClaw/internal/agents"
+	"github.com/Kocoro-lab/ShanClaw/internal/client"
 	"github.com/Kocoro-lab/ShanClaw/internal/daemon"
 	"github.com/Kocoro-lab/ShanClaw/internal/watcher"
 )
@@ -24,12 +25,30 @@ func IsHeartbeatOK(reply string) bool {
 	return strings.EqualFold(strings.TrimSpace(reply), "HEARTBEAT_OK")
 }
 
+// IsHeartbeatOKFromMessages checks the last assistant message in a transcript.
+func IsHeartbeatOKFromMessages(messages []client.Message) bool {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "assistant" {
+			return strings.EqualFold(strings.TrimSpace(messages[i].Content.Text()), "HEARTBEAT_OK")
+		}
+	}
+	return false
+}
+
 // FormatPrompt builds the heartbeat prompt from a checklist body.
 func FormatPrompt(checklist string) string {
 	return fmt.Sprintf(`This is a periodic heartbeat check. Review the checklist below and check each item using your available tools. If everything is fine, reply with exactly "HEARTBEAT_OK" and nothing else. If something needs attention, describe the issue concisely.
 
 Checklist:
 %s`, checklist)
+}
+
+// FormatGoalPrompt builds a goal-driven heartbeat prompt.
+func FormatGoalPrompt(goals string) string {
+	return fmt.Sprintf(`This is a periodic check-in. Review your goals below and your current conversation context. If something needs your attention, take action using your available tools. If nothing needs doing, reply with exactly "HEARTBEAT_OK" and nothing else.
+
+Goals:
+%s`, goals)
 }
 
 // ReadChecklist reads HEARTBEAT.md at the given path.
@@ -192,7 +211,7 @@ func (m *Manager) tick(ctx context.Context, ah *agentHeartbeat) {
 		ModelOverride: ah.model,
 	}
 
-	handler := &heartbeatHandler{}
+	handler := &TranscriptCollector{}
 	result, err := daemon.RunAgent(ctx, m.deps, req, handler)
 	if err != nil {
 		log.Printf("heartbeat: agent %q error: %v", ah.name, err)
@@ -226,16 +245,23 @@ func (m *Manager) Close() {
 	<-m.done
 }
 
-// heartbeatHandler is a silent EventHandler for heartbeat agent runs.
-type heartbeatHandler struct{}
-
-func (h *heartbeatHandler) OnToolCall(name string, args string)                                      {}
-func (h *heartbeatHandler) OnToolResult(name string, args string, result agent.ToolResult, elapsed time.Duration) {
+// TranscriptCollector captures all messages during a run for post-run inspection.
+type TranscriptCollector struct {
+	Messages []client.Message
 }
-func (h *heartbeatHandler) OnText(text string)                  {}
-func (h *heartbeatHandler) OnStreamDelta(delta string)          {}
-func (h *heartbeatHandler) OnUsage(usage agent.TurnUsage)       {}
-func (h *heartbeatHandler) OnCloudAgent(agentID, status, message string) {}
-func (h *heartbeatHandler) OnCloudProgress(completed, total int)         {}
-func (h *heartbeatHandler) OnCloudPlan(planType, content string, needsReview bool) {}
-func (h *heartbeatHandler) OnApprovalNeeded(tool string, args string) bool { return true }
+
+func (tc *TranscriptCollector) OnToolCall(name string, args string) {
+	tc.Messages = append(tc.Messages, client.Message{Role: "assistant", Content: client.NewTextContent(fmt.Sprintf("[tool_call: %s]", name))})
+}
+func (tc *TranscriptCollector) OnToolResult(name string, args string, result agent.ToolResult, elapsed time.Duration) {
+	tc.Messages = append(tc.Messages, client.Message{Role: "tool", Content: client.NewTextContent(result.Content)})
+}
+func (tc *TranscriptCollector) OnText(text string) {
+	tc.Messages = append(tc.Messages, client.Message{Role: "assistant", Content: client.NewTextContent(text)})
+}
+func (tc *TranscriptCollector) OnStreamDelta(delta string)                            {}
+func (tc *TranscriptCollector) OnUsage(usage agent.TurnUsage)                         {}
+func (tc *TranscriptCollector) OnCloudAgent(agentID, status, message string)          {}
+func (tc *TranscriptCollector) OnCloudProgress(completed, total int)                  {}
+func (tc *TranscriptCollector) OnCloudPlan(planType, content string, needsReview bool) {}
+func (tc *TranscriptCollector) OnApprovalNeeded(tool string, args string) bool { return true }

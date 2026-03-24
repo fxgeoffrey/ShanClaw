@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Kocoro-lab/ShanClaw/internal/client"
 )
 
 func TestIsHeartbeatOK(t *testing.T) {
@@ -103,5 +105,47 @@ func TestReadChecklist_MaxSize(t *testing.T) {
 	}
 	if len(content) > maxChecklistChars+100 {
 		t.Errorf("expected truncated content, got %d chars", len(content))
+	}
+}
+
+func TestFormatGoalPrompt(t *testing.T) {
+	got := FormatGoalPrompt("## Goals\n- Do stuff")
+	if !strings.Contains(got, "periodic check-in") {
+		t.Error("goal prompt missing check-in text")
+	}
+	if !strings.Contains(got, "## Goals") {
+		t.Error("goal prompt missing goals content")
+	}
+}
+
+func TestIsHeartbeatOK_FromMessages(t *testing.T) {
+	msgs := []client.Message{
+		{Role: "user", Content: client.NewTextContent("check-in prompt")},
+		{Role: "assistant", Content: client.NewTextContent("HEARTBEAT_OK")},
+	}
+	if !IsHeartbeatOKFromMessages(msgs) {
+		t.Error("expected OK")
+	}
+}
+
+func TestIsHeartbeatOK_FromMessages_WithToolCalls(t *testing.T) {
+	msgs := []client.Message{
+		{Role: "user", Content: client.NewTextContent("check-in prompt")},
+		{Role: "assistant", Content: client.NewTextContent("let me check")},
+		{Role: "tool", Content: client.NewTextContent("result")},
+		{Role: "assistant", Content: client.NewTextContent("HEARTBEAT_OK")},
+	}
+	if !IsHeartbeatOKFromMessages(msgs) {
+		t.Error("expected OK from last assistant message")
+	}
+}
+
+func TestIsHeartbeatOK_FromMessages_NonOK(t *testing.T) {
+	msgs := []client.Message{
+		{Role: "user", Content: client.NewTextContent("check-in prompt")},
+		{Role: "assistant", Content: client.NewTextContent("User needs a reminder about the video")},
+	}
+	if IsHeartbeatOKFromMessages(msgs) {
+		t.Error("expected non-OK")
 	}
 }

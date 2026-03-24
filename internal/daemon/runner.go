@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -40,6 +41,7 @@ type RunAgentRequest struct {
 	Ephemeral     bool   `json:"-"`                   // caller owns persistence + events
 	ModelOverride  string `json:"-"`                   // overrides agent model tier
 	BypassRouting  bool   `json:"-"`                   // skip route lock (heartbeat runs)
+	SessionHistory []client.Message `json:"-"` // pre-loaded history for LLM context (BypassRouting runs)
 }
 
 // Validate checks that the request has the minimum required fields.
@@ -263,10 +265,19 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 			deps.SessionCache.UnlockRoute(req.RouteKey)
 		}()
 	} else {
-		sessMgr = session.NewManager(sessionsDir)
+		managerDir := sessionsDir
+		if req.BypassRouting {
+			tmpDir, tmpErr := os.MkdirTemp("", "heartbeat-*")
+			if tmpErr != nil {
+				return nil, fmt.Errorf("create temp session dir: %w", tmpErr)
+			}
+			defer os.RemoveAll(tmpDir)
+			managerDir = tmpDir
+		}
+		sessMgr = session.NewManager(managerDir)
 		defer func() {
 			if err := sessMgr.Close(); err != nil {
-				log.Printf("daemon: failed to close ephemeral session manager for %q: %v", sessionsDir, err)
+				log.Printf("daemon: failed to close ephemeral session manager for %q: %v", managerDir, err)
 			}
 		}()
 	}
@@ -294,6 +305,12 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		sessMgr.NewSession()
 	}
 	sess := sessMgr.Current()
+
+	// Seed pre-loaded history for bypass-routed runs (e.g., heartbeat).
+	// The throwaway manager has an empty session; this gives the LLM context.
+	if len(req.SessionHistory) > 0 {
+		sess.Messages = req.SessionHistory
+	}
 
 	// Notify handler of resolved session ID so it can include it in EventBus payloads.
 	if setter, ok := handler.(interface{ SetSessionID(string) }); ok {

@@ -195,8 +195,14 @@ func CompleteRegistration(ctx context.Context, gw *client.GatewayClient, cfg *co
 			}
 			reg.Remove("browser")
 			log.Printf("Playwright MCP connected — disabled legacy browser tool")
-			// Close the Bridge extension's connect.html tab (safe after connection is established)
-			go closePlaywrightExtensionTab(mcpMgr)
+			// Hide Chrome so the Bridge extension tab doesn't steal focus.
+			// Do NOT close the connect.html tab — the Bridge relay connection
+			// depends on it. Closing it kills the CDP session and triggers
+			// an immediate supervisor reconnect that reopens Chrome.
+			go func() {
+				time.Sleep(2 * time.Second) // wait for Bridge handshake to complete
+				hideChrome()
+			}()
 		}
 	}
 
@@ -322,12 +328,14 @@ func closePlaywrightExtensionTab(mcpMgr *mcp.ClientManager) {
 		return
 	}
 
-	// Look for the connect.html tab by checking for the extension URL pattern
-	// The tab list returns markdown with tab indices and URLs
+	log.Printf("Playwright: tab list output: %s", content)
+
+	// Look for the connect.html tab by checking for the extension URL pattern.
+	// Format from Playwright MCP: "- 0: (current) [Title](chrome-extension://...connect.html...)"
 	lines := strings.Split(content, "\n")
 	for _, line := range lines {
 		if strings.Contains(line, "connect.html") || strings.Contains(line, "chrome-extension://") {
-			// Extract tab index — format is typically "- [N] title (url)"
+			// Extract tab index — format: "- N: ..." where N is the tab index
 			for i, ch := range line {
 				if ch >= '0' && ch <= '9' {
 					end := i
@@ -339,6 +347,7 @@ func closePlaywrightExtensionTab(mcpMgr *mcp.ClientManager) {
 					for _, c := range idx {
 						idxNum = idxNum*10 + int(c-'0')
 					}
+					log.Printf("Playwright: found extension tab at index %d, closing...", idxNum)
 					_, _, closeErr := mcpMgr.CallTool(ctx, "playwright", "browser_tabs", map[string]any{
 						"action": "close",
 						"index":  idxNum,
@@ -348,20 +357,28 @@ func closePlaywrightExtensionTab(mcpMgr *mcp.ClientManager) {
 					} else {
 						log.Printf("Playwright: closed Bridge extension connect tab (index %d)", idxNum)
 					}
-					// Send Chrome to the background so the reconnect doesn't
-					// disrupt the user by popping a window to the foreground.
-					hideChrome()
 					return
 				}
 			}
 		}
 	}
+	log.Printf("Playwright: no extension tab found in tab list")
 }
 
 // CleanupPlaywrightReconnect closes the Bridge extension connect.html tab
-// and hides Chrome after a supervisor-driven reconnect.
-func CleanupPlaywrightReconnect(mcpMgr *mcp.ClientManager) {
-	closePlaywrightExtensionTab(mcpMgr)
+// and hides Chrome after a supervisor-driven reconnect. The ctx should be
+// the supervisor's context so cleanup is cancelled on shutdown.
+func CleanupPlaywrightReconnect(ctx context.Context, mcpMgr *mcp.ClientManager) {
+	if ctx.Err() != nil {
+		return
+	}
+	// Wait for Bridge handshake, then just hide Chrome.
+	// Do NOT close the connect.html tab — it kills the relay connection.
+	time.Sleep(2 * time.Second)
+	if ctx.Err() != nil {
+		return
+	}
+	hideChrome()
 }
 
 // hideChrome sends Chrome to the background so it doesn't steal focus

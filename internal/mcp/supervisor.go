@@ -100,7 +100,7 @@ type Supervisor struct {
 	servers            map[string]*serverEntry
 	probes             map[string]CapabilityProbe
 	onChange           func(serverName string, oldState, newState HealthState)
-	onReconnect        func(serverName string) // called after successful reconnect
+	onReconnect        func(ctx context.Context, serverName string) // called after successful reconnect; ctx is cancelled on Stop()
 	cancel             context.CancelFunc
 	started            bool
 	transportInterval  time.Duration
@@ -137,7 +137,8 @@ func (s *Supervisor) RegisterCapabilityProbe(serverName string, probe Capability
 }
 
 // SetOnReconnect registers a callback invoked after a successful server reconnect.
-func (s *Supervisor) SetOnReconnect(fn func(serverName string)) {
+// The ctx is cancelled when the supervisor stops, so long-running cleanup is safe.
+func (s *Supervisor) SetOnReconnect(fn func(ctx context.Context, serverName string)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onReconnect = fn
@@ -326,6 +327,14 @@ func (s *Supervisor) serverLoop(ctx context.Context, name string, entry *serverE
 
 		case <-entry.probeNowCh:
 			s.runTransportProbe(ctx, name, entry)
+			// On-demand path: if still disconnected, attempt reconnect.
+			// This is the ONLY path that reconnects — periodic probes never do.
+			s.mu.Lock()
+			stillDisconnected := entry.health.State == StateDisconnected
+			s.mu.Unlock()
+			if stillDisconnected {
+				s.attemptReconnect(ctx, name, entry)
+			}
 			s.mu.Lock()
 			probe = s.probes[name]
 			transportOK := entry.health.State != StateDisconnected
@@ -369,6 +378,32 @@ func (s *Supervisor) serverLoop(ctx context.Context, name string, entry *serverE
 	}
 }
 
+// attemptReconnect tries to reconnect a disconnected server. Only called from
+// the on-demand ProbeNow path, never from periodic probes.
+func (s *Supervisor) attemptReconnect(ctx context.Context, name string, entry *serverEntry) {
+	reconnCtx, reconnCancel := context.WithTimeout(ctx, 15*time.Second)
+	defer reconnCancel()
+
+	_, reconnErr := s.mgr.Reconnect(reconnCtx, name)
+	if reconnErr != nil {
+		log.Printf("[mcp-supervisor] %s: on-demand reconnect failed: %v", name, reconnErr)
+		return
+	}
+
+	log.Printf("[mcp-supervisor] %s: on-demand reconnect succeeded", name)
+	s.mu.Lock()
+	fn := s.onReconnect
+	s.mu.Unlock()
+	if fn != nil {
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			fn(ctx, name)
+		}()
+	}
+	s.recordTransportOK(ctx, name, entry)
+}
+
 // runTransportProbe probes transport health and attempts reconnect on failure.
 // When transport recovers and the server has a capability probe, runs it
 // immediately before declaring healthy — prevents registering Playwright tools
@@ -383,23 +418,11 @@ func (s *Supervisor) runTransportProbe(ctx context.Context, name string, entry *
 		return
 	}
 
-	// Transport failed — attempt reconnect before declaring disconnected.
-	reconnCtx, reconnCancel := context.WithTimeout(ctx, 15*time.Second)
-	defer reconnCancel()
+	// Transport failed. Do NOT auto-reconnect — reconnect only happens
+	// on-demand via ProbeNow when a session actually needs browser tools.
+	// Auto-reconnecting Playwright reopens Chrome, which is disruptive.
 
-	_, reconnErr := s.mgr.Reconnect(reconnCtx, name)
-	if reconnErr == nil {
-		s.mu.Lock()
-		fn := s.onReconnect
-		s.mu.Unlock()
-		if fn != nil {
-			fn(name)
-		}
-		s.recordTransportOK(ctx, name, entry)
-		return
-	}
-
-	// Both probe and reconnect failed.
+	// Probe failed — declare disconnected.
 	now := time.Now()
 	s.mu.Lock()
 	entry.transportBackoff.recordFailure()

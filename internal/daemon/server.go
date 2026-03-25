@@ -1994,9 +1994,9 @@ func (s *Server) handleConfigReload(w http.ResponseWriter, r *http.Request) {
 
 		newSupervisor := mcp.NewSupervisor(newMCPMgr)
 		newSupervisor.RegisterCapabilityProbe("playwright", &mcp.PlaywrightProbe{})
-		newSupervisor.SetOnReconnect(func(serverName string) {
+		newSupervisor.SetOnReconnect(func(ctx context.Context, serverName string) {
 			if serverName == "playwright" {
-				go tools.CleanupPlaywrightReconnect(newMCPMgr)
+				tools.CleanupPlaywrightReconnect(ctx, newMCPMgr)
 			}
 		})
 		newSupervisor.SetOnChange(func(server string, oldState, newState mcp.HealthState) {

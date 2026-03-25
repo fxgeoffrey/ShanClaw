@@ -38,6 +38,7 @@ type Server struct {
 	server                 *http.Server
 	listener               net.Listener
 	version                string
+	ctx                    context.Context    // daemon lifecycle context, set on Start
 	cancel                 context.CancelFunc
 	approvalBroker         *ApprovalBroker
 	eventBus               *EventBus
@@ -84,6 +85,7 @@ func (s *Server) SetOnReload(fn func()) {
 }
 
 func (s *Server) Start(ctx context.Context) error {
+	s.ctx = ctx
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /status", s.handleStatus)
@@ -1952,23 +1954,51 @@ func (s *Server) handleConfigReload(w http.ResponseWriter, r *http.Request) {
 		var newReg *agent.ToolRegistry
 		var newMCPMgr *mcp.ClientManager
 		var newCleanup func()
-		newReg, _, newMCPMgr, newCleanup, regErr = tools.RegisterAll(s.deps.GW, newCfg)
+		var newBaseline *agent.ToolRegistry
+		newBaseline, newReg, _, newMCPMgr, newCleanup, regErr = tools.RegisterAllWithBaseline(s.deps.GW, newCfg)
 		if regErr != nil {
 			log.Printf("daemon: reload warning: %v", regErr)
 		}
 		tools.RegisterCloudDelegate(newReg, s.deps.GW, newCfg, nil, "", "")
 
+		newGatewayOverlay := tools.ExtractGatewayTools(newReg)
+		newPostOverlays := tools.ExtractPostOverlays(newReg, newBaseline)
+
+		newSupervisor := mcp.NewSupervisor(newMCPMgr)
+		newSupervisor.RegisterCapabilityProbe("playwright", &mcp.PlaywrightProbe{})
+		newSupervisor.SetOnChange(func(server string, oldState, newState mcp.HealthState) {
+			_, _, depsSup := s.deps.Snapshot()
+			if depsSup != newSupervisor {
+				return
+			}
+			rebuilt := tools.RebuildRegistryForHealth(
+				newBaseline, newGatewayOverlay, newPostOverlays,
+				newSupervisor.HealthStates(), newMCPMgr,
+			)
+			s.deps.mu.Lock()
+			s.deps.Registry = rebuilt
+			s.deps.mu.Unlock()
+			log.Printf("MCP registry rebuilt (reload): %d tools", len(rebuilt.All()))
+		})
+
 		s.deps.mu.Lock()
 		oldCleanup := s.deps.Cleanup
+		oldSupervisor := s.deps.Supervisor
 		s.deps.Config = newCfg
 		s.deps.Registry = newReg
 		s.deps.MCPManager = newMCPMgr
+		s.deps.Supervisor = newSupervisor
 		s.deps.Cleanup = newCleanup
 		s.deps.mu.Unlock()
 
+		if oldSupervisor != nil {
+			oldSupervisor.Stop()
+		}
 		if oldCleanup != nil {
 			oldCleanup()
 		}
+
+		newSupervisor.Start(s.ctx)
 	} else {
 		// Config changed but MCP servers didn't — just update config.
 		s.deps.mu.Lock()

@@ -353,3 +353,85 @@ func RegisterCloudDelegate(reg *agent.ToolRegistry, gw *client.GatewayClient, cf
 	}
 	reg.Register(NewCloudDelegateTool(gw, cfg.APIKey, timeout, handler, agentName, agentPrompt))
 }
+
+// ExtractGatewayTools returns all *ServerTool entries from a registry.
+func ExtractGatewayTools(reg *agent.ToolRegistry) []agent.Tool {
+	var result []agent.Tool
+	for _, t := range reg.All() {
+		if _, ok := t.(*ServerTool); ok {
+			result = append(result, t)
+		}
+	}
+	return result
+}
+
+// ExtractPostOverlays returns tools in full that are not in baseline,
+// not *MCPTool, and not *ServerTool.
+func ExtractPostOverlays(full, baseline *agent.ToolRegistry) []agent.Tool {
+	var result []agent.Tool
+	for _, t := range full.All() {
+		name := t.Info().Name
+		if _, inBaseline := baseline.Get(name); inBaseline {
+			continue
+		}
+		if _, isMCP := t.(*MCPTool); isMCP {
+			continue
+		}
+		if _, isGW := t.(*ServerTool); isGW {
+			continue
+		}
+		result = append(result, t)
+	}
+	return result
+}
+
+// RebuildRegistryForHealth creates a new registry from cached layers, only
+// including tools from healthy MCP servers. When Playwright is healthy, the
+// legacy browser tool is removed from the new registry (but never cleaned up
+// — in-flight sessions may share the instance).
+func RebuildRegistryForHealth(
+	baseline *agent.ToolRegistry,
+	gatewayOverlay []agent.Tool,
+	postOverlays []agent.Tool,
+	healthStates map[string]mcp.HealthState,
+	mcpMgr *mcp.ClientManager,
+) *agent.ToolRegistry {
+	reg := baseline.Clone()
+
+	playwrightHealthy := false
+	if mcpMgr != nil {
+		for serverName, state := range healthStates {
+			if state != mcp.StateHealthy {
+				continue
+			}
+			tools := mcpMgr.CachedTools(serverName)
+			for _, t := range tools {
+				if _, exists := reg.Get(t.Tool.Name); exists {
+					continue
+				}
+				reg.Register(NewMCPTool(t.ServerName, t.Tool, mcpMgr))
+				if t.Tool.Name == "browser_navigate" {
+					playwrightHealthy = true
+				}
+			}
+		}
+	}
+
+	// Do NOT call browserTool.Cleanup() — in-flight sessions share the instance.
+	// Only remove from the NEW registry.
+	if playwrightHealthy {
+		reg.Remove("browser")
+	}
+
+	for _, t := range gatewayOverlay {
+		if _, exists := reg.Get(t.Info().Name); !exists {
+			reg.Register(t)
+		}
+	}
+
+	for _, t := range postOverlays {
+		reg.Register(t)
+	}
+
+	return reg
+}

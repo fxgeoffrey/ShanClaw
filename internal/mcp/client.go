@@ -310,6 +310,13 @@ func (m *ClientManager) CachedTools(serverName string) []RemoteTool {
 	return cp
 }
 
+// SeedToolCache sets cached tools for a server. Test helper only.
+func (m *ClientManager) SeedToolCache(serverName string, tools []RemoteTool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.toolCache[serverName] = tools
+}
+
 func (m *ClientManager) ProbeTransport(ctx context.Context, serverName string) error {
 	m.mu.Lock()
 	c, ok := m.clients[serverName]

@@ -6,7 +6,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/Kocoro-lab/ShanClaw/internal/agent"
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
+	"github.com/Kocoro-lab/ShanClaw/internal/mcp"
+	mcpproto "github.com/mark3labs/mcp-go/mcp"
 )
 
 func TestRegisterAll_WithServerTools(t *testing.T) {
@@ -154,5 +157,101 @@ func TestRegisterServerTools_AllowlistFiltering(t *testing.T) {
 		if _, ok := reg.Get(name); ok {
 			t.Errorf("non-allowlisted tool %q should NOT be registered", name)
 		}
+	}
+}
+
+func TestExtractGatewayTools(t *testing.T) {
+	reg := agent.NewToolRegistry()
+	gw := client.NewGatewayClient("http://test", "key")
+	reg.Register(NewServerTool(client.ServerToolSchema{Name: "web_search", Description: "search"}, gw))
+	reg.Register(&ThinkTool{})
+	tools := ExtractGatewayTools(reg)
+	if len(tools) != 1 {
+		t.Fatalf("expected 1 gateway tool, got %d", len(tools))
+	}
+	if tools[0].Info().Name != "web_search" {
+		t.Errorf("expected web_search, got %s", tools[0].Info().Name)
+	}
+}
+
+func TestExtractPostOverlays(t *testing.T) {
+	baseline := agent.NewToolRegistry()
+	baseline.Register(&ThinkTool{})
+
+	full := baseline.Clone()
+	gw := client.NewGatewayClient("http://test", "key")
+	full.Register(NewServerTool(client.ServerToolSchema{Name: "web_search", Description: "search"}, gw))
+	mgr := mcp.NewClientManager()
+	full.Register(NewMCPTool("playwright", mcpproto.Tool{Name: "browser_navigate"}, mgr))
+	full.Register(&NotifyTool{}) // a local overlay
+
+	overlays := ExtractPostOverlays(full, baseline)
+	if len(overlays) != 1 {
+		t.Fatalf("expected 1 overlay, got %d", len(overlays))
+	}
+	if overlays[0].Info().Name != "notify" {
+		t.Errorf("expected notify, got %s", overlays[0].Info().Name)
+	}
+}
+
+func TestRebuildRegistryForHealth_PlaywrightHealthy(t *testing.T) {
+	baseline := agent.NewToolRegistry()
+	baseline.Register(&ThinkTool{})
+	baseline.Register(&BrowserTool{})
+
+	healthStates := map[string]mcp.HealthState{
+		"playwright": mcp.StateHealthy,
+	}
+
+	mgr := mcp.NewClientManager()
+	mgr.SeedToolCache("playwright", []mcp.RemoteTool{
+		{ServerName: "playwright", Tool: mcpproto.Tool{Name: "browser_navigate"}},
+	})
+
+	reg := RebuildRegistryForHealth(baseline, nil, nil, healthStates, mgr)
+	if _, ok := reg.Get("browser"); ok {
+		t.Error("legacy browser should be removed when Playwright is healthy")
+	}
+	if _, ok := reg.Get("browser_navigate"); !ok {
+		t.Error("browser_navigate should be registered from healthy Playwright")
+	}
+}
+
+func TestRebuildRegistryForHealth_PlaywrightDisconnected(t *testing.T) {
+	baseline := agent.NewToolRegistry()
+	baseline.Register(&ThinkTool{})
+	baseline.Register(&BrowserTool{})
+
+	healthStates := map[string]mcp.HealthState{
+		"playwright": mcp.StateDisconnected,
+	}
+
+	reg := RebuildRegistryForHealth(baseline, nil, nil, healthStates, nil)
+	if _, ok := reg.Get("browser"); !ok {
+		t.Error("legacy browser should remain when Playwright is disconnected")
+	}
+}
+
+func TestRebuildRegistryForHealth_GatewayAndPostOverlays(t *testing.T) {
+	baseline := agent.NewToolRegistry()
+	baseline.Register(&ThinkTool{})
+
+	gw := client.NewGatewayClient("http://test", "key")
+	gatewayOverlay := []agent.Tool{
+		NewServerTool(client.ServerToolSchema{Name: "web_search", Description: "search"}, gw),
+	}
+	postOverlays := []agent.Tool{
+		&NotifyTool{},
+	}
+
+	reg := RebuildRegistryForHealth(baseline, gatewayOverlay, postOverlays, nil, nil)
+	if _, ok := reg.Get("think"); !ok {
+		t.Error("baseline tool 'think' should be present")
+	}
+	if _, ok := reg.Get("web_search"); !ok {
+		t.Error("gateway overlay 'web_search' should be present")
+	}
+	if _, ok := reg.Get("notify"); !ok {
+		t.Error("post overlay 'notify' should be present")
 	}
 }

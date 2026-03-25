@@ -358,6 +358,12 @@ func closePlaywrightExtensionTab(mcpMgr *mcp.ClientManager) {
 	}
 }
 
+// CleanupPlaywrightReconnect closes the Bridge extension connect.html tab
+// and hides Chrome after a supervisor-driven reconnect.
+func CleanupPlaywrightReconnect(mcpMgr *mcp.ClientManager) {
+	closePlaywrightExtensionTab(mcpMgr)
+}
+
 // hideChrome sends Chrome to the background so it doesn't steal focus
 // after the Playwright Bridge extension reconnects.
 func hideChrome() {

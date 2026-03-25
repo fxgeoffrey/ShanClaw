@@ -100,6 +100,7 @@ type Supervisor struct {
 	servers            map[string]*serverEntry
 	probes             map[string]CapabilityProbe
 	onChange           func(serverName string, oldState, newState HealthState)
+	onReconnect        func(serverName string) // called after successful reconnect
 	cancel             context.CancelFunc
 	started            bool
 	transportInterval  time.Duration
@@ -133,6 +134,13 @@ func (s *Supervisor) RegisterCapabilityProbe(serverName string, probe Capability
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.probes[serverName] = probe
+}
+
+// SetOnReconnect registers a callback invoked after a successful server reconnect.
+func (s *Supervisor) SetOnReconnect(fn func(serverName string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onReconnect = fn
 }
 
 // SetOnChange registers a callback invoked on health state transitions.
@@ -381,6 +389,12 @@ func (s *Supervisor) runTransportProbe(ctx context.Context, name string, entry *
 
 	_, reconnErr := s.mgr.Reconnect(reconnCtx, name)
 	if reconnErr == nil {
+		s.mu.Lock()
+		fn := s.onReconnect
+		s.mu.Unlock()
+		if fn != nil {
+			fn(name)
+		}
 		s.recordTransportOK(ctx, name, entry)
 		return
 	}

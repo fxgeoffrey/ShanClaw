@@ -132,6 +132,11 @@ var daemonStartCmd = &cobra.Command{
 
 		supervisor := mcp.NewSupervisor(mcpMgr)
 		supervisor.RegisterCapabilityProbe("playwright", &mcp.PlaywrightProbe{})
+		supervisor.SetOnReconnect(func(serverName string) {
+			if serverName == "playwright" {
+				go tools.CleanupPlaywrightReconnect(mcpMgr)
+			}
+		})
 		supervisor.SetOnChange(func(server string, oldState, newState mcp.HealthState) {
 			_, _, depsSup := deps.Snapshot()
 			if depsSup != supervisor {

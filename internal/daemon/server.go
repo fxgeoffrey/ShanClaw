@@ -1909,6 +1909,34 @@ func (s *Server) handleConfigStatus(w http.ResponseWriter, r *http.Request) {
 		resp["mcp_servers"] = mcpStatus
 	}
 
+	_, _, sup := s.deps.Snapshot()
+	if sup != nil {
+		healthData := make(map[string]interface{})
+		for name, h := range sup.HealthStates() {
+			entry := map[string]interface{}{
+				"state":                h.State.String(),
+				"since":                h.Since.Format(time.RFC3339),
+				"consecutive_failures": h.ConsecutiveFailures,
+			}
+			if !h.LastTransportOK.IsZero() {
+				entry["last_transport_ok"] = h.LastTransportOK.Format(time.RFC3339)
+			}
+			if !h.LastCapabilityOK.IsZero() {
+				entry["last_capability_ok"] = h.LastCapabilityOK.Format(time.RFC3339)
+			}
+			if h.LastTransportError != "" {
+				entry["last_transport_error"] = h.LastTransportError
+			}
+			if h.LastCapabilityError != "" {
+				entry["last_capability_error"] = h.LastCapabilityError
+			}
+			healthData[name] = entry
+		}
+		if len(healthData) > 0 {
+			resp["mcp_health"] = healthData
+		}
+	}
+
 	writeJSON(w, http.StatusOK, resp)
 }
 

@@ -230,6 +230,9 @@ func (s *Supervisor) Start(ctx context.Context) {
 	if s.started {
 		return
 	}
+	if s.mgr == nil {
+		return
+	}
 
 	ctx, s.cancel = context.WithCancel(ctx)
 	s.started = true

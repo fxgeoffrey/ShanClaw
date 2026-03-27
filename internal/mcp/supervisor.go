@@ -386,6 +386,15 @@ func (s *Supervisor) serverLoop(ctx context.Context, name string, entry *serverE
 // attemptReconnect tries to reconnect a disconnected server. Only called from
 // the on-demand ProbeNow path, never from periodic probes.
 func (s *Supervisor) attemptReconnect(ctx context.Context, name string, entry *serverEntry) {
+	// CDP mode: ensure Chrome has the debug port before reconnecting playwright.
+	// Chrome may have been restarted without the flag since the last connection.
+	if name == "playwright" && IsPlaywrightCDPMode(entry.config) {
+		if err := EnsureChromeDebugPort(DefaultCDPPort); err != nil {
+			log.Printf("[mcp-supervisor] %s: Chrome CDP unavailable: %v", name, err)
+			return
+		}
+	}
+
 	reconnCtx, reconnCancel := context.WithTimeout(ctx, 15*time.Second)
 	defer reconnCancel()
 
@@ -414,6 +423,19 @@ func (s *Supervisor) attemptReconnect(ctx context.Context, name string, entry *s
 // immediately before declaring healthy — prevents registering Playwright tools
 // while Chrome/Bridge is still unavailable.
 func (s *Supervisor) runTransportProbe(ctx context.Context, name string, entry *serverEntry) {
+	// CDP mode: proactively check if the CDP Chrome is still alive.
+	// If it died (user quit, crash), relaunch it minimized BEFORE probing
+	// the MCP transport. This keeps the endpoint available so playwright-mcp
+	// can reconnect seamlessly — no fragile error-string matching needed.
+	if name == "playwright" && IsPlaywrightCDPMode(entry.config) {
+		if !IsChromeCDPReachable(DefaultCDPPort) {
+			log.Printf("[mcp-supervisor] CDP Chrome unreachable — relaunching minimized")
+			if err := LaunchCDPChrome(DefaultCDPPort); err != nil {
+				log.Printf("[mcp-supervisor] CDP Chrome relaunch failed: %v", err)
+			}
+		}
+	}
+
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -423,11 +445,7 @@ func (s *Supervisor) runTransportProbe(ctx context.Context, name string, entry *
 		return
 	}
 
-	// Transport failed. Do NOT auto-reconnect — reconnect only happens
-	// on-demand via ProbeNow when a session actually needs browser tools.
-	// Auto-reconnecting Playwright reopens Chrome, which is disruptive.
-
-	// Probe failed — declare disconnected.
+	// Transport failed — declare disconnected.
 	now := time.Now()
 	s.mu.Lock()
 	entry.transportBackoff.recordFailure()

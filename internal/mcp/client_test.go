@@ -41,6 +41,18 @@ func TestSetSupervised_DisablesInlineReconnect(t *testing.T) {
 	}
 }
 
+func TestIsPlaywrightCDPMode(t *testing.T) {
+	cfg := MCPServerConfig{Args: []string{"--cdp-endpoint", "http://localhost:9222"}}
+	if !IsPlaywrightCDPMode(cfg) {
+		t.Fatal("expected CDP mode to be detected")
+	}
+
+	cfg.Args = []string{"--browser", "chrome"}
+	if IsPlaywrightCDPMode(cfg) {
+		t.Fatal("expected CDP mode to be false when flag is absent")
+	}
+}
+
 func TestConnectAll_StoresConfigOnFailure(t *testing.T) {
 	mgr := NewClientManager()
 	servers := map[string]MCPServerConfig{

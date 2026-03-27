@@ -85,6 +85,13 @@ func (t *MCPTool) Run(ctx context.Context, argsJSON string) (agent.ToolResult, e
 		args = make(map[string]any)
 	}
 
+	// Bring CDP Chrome to front when a playwright tool is invoked.
+	if t.serverName == "playwright" {
+		if cfg, ok := t.manager.ConfigFor(t.serverName); ok && mcp.IsPlaywrightCDPMode(cfg) {
+			mcp.BringCDPChromeToFront()
+		}
+	}
+
 	content, isError, err := t.manager.CallTool(ctx, t.serverName, t.tool.Name, args)
 	if err != nil && t.supervisor != nil {
 		// Connection dead — attempt on-demand reconnect and retry once.

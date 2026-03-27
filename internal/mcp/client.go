@@ -20,10 +20,10 @@ type MCPServerConfig struct {
 	Command   string            `yaml:"command"              mapstructure:"command"   json:"command"`
 	Args      []string          `yaml:"args,omitempty"       mapstructure:"args"      json:"args,omitempty"`
 	Env       map[string]string `yaml:"env,omitempty"        mapstructure:"env"       json:"env,omitempty"`
-	Type      string            `yaml:"type,omitempty"       mapstructure:"type"      json:"type,omitempty"`      // "stdio" (default) or "http"
-	URL       string            `yaml:"url,omitempty"        mapstructure:"url"       json:"url,omitempty"`       // for http type
-	Disabled  bool              `yaml:"disabled,omitempty"   mapstructure:"disabled"  json:"disabled,omitempty"`  // skip this server
-	Context   string            `yaml:"context,omitempty"    mapstructure:"context"   json:"context,omitempty"`   // LLM context injected into system prompt
+	Type      string            `yaml:"type,omitempty"       mapstructure:"type"      json:"type,omitempty"`        // "stdio" (default) or "http"
+	URL       string            `yaml:"url,omitempty"        mapstructure:"url"       json:"url,omitempty"`         // for http type
+	Disabled  bool              `yaml:"disabled,omitempty"   mapstructure:"disabled"  json:"disabled,omitempty"`    // skip this server
+	Context   string            `yaml:"context,omitempty"    mapstructure:"context"   json:"context,omitempty"`     // LLM context injected into system prompt
 	KeepAlive bool              `yaml:"keep_alive,omitempty" mapstructure:"keep_alive" json:"keep_alive,omitempty"` // stay connected between turns (skip on-demand teardown)
 }
 
@@ -35,24 +35,24 @@ type RemoteTool struct {
 
 // ClientManager manages connections to multiple MCP servers.
 type ClientManager struct {
-	mu          sync.Mutex
-	clients     map[string]mcpclient.MCPClient // server name → client
-	configs     map[string]MCPServerConfig     // server name → config (for reconnect)
-	toolCache   map[string][]RemoteTool        // server name → last-known tools
-	reconnectMu map[string]*sync.Mutex         // per-server reconnect serialization
-	supervised  bool                           // when true, skip inline reconnect in CallTool
-	idleTimers  map[string]*time.Timer         // per-server idle disconnect timers
-	needsSetup  map[string]bool                // servers gated by missing readiness marker
+	mu            sync.Mutex
+	clients       map[string]mcpclient.MCPClient // server name → client
+	configs       map[string]MCPServerConfig     // server name → config (for reconnect)
+	toolCache     map[string][]RemoteTool        // server name → last-known tools
+	reconnectMu   map[string]*sync.Mutex         // per-server reconnect serialization
+	supervised    bool                           // when true, skip inline reconnect in CallTool
+	idleTimers    map[string]*time.Timer         // per-server idle disconnect timers
+	needsSetup    map[string]bool                // servers gated by missing readiness marker
 }
 
 // NewClientManager creates a new MCP client manager.
 func NewClientManager() *ClientManager {
 	return &ClientManager{
-		clients:     make(map[string]mcpclient.MCPClient),
-		configs:     make(map[string]MCPServerConfig),
-		toolCache:   make(map[string][]RemoteTool),
-		reconnectMu: make(map[string]*sync.Mutex),
-		needsSetup:  make(map[string]bool),
+		clients:       make(map[string]mcpclient.MCPClient),
+		configs:       make(map[string]MCPServerConfig),
+		toolCache:     make(map[string][]RemoteTool),
+		reconnectMu:   make(map[string]*sync.Mutex),
+		needsSetup:    make(map[string]bool),
 	}
 }
 
@@ -495,4 +495,14 @@ func BuildContext(servers map[string]MCPServerConfig) string {
 		result += p
 	}
 	return result
+}
+
+// IsPlaywrightCDPMode reports whether the args include --cdp-endpoint.
+func IsPlaywrightCDPMode(cfg MCPServerConfig) bool {
+	for _, arg := range cfg.Args {
+		if arg == "--cdp-endpoint" {
+			return true
+		}
+	}
+	return false
 }

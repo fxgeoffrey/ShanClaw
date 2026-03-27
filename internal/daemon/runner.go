@@ -30,19 +30,19 @@ import (
 
 // RunAgentRequest is the input for RunAgent.
 type RunAgentRequest struct {
-	Text       string `json:"text"`
-	Agent      string `json:"agent,omitempty"`
-	SessionID  string `json:"session_id,omitempty"`
-	NewSession bool   `json:"new_session,omitempty"`
-	Source     string `json:"source,omitempty"`    // "slack", "line", "shanclaw", "webhook"
-	Sender     string `json:"sender,omitempty"`    // user identifier from channel
-	Channel    string `json:"channel,omitempty"`   // channel/thread source context
-	ThreadID   string `json:"thread_id,omitempty"` // thread context for messaging platforms
-	RouteKey      string `json:"-"`                   // internal routing key
-	Ephemeral     bool   `json:"-"`                   // caller owns persistence + events
-	ModelOverride  string `json:"-"`                   // overrides agent model tier
-	BypassRouting  bool   `json:"-"`                   // skip route lock (heartbeat runs)
-	SessionHistory []client.Message `json:"-"` // pre-loaded history for LLM context (BypassRouting runs)
+	Text           string           `json:"text"`
+	Agent          string           `json:"agent,omitempty"`
+	SessionID      string           `json:"session_id,omitempty"`
+	NewSession     bool             `json:"new_session,omitempty"`
+	Source         string           `json:"source,omitempty"`    // "slack", "line", "shanclaw", "webhook"
+	Sender         string           `json:"sender,omitempty"`    // user identifier from channel
+	Channel        string           `json:"channel,omitempty"`   // channel/thread source context
+	ThreadID       string           `json:"thread_id,omitempty"` // thread context for messaging platforms
+	RouteKey       string           `json:"-"`                   // internal routing key
+	Ephemeral      bool             `json:"-"`                   // caller owns persistence + events
+	ModelOverride  string           `json:"-"`                   // overrides agent model tier
+	BypassRouting  bool             `json:"-"`                   // skip route lock (heartbeat runs)
+	SessionHistory []client.Message `json:"-"`                   // pre-loaded history for LLM context (BypassRouting runs)
 }
 
 // Validate checks that the request has the minimum required fields.
@@ -149,9 +149,9 @@ type ServerDeps struct {
 	Config          *config.Config
 	GW              *client.GatewayClient
 	Registry        *agent.ToolRegistry
-	MCPManager      *mcp.ClientManager // live MCP connections; swapped on reload
-	Supervisor      *mcp.Supervisor    // MCP health supervisor; swapped on reload
-	Cleanup         func()             // closes MCP connections; swapped on reload
+	MCPManager      *mcp.ClientManager  // live MCP connections; swapped on reload
+	Supervisor      *mcp.Supervisor     // MCP health supervisor; swapped on reload
+	Cleanup         func()              // closes MCP connections; swapped on reload
 	BaselineReg     *agent.ToolRegistry // local-only tools; refreshed on reload
 	GatewayOverlay  []agent.Tool        // cached gateway tools; refreshed on reload
 	PostOverlays    []agent.Tool        // cloud_delegate etc.; refreshed on reload
@@ -291,7 +291,7 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		// Register cancel under sc.mu so CancelRoute sees it immediately.
 		// Also fires cancel right away if CancelRoute already set cancelPending.
 		deps.SessionCache.SetRouteCancel(req.RouteKey, cancel)
-	defer func() {
+		defer func() {
 			// route.mu is already held from LockRouteWithManager — do NOT
 			// re-acquire it (sync.Mutex is not reentrant; that deadlocks).
 			// Clean up under the existing lock, then release via UnlockRoute.
@@ -641,14 +641,12 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 
 	log.Printf("daemon: reply to %s (%d tokens, $%.4f)", agentName, usage.TotalTokens, usage.CostUSD)
 
-	// Unless keep_alive is set, schedule Playwright disconnect after 5 minutes
-	// of idle. Multi-turn browser workflows keep the connection alive (each
-	// turn resets the timer). After 5 minutes with no browser activity, Chrome
-	// closes. The on-demand reconnect in MCPTool.Run restarts it if needed.
+	// Schedule Playwright idle disconnect unless keep_alive or CDP mode.
+	// CDP mode keeps playwright-mcp alive permanently (lightweight WebSocket).
 	if sup != nil {
 		if h := sup.HealthFor("playwright"); h.State == mcp.StateHealthy {
 			if _, _, _, mgr := deps.RebuildLayers(); mgr != nil {
-				if cfg, ok := mgr.ConfigFor("playwright"); !ok || !cfg.KeepAlive {
+				if cfg, ok := mgr.ConfigFor("playwright"); !ok || (!cfg.KeepAlive && !mcp.IsPlaywrightCDPMode(cfg)) {
 					mgr.DisconnectAfterIdle("playwright", 5*time.Minute)
 					log.Printf("daemon: Playwright idle disconnect scheduled (5m)")
 				}

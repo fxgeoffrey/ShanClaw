@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"time"
@@ -168,23 +167,11 @@ func CompleteRegistration(ctx context.Context, gw *client.GatewayClient, cfg *co
 
 	mcpServers := resolveMCPServers(cfg, agentDef...)
 
-	// Gate playwright: require local readiness marker before spawning.
-	playwrightNeedsSetup := false
-	if pwCfg, hasPW := mcpServers["playwright"]; hasPW && !pwCfg.Disabled {
-		home, _ := os.UserHomeDir()
-		localDir := filepath.Join(home, ".shannon", "local")
-		sig := mcp.CommandSignature(pwCfg.Command, pwCfg.Args)
-		hasToken := false
-		for k, v := range pwCfg.Env {
-			if k == "PLAYWRIGHT_MCP_EXTENSION_TOKEN" && v != "" {
-				hasToken = true
-				break
-			}
-		}
-		if !mcp.ValidatePlaywrightMarkerFull(localDir, sig, hasToken) {
+	// CDP mode: ensure Chrome has the debug port before connecting playwright.
+	if pwCfg, hasPW := mcpServers["playwright"]; hasPW && !pwCfg.Disabled && mcp.IsPlaywrightCDPMode(pwCfg) {
+		if err := mcp.EnsureChromeDebugPort(mcp.DefaultCDPPort); err != nil {
+			log.Printf("Playwright CDP: Chrome debug port unavailable: %v — skipping", err)
 			delete(mcpServers, "playwright")
-			playwrightNeedsSetup = true
-			log.Printf("Playwright MCP needs setup on this machine — skipping launch")
 		}
 	}
 
@@ -205,7 +192,10 @@ func CompleteRegistration(ctx context.Context, gw *client.GatewayClient, cfg *co
 				hasPlaywright = true
 			}
 		}
-		// Disable legacy browser tool when Playwright MCP is available
+		// Disable legacy browser/automation tools when Playwright MCP is available.
+		// AppleScript, accessibility, and screenshot are macOS-native fallbacks that
+		// the LLM picks when playwright tools hit errors — remove them so the agent
+		// stays on playwright for all browser automation.
 		if hasPlaywright {
 			// Shut down any chromedp Chrome instance before removing the tool
 			if bt, ok := reg.Get("browser"); ok {
@@ -213,28 +203,18 @@ func CompleteRegistration(ctx context.Context, gw *client.GatewayClient, cfg *co
 					browserTool.Cleanup()
 				}
 			}
-			reg.Remove("browser")
-			log.Printf("Playwright MCP connected — disabled legacy browser tool")
-			// Unless keep_alive is set, disconnect Playwright after discovering
-			// its tools. The tool cache persists, and on-demand reconnect in
-			// MCPTool.Run will restart playwright-mcp when actually needed.
-			if cfg, ok := mcpMgr.ConfigFor("playwright"); !ok || !cfg.KeepAlive {
+			for _, legacy := range []string{"browser", "applescript", "accessibility", "screenshot", "wait_for"} {
+				reg.Remove(legacy)
+			}
+			log.Printf("Playwright MCP connected — disabled legacy browser/automation tools")
+			// CDP mode: keep playwright-mcp alive — it's just a lightweight WebSocket
+			// to Chrome. Killing and respawning it wastes time and causes flicker.
+			// Non-CDP / non-keep_alive: disconnect after tool discovery.
+			if cfg, ok := mcpMgr.ConfigFor("playwright"); ok && !cfg.KeepAlive && !mcp.IsPlaywrightCDPMode(cfg) {
 				mcpMgr.Disconnect("playwright")
 				log.Printf("Playwright MCP disconnected — will reconnect on demand")
-			} else {
-				go func() {
-					time.Sleep(2 * time.Second)
-					hideChrome()
-				}()
 			}
 		}
-	}
-
-	if playwrightNeedsSetup {
-		if mcpMgr == nil {
-			mcpMgr = mcp.NewClientManager()
-		}
-		mcpMgr.SetNeedsSetup("playwright")
 	}
 
 	err := RegisterServerTools(ctx, gw, reg)
@@ -265,7 +245,8 @@ func RegisterAllWithBaseline(gw *client.GatewayClient, cfg *config.Config, agent
 	localReg, sp, baseCleanup := RegisterLocalTools(cfg)
 	baseline = localReg
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// 45s allows time for Chrome CDP launch (up to 15s) + MCP handshake.
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
 	reg, mcpMgr, remoteCleanup, err := CompleteRegistration(ctx, gw, cfg, localReg, agentDef...)
@@ -310,9 +291,16 @@ func resolveMCPServers(cfg *config.Config, agentDef ...*agents.Agent) map[string
 		return nil
 	}
 
-	// No agent or no agent MCP config → use global
+	// No agent or no agent MCP config → return a copy of the global set.
+	// Must be a copy: CompleteRegistration calls delete() on the returned map to
+	// gate servers (e.g. playwright without readiness marker), and mutating
+	// cfg.MCPServers directly would corrupt the live config seen by Snapshot().
 	if len(agentDef) == 0 || agentDef[0] == nil || agentDef[0].Config == nil || agentDef[0].Config.MCPServers == nil {
-		return cfg.MCPServers
+		result := make(map[string]mcp.MCPServerConfig, len(cfg.MCPServers))
+		for name, srv := range cfg.MCPServers {
+			result[name] = srv
+		}
+		return result
 	}
 
 	agentMCP := agentDef[0].Config.MCPServers
@@ -341,7 +329,6 @@ func resolveMCPServers(cfg *config.Config, agentDef ...*agents.Agent) map[string
 
 	return result
 }
-
 
 // CleanupPlaywrightReconnect runs after a supervisor-driven reconnect.
 // In keep_alive mode, hides Chrome so the persistent connection doesn't
@@ -476,7 +463,9 @@ func RebuildRegistryForHealth(
 	// Do NOT call browserTool.Cleanup() — in-flight sessions share the instance.
 	// Only remove from the NEW registry.
 	if playwrightPresent {
-		reg.Remove("browser")
+		for _, legacy := range []string{"browser", "applescript", "accessibility", "screenshot", "wait_for"} {
+			reg.Remove(legacy)
+		}
 	}
 
 	for _, t := range gatewayOverlay {

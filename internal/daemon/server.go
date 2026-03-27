@@ -162,6 +162,7 @@ func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "shutting_down"})
 	if s.cancel != nil {
 		log.Println("daemon: shutdown requested via /shutdown")
+		mcp.StopCDPChrome()
 		go s.cancel()
 	}
 }
@@ -1900,10 +1901,6 @@ func (s *Server) handleConfigStatus(w http.ResponseWriter, r *http.Request) {
 		for name, srv := range cfg.MCPServers {
 			if srv.Disabled {
 				mcpStatus[name] = "disabled"
-			} else if mgr != nil && mgr.NeedsSetup(name) {
-				mcpStatus[name] = "needs_setup"
-			} else if name == "playwright" && !playwrightMarkerValid(srv) {
-				mcpStatus[name] = "needs_setup"
 			} else if connected[name] {
 				mcpStatus[name] = "connected"
 			} else {
@@ -1944,25 +1941,6 @@ func (s *Server) handleConfigStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// playwrightMarkerValid checks the local readiness marker for a playwright server config.
-// Used by configStatus to detect auto-cleared markers (after probe failures).
-func playwrightMarkerValid(srv mcp.MCPServerConfig) bool {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return false
-	}
-	localDir := filepath.Join(home, ".shannon", "local")
-	sig := mcp.CommandSignature(srv.Command, srv.Args)
-	hasToken := false
-	for k, v := range srv.Env {
-		if k == "PLAYWRIGHT_MCP_EXTENSION_TOKEN" && v != "" {
-			hasToken = true
-			break
-		}
-	}
-	return mcp.ValidatePlaywrightMarkerFull(localDir, sig, hasToken)
-}
-
 // mcpConfigChanged returns true if MCP server configuration differs between old and new config.
 func mcpConfigChanged(oldCfg, newCfg *config.Config) bool {
 	if oldCfg == nil {
@@ -1995,9 +1973,6 @@ func (s *Server) handleConfigReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Only re-register MCP servers if MCP config actually changed.
-	// RegisterAll tears down and restarts all MCP processes (including
-	// playwright-mcp which opens Chrome), so skip it when unnecessary.
 	mcpChanged := mcpConfigChanged(oldCfg, newCfg)
 
 	var regErr error
@@ -2127,8 +2102,6 @@ func (s *Server) handleConfigReload(w http.ResponseWriter, r *http.Request) {
 		for name, srv := range newCfg.MCPServers {
 			if srv.Disabled {
 				mcpStatus[name] = "disabled"
-			} else if mgr != nil && mgr.NeedsSetup(name) {
-				mcpStatus[name] = "needs_setup"
 			} else if connected[name] {
 				mcpStatus[name] = "connected"
 			} else {

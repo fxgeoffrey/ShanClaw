@@ -23,14 +23,20 @@ const (
 var cdpMu sync.Mutex
 
 // IsChromeCDPReachable checks if Chrome's CDP endpoint is responding on the given port.
+// Checks both IPv4 and IPv6 — Chrome may bind to [::1] if 127.0.0.1 is already in use.
 func IsChromeCDPReachable(port int) bool {
 	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(fmt.Sprintf("http://localhost:%d/json/version", port))
-	if err != nil {
-		return false
+	for _, host := range []string{"127.0.0.1", "[::1]"} {
+		resp, err := client.Get(fmt.Sprintf("http://%s:%d/json/version", host, port))
+		if err != nil {
+			continue
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			return true
+		}
 	}
-	resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
+	return false
 }
 
 // EnsureChromeDebugPort checks if Chrome's CDP is reachable; if not, launches
@@ -62,7 +68,7 @@ func LaunchCDPChrome(port int) error {
 
 	// If a CDP Chrome is already running with our profile, give it a few seconds
 	// to respond. If it doesn't, kill it and relaunch — the CDP port may be stuck.
-	if cdpChromePID() != "" {
+	if cdpChromeAlive() {
 		log.Printf("[chrome-cdp] Chrome already running, checking CDP on port %d", port)
 		for i := 0; i < 6; i++ {
 			time.Sleep(500 * time.Millisecond)
@@ -72,13 +78,31 @@ func LaunchCDPChrome(port int) error {
 		}
 		log.Printf("[chrome-cdp] CDP not responding, killing stale Chrome and relaunching")
 		StopCDPChrome()
-		// Wait for Chrome to fully exit and release profile locks
+		// Wait for ALL Chrome processes (main + helpers) to exit before relaunching.
+		// If they won't die, bail out — launching against a still-active profile
+		// causes corruption.
+		dead := false
 		for i := 0; i < 10; i++ {
 			time.Sleep(500 * time.Millisecond)
-			if cdpChromePID() == "" {
+			if !cdpChromeAlive() {
+				dead = true
 				break
 			}
 		}
+		if !dead {
+			// Escalate: SIGKILL the main browser process
+			if pid := cdpChromePID(); pid != "" {
+				log.Printf("[chrome-cdp] Chrome pid %s won't die, sending SIGKILL", pid)
+				exec.Command("kill", "-9", pid).Run() //nolint:errcheck
+				time.Sleep(1 * time.Second)
+				if cdpChromeAlive() {
+					return fmt.Errorf("Chrome processes still alive after SIGKILL — cannot relaunch safely")
+				}
+			}
+		}
+		// Remove stale profile locks so the new instance can start cleanly
+		os.Remove(filepath.Join(cdpDataDir, "SingletonLock"))
+		os.Remove(filepath.Join(cdpDataDir, "SingletonSocket"))
 	}
 
 	// Only seed the CDP profile on first launch — copying into an existing
@@ -190,19 +214,46 @@ func CDPChromePID() string {
 	return cdpChromePID()
 }
 
-// cdpChromePID returns the PID of the CDP Chrome main process, or "" if not running.
+// cdpChromeAlive returns true if any process (main or helper) is still running
+// with our CDP user-data-dir. Used for shutdown/relaunch safety — ensures all
+// Chrome processes have exited before relaunching against the same profile.
+func cdpChromeAlive() bool {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	cdpDataDir := filepath.Join(home, ".shannon", "chrome-cdp")
+	out, err := exec.Command("pgrep", "-f", fmt.Sprintf("user-data-dir=%s", cdpDataDir)).Output()
+	return err == nil && len(strings.TrimSpace(string(out))) > 0
+}
+
+// cdpChromePID returns the PID of the CDP Chrome main browser process, or "" if not running.
+// Filters out Chrome Helper subprocesses which share the same --user-data-dir flag.
+// Use for window management (front/hide/minimize) and targeted force-kill.
 func cdpChromePID() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
 	cdpDataDir := filepath.Join(home, ".shannon", "chrome-cdp")
-	// Match by user-data-dir to avoid matching user-launched CDP Chrome instances.
 	out, err := exec.Command("pgrep", "-f", fmt.Sprintf("user-data-dir=%s", cdpDataDir)).Output()
 	if err != nil || len(out) == 0 {
 		return ""
 	}
-	return strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0]
+	// pgrep returns all matching PIDs (main + helpers). Find the main browser
+	// process by checking each PID's command — helpers contain "Helper" in path.
+	for _, pid := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		cmdOut, err := exec.Command("ps", "-p", pid, "-o", "command=").Output()
+		if err != nil {
+			continue
+		}
+		cmd := strings.TrimSpace(string(cmdOut))
+		if strings.Contains(cmd, "Helper") || strings.Contains(cmd, "--type=") {
+			continue // skip renderer, GPU, network, storage helpers
+		}
+		return pid
+	}
+	return ""
 }
 
 // prepareCDPProfile creates a Chrome user-data-dir for CDP by copying key

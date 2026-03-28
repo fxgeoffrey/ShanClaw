@@ -88,15 +88,18 @@ func (t *MCPTool) Run(ctx context.Context, argsJSON string) (agent.ToolResult, e
 	// CDP mode: ensure Chrome is running when playwright is not yet connected.
 	// Only check CDP when not connected — the HTTP check at /json/version can be
 	// slow while an active WebSocket session exists, causing false-negative timeouts.
-	// Bring Chrome to front only when we just launched it (on-demand connect),
-	// not on every subsequent tool call.
+	// Visibility policy is mode-dependent:
+	//   - keepAlive=false: bring Chrome to front when reconnecting/starting on demand
+	//   - keepAlive=true: keep Chrome in the background even after reconnect
 	if t.serverName == "playwright" {
 		if cfg, ok := t.manager.ConfigFor(t.serverName); ok && mcp.IsPlaywrightCDPMode(cfg) {
 			if !t.manager.IsConnected(t.serverName) {
 				if err := mcp.EnsureChromeDebugPort(mcp.DefaultCDPPort); err != nil {
 					return agent.ToolResult{Content: fmt.Sprintf("Chrome CDP unavailable: %v", err), IsError: true}, nil
 				}
-				mcp.BringCDPChromeToFront()
+				if !cfg.KeepAlive {
+					mcp.BringCDPChromeToFront()
+				}
 			}
 		}
 	}
@@ -109,13 +112,18 @@ func (t *MCPTool) Run(ctx context.Context, argsJSON string) (agent.ToolResult, e
 			log.Printf("[mcp-tool] %s/%s: connection dead, triggering on-demand reconnect", t.serverName, t.tool.Name)
 			// Re-ensure Chrome CDP is available before reconnecting — Chrome may
 			// have died along with the MCP connection.
+			showChromeAfterReconnect := false
 			if t.serverName == "playwright" {
 				if cfg, ok := t.manager.ConfigFor(t.serverName); ok && mcp.IsPlaywrightCDPMode(cfg) {
 					_ = mcp.EnsureChromeDebugPort(mcp.DefaultCDPPort)
+					showChromeAfterReconnect = !cfg.KeepAlive
 				}
 			}
 			reconHealth := t.supervisor.ProbeNow(t.serverName)
 			if reconHealth.State == mcp.StateHealthy {
+				if showChromeAfterReconnect {
+					mcp.BringCDPChromeToFront()
+				}
 				content, isError, err = t.manager.CallTool(ctx, t.serverName, t.tool.Name, args)
 			}
 		}

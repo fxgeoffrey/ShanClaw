@@ -335,16 +335,15 @@ func resolveMCPServers(cfg *config.Config, agentDef ...*agents.Agent) map[string
 }
 
 // CleanupPlaywrightReconnect runs after a supervisor-driven reconnect.
-// In keep_alive mode, hides Chrome so the persistent connection doesn't
-// steal focus. In on-demand mode, leaves Chrome visible so the user can
-// watch the browser automation.
+// Hides Chrome so the persistent connection doesn't steal focus.
+// Chrome stays minimized/hidden in all modes — Playwright operates via CDP.
 func CleanupPlaywrightReconnect(ctx context.Context, mcpMgr *mcp.ClientManager) {
 	if ctx.Err() != nil {
 		return
 	}
 	cfg, ok := mcpMgr.ConfigFor("playwright")
 	if !ok || !cfg.KeepAlive {
-		return // on-demand: leave Chrome visible during the turn
+		return // on-demand: Chrome already stays minimized from launch
 	}
 	// keep_alive: hide Chrome so it doesn't steal focus.
 	time.Sleep(2 * time.Second)

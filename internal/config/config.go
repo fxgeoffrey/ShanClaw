@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/hooks"
@@ -132,6 +133,7 @@ func Load() (*Config, error) {
 	if err := viper.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse config: %w", err)
 	}
+	cfg.APIKey = strings.TrimSpace(cfg.APIKey)
 
 	// Re-read MCP servers directly from YAML to preserve env var key casing.
 	// Viper lowercases all map keys which breaks env vars like API_KEY → api_key.
@@ -200,7 +202,7 @@ func migrateOldConfig() {
 
 func Save(cfg *Config) error {
 	viper.Set("endpoint", cfg.Endpoint)
-	viper.Set("api_key", cfg.APIKey)
+	viper.Set("api_key", strings.TrimSpace(cfg.APIKey))
 	viper.Set("model_tier", cfg.ModelTier)
 	viper.Set("auto_update_check", cfg.AutoUpdateCheck)
 	return viper.WriteConfig()
@@ -362,7 +364,7 @@ func mergeOverlayFile(cfg *Config, file string, level string) {
 		cfg.Sources["endpoint"] = src
 	}
 	if overlay.APIKey != nil {
-		cfg.APIKey = *overlay.APIKey
+		cfg.APIKey = strings.TrimSpace(*overlay.APIKey)
 		cfg.Sources["api_key"] = src
 	}
 	if overlay.ModelTier != nil {

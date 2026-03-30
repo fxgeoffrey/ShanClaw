@@ -582,6 +582,7 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		}
 		runMsgs := loop.RunMessages()
 		runInjected := loop.RunMessageInjected()
+		runTimestamps := loop.RunMessageTimestamps()
 		if len(runMsgs) > 0 {
 			// RunMessages includes: [user prompt, assistant+tool_use, tool_result, ..., final assistant].
 			// If the user message was already appended pre-loop, skip the first
@@ -590,11 +591,16 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 			if preLoopUserAppended && len(runMsgs) > 0 && runMsgs[0].Role == "user" {
 				startIdx = 1
 			}
-			replyTime := time.Now()
+			fallbackTime := time.Now()
 			for i, msg := range runMsgs[startIdx:] {
+				idx := i + startIdx
+				ts := fallbackTime
+				if idx < len(runTimestamps) && !runTimestamps[idx].IsZero() {
+					ts = runTimestamps[idx]
+				}
 				sess.Messages = append(sess.Messages, msg)
-				meta := session.MessageMeta{Source: source, Timestamp: session.TimePtr(replyTime)}
-				if i+startIdx < len(runInjected) && runInjected[i+startIdx] {
+				meta := session.MessageMeta{Source: source, Timestamp: session.TimePtr(ts)}
+				if idx < len(runInjected) && runInjected[idx] {
 					meta.SystemInjected = true
 				}
 				sess.MessageMeta = append(sess.MessageMeta, meta)

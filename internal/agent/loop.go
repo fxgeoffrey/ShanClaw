@@ -237,6 +237,7 @@ type AgentLoop struct {
 	injectedMessages []string     // messages injected during the last Run(); cleared on each Run() call
 	runMessages      []client.Message // conversation messages accumulated during the last Run() (excludes system+history)
 	runMsgInjected   []bool           // parallel to runMessages: true = system-injected guardrail/nudge
+	runMsgTimestamps []time.Time      // parallel to runMessages: when each message was created
 }
 
 func NewAgentLoop(gw *client.GatewayClient, tools *ToolRegistry, modelTier string, shannonDir string, maxIter int, resultTrunc int, argsTrunc int, perms *permissions.PermissionsConfig, auditor *audit.AuditLogger, hookRunner *hooks.HookRunner) *AgentLoop {
@@ -363,6 +364,18 @@ func (a *AgentLoop) RunMessageInjected() []bool {
 	return out
 }
 
+// RunMessageTimestamps returns a parallel time.Time slice indicating when each
+// RunMessages entry was created during the agent loop. Callers use this to set
+// per-message timestamps in session persistence instead of batch-stamping.
+func (a *AgentLoop) RunMessageTimestamps() []time.Time {
+	if len(a.runMsgTimestamps) == 0 {
+		return nil
+	}
+	out := make([]time.Time, len(a.runMsgTimestamps))
+	copy(out, a.runMsgTimestamps)
+	return out
+}
+
 // SwitchAgent applies full per-agent scoping: prompt, memory directory, tool registry,
 // and MCP context. Pass a new ToolRegistry and MCP context string built from
 // the agent's scoped MCP servers. If reg is nil, the existing registry is kept.
@@ -408,9 +421,10 @@ type approvedToolCall struct {
 }
 
 func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []client.Message) (string, *TurnUsage, error) {
-	a.injectedMessages = nil // reset for this run
-	a.runMessages = nil      // reset for this run
-	a.runMsgInjected = nil   // reset for this run
+	a.injectedMessages = nil   // reset for this run
+	a.runMessages = nil        // reset for this run
+	a.runMsgInjected = nil     // reset for this run
+	a.runMsgTimestamps = nil   // reset for this run
 
 	// Build system prompt using prompt builder with instructions/memory
 	var toolNames []string
@@ -476,22 +490,40 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 	// It is updated after context compaction (ShapeHistory reassigns messages to
 	// a shorter slice, invalidating the original offset).
 	newMsgOffset := len(messages) - 1
-	injectedIndices := make(map[int]bool) // message indices that are system-injected
+	injectedIndices := make(map[int]bool)    // message indices that are system-injected
+	msgTimestamps := make(map[int]time.Time) // message index → creation time
+	msgTimestamps[newMsgOffset] = time.Now() // timestamp the user message
 	captureRunMessages := func() {
 		if newMsgOffset >= 1 && newMsgOffset < len(messages) {
 			n := len(messages) - newMsgOffset
 			a.runMessages = make([]client.Message, n)
 			copy(a.runMessages, messages[newMsgOffset:])
 			a.runMsgInjected = make([]bool, n)
+			a.runMsgTimestamps = make([]time.Time, n)
+			now := time.Now()
 			for i := 0; i < n; i++ {
 				a.runMsgInjected[i] = injectedIndices[newMsgOffset+i]
+				if ts, ok := msgTimestamps[newMsgOffset+i]; ok {
+					a.runMsgTimestamps[i] = ts
+				} else {
+					a.runMsgTimestamps[i] = now // fallback for unstamped messages
+				}
 			}
 		}
 	}
 
 	// markInjected tags the message at the current end of the messages slice
 	// as system-injected. Call immediately after appending a guardrail message.
-	markInjected := func() { injectedIndices[len(messages)-1] = true }
+	// Also stamps the message timestamp.
+	markInjected := func() {
+		idx := len(messages) - 1
+		injectedIndices[idx] = true
+		msgTimestamps[idx] = time.Now()
+	}
+
+	// stampMessage records the creation time for the message at the current end
+	// of the messages slice. Call immediately after appending any message.
+	stampMessage := func() { msgTimestamps[len(messages)-1] = time.Now() }
 
 	toolSchemas := a.tools.Schemas()
 	usage := &TurnUsage{}
@@ -561,6 +593,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 					Role:    "assistant",
 					Content: client.NewTextContent(lastText),
 				})
+				stampMessage()
 			}
 			captureRunMessages()
 			return lastText, usage, ctx.Err()
@@ -585,6 +618,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 					Role:    "user",
 					Content: client.NewTextContent("[New message from user]\n" + combined),
 				})
+				stampMessage()
 				a.injectedMessages = append(a.injectedMessages, injected...)
 				if a.handler != nil {
 					a.handler.OnText("")
@@ -667,8 +701,8 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 						if newMsgOffset < 1 {
 							newMsgOffset = 1
 						}
-						// Rebase injectedIndices: keys are absolute message indices
-						// that shifted downward after compaction.
+						// Rebase injectedIndices and msgTimestamps: keys are absolute
+						// message indices that shifted downward after compaction.
 						rebased := make(map[int]bool, len(injectedIndices))
 						for idx := range injectedIndices {
 							newIdx := idx - dropped
@@ -677,6 +711,15 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 							}
 						}
 						injectedIndices = rebased
+
+						rebasedTS := make(map[int]time.Time, len(msgTimestamps))
+						for idx, ts := range msgTimestamps {
+							newIdx := idx - dropped
+							if newIdx >= newMsgOffset {
+								rebasedTS[newIdx] = ts
+							}
+						}
+						msgTimestamps = rebasedTS
 					}
 					compactionApplied = true
 				}
@@ -773,10 +816,12 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 					Role:    "assistant",
 					Content: client.NewTextContent(resp.OutputText),
 				})
+				stampMessage()
 				messages = append(messages, client.Message{
 					Role:    "user",
 					Content: client.NewTextContent("Your response was cut off. Continue from where you stopped."),
 				})
+				stampMessage()
 				continue
 			}
 
@@ -786,6 +831,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 					Role:    "assistant",
 					Content: client.NewTextContent(resp.OutputText),
 				})
+				stampMessage()
 				continue
 			}
 
@@ -802,6 +848,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 					Role:    "assistant",
 					Content: client.NewTextContent(resp.OutputText),
 				})
+				stampMessage()
 				messages = append(messages, client.Message{
 					Role:    "user",
 					Content: client.NewTextContent("STOP. You wrote out tool calls as text instead of actually calling them. Those are fabricated results — none of those actions happened. Use real tool calls to perform the actions."),
@@ -815,6 +862,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 					Role:    "assistant",
 					Content: client.NewTextContent(resp.OutputText),
 				})
+				stampMessage()
 				messages = append(messages, client.Message{
 					Role:    "user",
 					Content: client.NewTextContent("You described a result without calling a tool to verify it in this response. Use the appropriate tool (screenshot, accessibility read_tree, file_read, bash, etc.) to confirm before proceeding."),
@@ -829,6 +877,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 					Role:    "assistant",
 					Content: client.NewTextContent(resp.OutputText),
 				})
+				stampMessage()
 				messages = append(messages, client.Message{
 					Role:    "user",
 					Content: client.NewTextContent("STOP. A tool was denied by the user this turn, but your response claims it completed. The denied tool did NOT run. Acknowledge the denial and ask how to proceed instead."),
@@ -887,6 +936,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				Role:    "assistant",
 				Content: client.NewBlockContent(assistantBlocks),
 			})
+			stampMessage()
 		}
 
 		// XML fallback path: string builder for text-based results
@@ -1157,6 +1207,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 						Role:    "user",
 						Content: client.NewBlockContent(blocks),
 					})
+					stampMessage()
 				} else {
 					allResults.WriteString(formatToolExec(fc.Name, truncateStr(argsStr, a.argsTrunc), generateCallID(), contextResult, result.IsError))
 					allResults.WriteString("\n\n")
@@ -1201,6 +1252,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 					Role:    "user",
 					Content: client.NewBlockContent(resultBlocks),
 				})
+				stampMessage()
 			}
 		} else if allResults.Len() > 0 {
 			// Use "user" role (same as native path) so persisted history avoids
@@ -1209,6 +1261,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				Role:    "user",
 				Content: client.NewTextContent(strings.TrimRight(allResults.String(), " \t\n\r")),
 			})
+			stampMessage()
 		}
 
 		// Cloud result bypass: render the deliverable directly to the user
@@ -1220,6 +1273,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				Role:    "assistant",
 				Content: client.NewTextContent(cloudResultContent),
 			})
+			stampMessage()
 			captureRunMessages()
 			if a.handler != nil {
 				a.handler.OnText(cloudResultContent)
@@ -1248,6 +1302,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				Role:    "assistant",
 				Content: client.NewTextContent(finalResp.OutputText),
 			})
+			stampMessage()
 			captureRunMessages()
 			if a.handler != nil {
 				a.handler.OnText(finalResp.OutputText)
@@ -1278,6 +1333,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 					Role:    "assistant",
 					Content: client.NewTextContent(finalResp.OutputText),
 				})
+				stampMessage()
 				captureRunMessages()
 				if a.handler != nil {
 					a.handler.OnText(finalResp.OutputText)
@@ -1334,6 +1390,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			Role:    "assistant",
 			Content: client.NewTextContent(lastText),
 		})
+		stampMessage()
 		captureRunMessages()
 		return lastText, usage, ErrMaxIterReached
 	}

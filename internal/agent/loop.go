@@ -541,6 +541,15 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			n := len(messages) - newMsgOffset
 			a.runMessages = make([]client.Message, n)
 			copy(a.runMessages, messages[newMsgOffset:])
+			// Strip volatile context framing from the initial user message
+			// so session history stays clean. Volatile context (date/time,
+			// memory, instructions, CWD) is re-injected fresh each Run().
+			if len(a.runMessages) > 0 && a.runMessages[0].Role == "user" {
+				a.runMessages[0] = client.Message{
+					Role:    "user",
+					Content: client.NewTextContent(userMessage),
+				}
+			}
 			a.runMsgInjected = make([]bool, n)
 			a.runMsgTimestamps = make([]time.Time, n)
 			now := time.Now()

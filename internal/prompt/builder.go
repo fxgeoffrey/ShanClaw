@@ -68,7 +68,7 @@ func buildStaticSystem(opts PromptOptions) string {
 	// 2. Available Tools (stable once session starts)
 	sb.WriteString("\n\n## Available Tools\n")
 	if len(opts.ToolNames) > 0 {
-		sb.WriteString("You have these local tools: ")
+		sb.WriteString("You have these tools: ")
 		sb.WriteString(strings.Join(opts.ToolNames, ", "))
 		sb.WriteString(".")
 	}

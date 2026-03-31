@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"syscall"
+	"time"
 )
 
 // AXRequest is a JSON-RPC request sent to ax_server.
@@ -34,15 +37,44 @@ type AXError struct {
 	Message string `json:"message"`
 }
 
-// AXClient manages a persistent ax_server subprocess and multiplexes
+// SharedAXClient returns the process-wide singleton AXClient.
+// Both the tools (accessibility, computer, wait) and daemon permission
+// endpoints must use the same instance, because the socket server
+// accepts only one client at a time.
+func SharedAXClient() *AXClient {
+	sharedOnce.Do(func() {
+		sharedInstance = &AXClient{}
+	})
+	return sharedInstance
+}
+
+var (
+	sharedOnce     sync.Once
+	sharedInstance *AXClient
+)
+
+// AXClient manages a persistent ax_server process and multiplexes
 // requests by ID. Multiple goroutines can call Call() concurrently.
+//
+// Two transport modes:
+// - Bundled: ax_server is inside a .app bundle, launched via LaunchServices
+//   (`open -a`), communicates over a Unix domain socket. Required for TCC
+//   permission attribution on macOS.
+// - Fallback: ax_server is a bare binary, launched via exec.Command,
+//   communicates over stdin/stdout pipes. Used for dev, npm, and CLI.
 type AXClient struct {
 	mu      sync.Mutex // guards process lifecycle (start/restart)
-	writeMu sync.Mutex // guards stdin writes
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	nextID  atomic.Int64
-	started bool
+	writeMu sync.Mutex // guards writes to ax_server
+
+	// Transport-agnostic I/O
+	writer io.WriteCloser
+	nextID atomic.Int64
+
+	// Process management
+	cmd        *exec.Cmd // non-nil in fallback mode
+	conn       net.Conn  // non-nil in bundled mode
+	bundlePID  int       // ax_server PID in bundled mode (for cleanup)
+	started    bool
 
 	pendingMu sync.Mutex
 	pending   map[int64]chan AXResponse
@@ -57,17 +89,78 @@ func (c *AXClient) Ensure(ctx context.Context) error {
 		return nil
 	}
 
-	binPath, err := axServerPath()
+	binPath, bundlePath, err := AXServerPaths()
 	if err != nil {
 		return err
 	}
 
+	c.pending = make(map[int64]chan AXResponse)
+
+	if bundlePath != "" {
+		return c.startBundled(ctx, bundlePath)
+	}
+	return c.startFallback(binPath)
+}
+
+// startBundled launches ax_server via LaunchServices and connects over Unix socket.
+func (c *AXClient) startBundled(ctx context.Context, bundlePath string) error {
+	socketPath := AXSocketPath()
+
+	// Try connecting to an existing socket first — ax_server may already be running
+	// (e.g. from a previous open -a that's still alive).
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		// Not running or stale socket — clean up and launch fresh
+		os.Remove(socketPath)
+
+		// Launch via open(1) with -n (new instance) — gives ax_server its own TCC
+		// identity and avoids reusing a stale instance with different --args.
+		cmd := exec.CommandContext(ctx, "open", "-n", "-a", bundlePath, "--args", "--socket", socketPath)
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("ax_server launch: %w", err)
+		}
+
+		// Wait for socket to appear
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			conn, err = net.Dial("unix", socketPath)
+			if err == nil {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	if conn == nil {
+		return fmt.Errorf("ax_server: socket not available after 10s at %s", socketPath)
+	}
+
+	c.conn = conn
+	c.writer = conn
+	c.started = true
+
+	// Find the ax_server PID for cleanup on Close().
+	// pgrep -f matches the socket path in the command line args.
+	if out, err := exec.Command("pgrep", "-f", socketPath).Output(); err == nil {
+		var pid int
+		if _, err := fmt.Sscanf(string(out), "%d", &pid); err == nil {
+			c.bundlePID = pid
+		}
+	}
+
+	// Reader goroutine dispatches responses by ID.
+	go c.readLoop(conn)
+
+	return nil
+}
+
+// startFallback launches ax_server via exec.Command with stdin/stdout pipes.
+func (c *AXClient) startFallback(binPath string) error {
 	// Use exec.Command (not CommandContext) — the process lifecycle is managed
-	// independently of any single request's context. Per-request cancellation
-	// is handled in Call()'s select block.
+	// independently of any single request's context.
 	c.cmd = exec.Command(binPath)
 	var pipeErr error
-	c.stdin, pipeErr = c.cmd.StdinPipe()
+	c.writer, pipeErr = c.cmd.StdinPipe()
 	if pipeErr != nil {
 		return fmt.Errorf("ax_server stdin pipe: %w", pipeErr)
 	}
@@ -76,7 +169,6 @@ func (c *AXClient) Ensure(ctx context.Context) error {
 		return fmt.Errorf("ax_server stdout pipe: %w", pipeErr)
 	}
 	c.cmd.Stderr = os.Stderr
-	c.pending = make(map[int64]chan AXResponse)
 
 	if err := c.cmd.Start(); err != nil {
 		return fmt.Errorf("ax_server start: %w", err)
@@ -85,31 +177,7 @@ func (c *AXClient) Ensure(ctx context.Context) error {
 
 	// Reader goroutine dispatches responses by ID.
 	go func() {
-		scanner := bufio.NewScanner(stdout)
-		scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
-		for scanner.Scan() {
-			var resp AXResponse
-			if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil {
-				continue
-			}
-			c.pendingMu.Lock()
-			ch, ok := c.pending[resp.ID]
-			if ok {
-				delete(c.pending, resp.ID)
-			}
-			c.pendingMu.Unlock()
-			if ok {
-				ch <- resp
-			}
-		}
-		// EOF: ax_server died — unblock all pending callers
-		c.pendingMu.Lock()
-		for id, ch := range c.pending {
-			ch <- AXResponse{ID: id, Error: &AXError{Code: -1, Message: "ax_server: unexpected EOF"}}
-			delete(c.pending, id)
-		}
-		c.pendingMu.Unlock()
-
+		c.readLoop(stdout)
 		// Wait for process exit and mark as dead so next Ensure() restarts it.
 		c.cmd.Wait()
 		c.mu.Lock()
@@ -118,6 +186,39 @@ func (c *AXClient) Ensure(ctx context.Context) error {
 	}()
 
 	return nil
+}
+
+// readLoop reads NDJSON responses and dispatches them to pending callers.
+func (c *AXClient) readLoop(reader io.Reader) {
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
+	for scanner.Scan() {
+		var resp AXResponse
+		if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil {
+			continue
+		}
+		c.pendingMu.Lock()
+		ch, ok := c.pending[resp.ID]
+		if ok {
+			delete(c.pending, resp.ID)
+		}
+		c.pendingMu.Unlock()
+		if ok {
+			ch <- resp
+		}
+	}
+	// EOF: ax_server died or disconnected — unblock all pending callers
+	c.pendingMu.Lock()
+	for id, ch := range c.pending {
+		ch <- AXResponse{ID: id, Error: &AXError{Code: -1, Message: "ax_server: unexpected EOF"}}
+		delete(c.pending, id)
+	}
+	c.pendingMu.Unlock()
+
+	// Mark as not started so next Ensure() reconnects
+	c.mu.Lock()
+	c.started = false
+	c.mu.Unlock()
 }
 
 // Call sends a request and waits for the response.
@@ -143,7 +244,7 @@ func (c *AXClient) Call(ctx context.Context, method string, params any) (json.Ra
 	data = append(data, '\n')
 
 	c.writeMu.Lock()
-	n, writeErr := c.stdin.Write(data)
+	n, writeErr := c.writer.Write(data)
 	if writeErr == nil && n < len(data) {
 		writeErr = io.ErrShortWrite
 	}
@@ -170,13 +271,30 @@ func (c *AXClient) Call(ctx context.Context, method string, params any) (json.Ra
 	}
 }
 
-// Close terminates the ax_server process.
+// Close terminates the ax_server process and cleans up resources.
 func (c *AXClient) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.stdin != nil {
-		c.stdin.Close()
+	if c.conn != nil {
+		// Bundled mode: c.writer == c.conn, so only close once.
+		c.conn.Close()
+		c.conn = nil
+		c.writer = nil
+		os.Remove(AXSocketPath())
+	} else if c.writer != nil {
+		// Fallback mode: close stdin pipe.
+		c.writer.Close()
 	}
+	// Bundled mode: kill the LaunchServices-launched ax_server process.
+	// Closing the socket causes ax_server to exit on its own (it exits
+	// after the sole client disconnects), but SIGTERM is a safety net.
+	if c.bundlePID > 0 {
+		if proc, err := os.FindProcess(c.bundlePID); err == nil {
+			proc.Signal(syscall.SIGTERM)
+		}
+		c.bundlePID = 0
+	}
+	// Fallback mode: kill the subprocess
 	if c.cmd != nil && c.cmd.Process != nil {
 		c.cmd.Process.Kill()
 		c.cmd.Wait()
@@ -184,25 +302,45 @@ func (c *AXClient) Close() {
 	c.started = false
 }
 
-func axServerPath() (string, error) {
-	exe, err := os.Executable()
-	if err == nil {
+// AXSocketPath returns the Unix socket path for bundled mode.
+func AXSocketPath() string {
+	tmpDir := os.TempDir()
+	return filepath.Join(tmpDir, fmt.Sprintf("run.shannon.shanclaw.ax-server.%d.sock", os.Getpid()))
+}
+
+// AXServerPaths returns the binary path and (optionally) the .app bundle path.
+// If bundlePath is non-empty, use LaunchServices + socket mode.
+// If bundlePath is empty, use exec.Command + stdin/stdout with binPath.
+func AXServerPaths() (binPath, bundlePath string, err error) {
+	exe, exeErr := os.Executable()
+	if exeErr == nil {
 		dir := filepath.Dir(exe)
-		// Same directory as shan binary
+
+		// Bundled: nested app inside engine helper's Helpers/
+		bp := filepath.Join(dir, "..", "Helpers", "Kocoro AX.app")
+		bin := filepath.Join(bp, "Contents", "MacOS", "ax_server")
+		if _, err := os.Stat(bin); err == nil {
+			return bin, bp, nil
+		}
+
+		// Flat: same directory as shan binary
 		p := filepath.Join(dir, "ax_server")
 		if _, err := os.Stat(p); err == nil {
-			return p, nil
+			return p, "", nil
 		}
+
 		// npm: bin/ax_server
 		p = filepath.Join(dir, "bin", "ax_server")
 		if _, err := os.Stat(p); err == nil {
-			return p, nil
+			return p, "", nil
 		}
 	}
+
 	// Development: relative to working directory
 	p := filepath.Join("internal", "tools", "axserver", ".build", "debug", "ax_server")
 	if _, err := os.Stat(p); err == nil {
-		return p, nil
+		return p, "", nil
 	}
-	return "", fmt.Errorf("ax_server binary not found")
+
+	return "", "", fmt.Errorf("ax_server binary not found")
 }

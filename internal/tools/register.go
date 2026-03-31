@@ -49,7 +49,7 @@ func RegisterLocalTools(cfg *config.Config) (*agent.ToolRegistry, *[]*skills.Ski
 	reg.Register(&NotifyTool{})
 	reg.Register(&ProcessTool{})
 	reg.Register(&AppleScriptTool{})
-	axClient := &AXClient{}
+	axClient := SharedAXClient()
 	reg.Register(&AccessibilityTool{client: axClient})
 	reg.Register(&GhosttyTool{tabs: newTabRegistry()})
 

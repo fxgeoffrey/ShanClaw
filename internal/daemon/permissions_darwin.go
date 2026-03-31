@@ -4,39 +4,34 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
+
+	"github.com/Kocoro-lab/ShanClaw/internal/tools"
 )
+
 
 // probePermissions checks current TCC permission status via ax_server.
 func probePermissions(ctx context.Context) permissionStatus {
-	path, err := axServerPath()
+	binPath, bundlePath, err := tools.AXServerPaths()
 	if err != nil {
-		return permissionStatus{
-			ScreenRecording: "unknown",
-			Accessibility:   "unknown",
-			Automation:      "unknown",
-		}
+		return unknownStatus()
 	}
 
-	cmd := exec.CommandContext(ctx, path, "--check-permissions")
+	// Bundled mode: use persistent ax_server launched via LaunchServices
+	if bundlePath != "" {
+		return probePermissionsViaSocket(ctx)
+	}
+
+	// Fallback: one-shot exec.Command
+	cmd := exec.CommandContext(ctx, binPath, "--check-permissions")
 	out, err := cmd.Output()
 	if err != nil {
-		return permissionStatus{
-			ScreenRecording: "unknown",
-			Accessibility:   "unknown",
-			Automation:      "unknown",
-		}
+		return unknownStatus()
 	}
 
 	var status map[string]string
 	if err := json.Unmarshal(out, &status); err != nil {
-		return permissionStatus{
-			ScreenRecording: "unknown",
-			Accessibility:   "unknown",
-			Automation:      "unknown",
-		}
+		return unknownStatus()
 	}
 
 	return permissionStatus{
@@ -55,7 +50,7 @@ func requestPermission(ctx context.Context, permission string) permissionResult 
 		return permissionResult{Permission: permission, Status: "unknown", Message: "unsupported permission"}
 	}
 
-	path, err := axServerPath()
+	binPath, bundlePath, err := tools.AXServerPaths()
 	if err != nil {
 		return permissionResult{
 			Permission: permission,
@@ -64,7 +59,13 @@ func requestPermission(ctx context.Context, permission string) permissionResult 
 		}
 	}
 
-	cmd := exec.CommandContext(ctx, path, "--request-permission", permission)
+	// Bundled mode: use persistent ax_server launched via LaunchServices
+	if bundlePath != "" {
+		return requestPermissionViaSocket(ctx, permission)
+	}
+
+	// Fallback: one-shot exec.Command
+	cmd := exec.CommandContext(ctx, binPath, "--request-permission", permission)
 	out, err := cmd.Output()
 	if err != nil {
 		return permissionResult{
@@ -90,6 +91,72 @@ func requestPermission(ctx context.Context, permission string) permissionResult 
 	}
 }
 
+func probePermissionsViaSocket(ctx context.Context) permissionStatus {
+	client := tools.SharedAXClient()
+	if err := client.Ensure(ctx); err != nil {
+		return unknownStatus()
+	}
+
+	result, err := client.Call(ctx, "check_permissions", nil)
+	if err != nil {
+		return unknownStatus()
+	}
+
+	var status map[string]string
+	if err := json.Unmarshal(result, &status); err != nil {
+		return unknownStatus()
+	}
+
+	return permissionStatus{
+		ScreenRecording: statusOrUnknown(status, "screen_recording"),
+		Accessibility:   statusOrUnknown(status, "accessibility"),
+		Automation:      statusOrUnknown(status, "automation"),
+	}
+}
+
+func requestPermissionViaSocket(ctx context.Context, permission string) permissionResult {
+	client := tools.SharedAXClient()
+	if err := client.Ensure(ctx); err != nil {
+		return permissionResult{
+			Permission: permission,
+			Status:     "unknown",
+			Message:    fmt.Sprintf("ax_server not reachable: %v", err),
+		}
+	}
+
+	result, err := client.Call(ctx, "request_permission", map[string]string{"value": permission})
+	if err != nil {
+		return permissionResult{
+			Permission: permission,
+			Status:     "unknown",
+			Message:    fmt.Sprintf("ax_server request failed: %v", err),
+		}
+	}
+
+	var resp map[string]string
+	if err := json.Unmarshal(result, &resp); err != nil {
+		return permissionResult{
+			Permission: permission,
+			Status:     "unknown",
+			Message:    "failed to parse ax_server response",
+		}
+	}
+
+	return permissionResult{
+		Permission: resp["permission"],
+		Status:     resp["status"],
+		Message:    resp["message"],
+	}
+}
+
+func unknownStatus() permissionStatus {
+	return permissionStatus{
+		ScreenRecording: "unknown",
+		Accessibility:   "unknown",
+		Automation:      "unknown",
+	}
+}
+
 func statusOrUnknown(m map[string]string, key string) string {
 	if v, ok := m[key]; ok && v != "" {
 		return v
@@ -97,27 +164,3 @@ func statusOrUnknown(m map[string]string, key string) string {
 	return "unknown"
 }
 
-// axServerPath finds the ax_server binary.
-// Mirrors the lookup in internal/tools/axclient.go.
-func axServerPath() (string, error) {
-	exe, err := os.Executable()
-	if err == nil {
-		dir := filepath.Dir(exe)
-		// Same directory as shan binary
-		p := filepath.Join(dir, "ax_server")
-		if _, err := os.Stat(p); err == nil {
-			return p, nil
-		}
-		// npm: bin/ax_server
-		p = filepath.Join(dir, "bin", "ax_server")
-		if _, err := os.Stat(p); err == nil {
-			return p, nil
-		}
-	}
-	// Development: relative to working directory
-	p := filepath.Join("internal", "tools", "axserver", ".build", "debug", "ax_server")
-	if _, err := os.Stat(p); err == nil {
-		return p, nil
-	}
-	return "", fmt.Errorf("ax_server binary not found")
-}

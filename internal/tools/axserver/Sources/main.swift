@@ -29,6 +29,14 @@ if let idx = args.firstIndex(of: "--request-permission"), idx + 1 < args.count {
     exit(0)
 }
 
+// MARK: - Unix Socket Server Mode
+
+if let idx = args.firstIndex(of: "--socket"), idx + 1 < args.count {
+    let socketPath = args[idx + 1]
+    runSocketServer(path: socketPath)
+    exit(0)
+}
+
 // MARK: - Normal Stdin Loop Mode
 
 // Check accessibility permission once at startup.
@@ -228,6 +236,17 @@ func dispatch(id: Int64, method: String, params: Params) -> Response {
         guard let result = annotateElements(pid: pid, roles: params.roles, maxLabels: maxLabels) else {
             return Response(id: id, error: ErrorInfo(code: -1, message: "No windows found. Is the app running and visible?"))
         }
+        return Response(id: id, result: AnyCodable(result))
+
+    case "check_permissions":
+        let status = checkAllPermissions()
+        return Response(id: id, result: AnyCodable(status))
+
+    case "request_permission":
+        guard let permission = params.value else {
+            return Response(id: id, error: ErrorInfo(code: -1, message: "request_permission requires 'value' (permission name)"))
+        }
+        let result = requestPermissionCLI(permission)
         return Response(id: id, result: AnyCodable(result))
 
     default:

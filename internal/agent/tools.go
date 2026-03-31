@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"sort"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
 )
@@ -32,6 +33,21 @@ const (
 	// ErrCategoryPermission indicates access was denied. Escalate to user.
 	ErrCategoryPermission ErrorCategory = "permission"
 )
+
+// ToolSource classifies the origin of a tool for deterministic ordering.
+type ToolSource string
+
+const (
+	SourceLocal   ToolSource = "local"
+	SourceMCP     ToolSource = "mcp"
+	SourceGateway ToolSource = "gateway"
+)
+
+// ToolSourcer is an optional interface tools implement to declare their origin.
+// Tools that don't implement this are classified as SourceLocal.
+type ToolSourcer interface {
+	ToolSource() ToolSource
+}
 
 type ToolResult struct {
 	Content       string
@@ -231,4 +247,83 @@ func (r *ToolRegistry) Schemas() []client.Tool {
 		})
 	}
 	return schemas
+}
+
+// SortedSchemas returns tool schemas in deterministic order:
+// local tools (alpha) → MCP tools (alpha) → gateway tools (alpha).
+func (r *ToolRegistry) SortedSchemas() []client.Tool {
+	local, mcp, gw := r.partitionBySource()
+	sort.Strings(local)
+	sort.Strings(mcp)
+	sort.Strings(gw)
+
+	schemas := make([]client.Tool, 0, len(r.order))
+	for _, group := range [][]string{local, mcp, gw} {
+		for _, name := range group {
+			t := r.tools[name]
+			if native, ok := t.(NativeToolProvider); ok {
+				def := native.NativeToolDef()
+				if def != nil {
+					schemas = append(schemas, client.Tool{
+						Type:            def.Type,
+						Name:            def.Name,
+						DisplayWidthPx:  def.DisplayWidthPx,
+						DisplayHeightPx: def.DisplayHeightPx,
+					})
+					continue
+				}
+			}
+			info := t.Info()
+			params := info.Parameters
+			if params == nil {
+				params = map[string]any{"type": "object", "properties": map[string]any{}}
+			}
+			if info.Required != nil {
+				params["required"] = info.Required
+			}
+			schemas = append(schemas, client.Tool{
+				Type: "function",
+				Function: client.FunctionDef{
+					Name:        info.Name,
+					Description: info.Description,
+					Parameters:  params,
+				},
+			})
+		}
+	}
+	return schemas
+}
+
+// SortedNames returns tool names in the same deterministic order as SortedSchemas.
+func (r *ToolRegistry) SortedNames() []string {
+	local, mcp, gw := r.partitionBySource()
+	sort.Strings(local)
+	sort.Strings(mcp)
+	sort.Strings(gw)
+
+	names := make([]string, 0, len(r.order))
+	names = append(names, local...)
+	names = append(names, mcp...)
+	names = append(names, gw...)
+	return names
+}
+
+// partitionBySource groups tool names by their source category.
+func (r *ToolRegistry) partitionBySource() (local, mcp, gw []string) {
+	for _, name := range r.order {
+		t := r.tools[name]
+		if sourcer, ok := t.(ToolSourcer); ok {
+			switch sourcer.ToolSource() {
+			case SourceMCP:
+				mcp = append(mcp, name)
+			case SourceGateway:
+				gw = append(gw, name)
+			default:
+				local = append(local, name)
+			}
+		} else {
+			local = append(local, name)
+		}
+	}
+	return
 }

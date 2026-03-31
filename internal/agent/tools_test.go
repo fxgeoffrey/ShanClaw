@@ -308,3 +308,94 @@ func TestToolResult_ImagesField(t *testing.T) {
 		t.Errorf("expected image/png, got %s", result.Images[0].MediaType)
 	}
 }
+
+// mockSourcedTool is a mock tool that implements ToolSourcer.
+type mockSourcedTool struct {
+	name   string
+	source ToolSource
+}
+
+func (m *mockSourcedTool) Info() ToolInfo {
+	return ToolInfo{
+		Name:        m.name,
+		Description: "mock sourced tool",
+		Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
+	}
+}
+func (m *mockSourcedTool) Run(ctx context.Context, args string) (ToolResult, error) {
+	return ToolResult{Content: "ok"}, nil
+}
+func (m *mockSourcedTool) RequiresApproval() bool  { return false }
+func (m *mockSourcedTool) ToolSource() ToolSource { return m.source }
+
+func TestToolRegistry_SortedSchemas(t *testing.T) {
+	r := NewToolRegistry()
+	// Register in non-alphabetical, mixed-source order
+	r.Register(&mockTool{name: "grep"})                                      // local
+	r.Register(&mockSourcedTool{name: "browser_click", source: SourceMCP})   // mcp
+	r.Register(&mockSourcedTool{name: "web_search", source: SourceGateway})  // gateway
+	r.Register(&mockTool{name: "bash"})                                      // local
+	r.Register(&mockSourcedTool{name: "browser_type", source: SourceMCP})    // mcp
+	r.Register(&mockSourcedTool{name: "alpaca_news", source: SourceGateway}) // gateway
+	r.Register(&mockTool{name: "file_read"})                                 // local
+
+	schemas := r.SortedSchemas()
+	var names []string
+	for _, s := range schemas {
+		names = append(names, s.Function.Name)
+	}
+
+	expected := []string{
+		// local alpha
+		"bash", "file_read", "grep",
+		// mcp alpha
+		"browser_click", "browser_type",
+		// gateway alpha
+		"alpaca_news", "web_search",
+	}
+	if len(names) != len(expected) {
+		t.Fatalf("got %d schemas, want %d: %v", len(names), len(expected), names)
+	}
+	for i, want := range expected {
+		if names[i] != want {
+			t.Errorf("position %d: got %q, want %q (full: %v)", i, names[i], want, names)
+			break
+		}
+	}
+}
+
+func TestToolRegistry_SortedNames(t *testing.T) {
+	r := NewToolRegistry()
+	r.Register(&mockTool{name: "grep"})
+	r.Register(&mockSourcedTool{name: "browser_click", source: SourceMCP})
+	r.Register(&mockTool{name: "bash"})
+
+	names := r.SortedNames()
+	expected := []string{"bash", "grep", "browser_click"}
+	if len(names) != len(expected) {
+		t.Fatalf("got %v, want %v", names, expected)
+	}
+	for i, want := range expected {
+		if names[i] != want {
+			t.Errorf("position %d: got %q, want %q", i, names[i], want)
+		}
+	}
+}
+
+func TestToolRegistry_SortedSchemas_MCPAdditionDoesNotShiftLocal(t *testing.T) {
+	r := NewToolRegistry()
+	r.Register(&mockTool{name: "grep"})
+	r.Register(&mockTool{name: "bash"})
+
+	before := r.SortedNames()
+
+	r.Register(&mockSourcedTool{name: "browser_navigate", source: SourceMCP})
+
+	after := r.SortedNames()
+	// Local tools should still be in positions 0 and 1 with same order
+	for i := 0; i < 2; i++ {
+		if before[i] != after[i] {
+			t.Errorf("local tool shifted: position %d was %q, now %q", i, before[i], after[i])
+		}
+	}
+}

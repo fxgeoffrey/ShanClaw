@@ -399,3 +399,45 @@ func TestToolRegistry_SortedSchemas_MCPAdditionDoesNotShiftLocal(t *testing.T) {
 		}
 	}
 }
+
+func TestTurnUsage_CacheTelemetry(t *testing.T) {
+	u := &TurnUsage{}
+
+	// Turn 1: cache creation (first turn always creates, no reads)
+	u.Add(client.Usage{InputTokens: 5000, CacheCreationTokens: 4000, CacheReadTokens: 0})
+	if !u.cacheCapable {
+		t.Error("should be cache-capable after seeing CacheCreationTokens > 0")
+	}
+	if u.cacheMissStreak != 0 {
+		t.Errorf("first turn should not count as miss, got streak %d", u.cacheMissStreak)
+	}
+
+	// Turn 2: cache hit
+	u.Add(client.Usage{InputTokens: 5000, CacheReadTokens: 3500})
+	if u.cacheMissStreak != 0 {
+		t.Errorf("cache hit should reset streak, got %d", u.cacheMissStreak)
+	}
+
+	// Turns 3-5: cache misses
+	for i := 0; i < 3; i++ {
+		u.Add(client.Usage{InputTokens: 5000, CacheReadTokens: 0})
+	}
+	if u.cacheMissStreak != 3 {
+		t.Errorf("expected miss streak 3, got %d", u.cacheMissStreak)
+	}
+}
+
+func TestTurnUsage_CacheTelemetry_NonCacheProvider(t *testing.T) {
+	u := &TurnUsage{}
+
+	// Provider never returns cache tokens — should not flag as cache-capable
+	for i := 0; i < 5; i++ {
+		u.Add(client.Usage{InputTokens: 5000})
+	}
+	if u.cacheCapable {
+		t.Error("should not be cache-capable when provider never returns cache tokens")
+	}
+	if u.cacheMissStreak != 0 {
+		t.Errorf("non-cache provider should not accumulate miss streak, got %d", u.cacheMissStreak)
+	}
+}

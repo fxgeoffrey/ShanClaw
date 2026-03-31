@@ -182,9 +182,13 @@ type TurnUsage struct {
 	Model               string // actual model from gateway response
 	CacheReadTokens     int
 	CacheCreationTokens int
+	// Cache telemetry state (session-scoped, not reset between turns)
+	cacheCapable    bool // true once any response has cache tokens > 0
+	cacheMissStreak int  // consecutive non-first turns with 0 cache reads
 }
 
-// Add accumulates usage from a single LLM response into the turn totals.
+// Add accumulates usage from a single LLM response into the turn totals
+// and updates cache telemetry state.
 func (u *TurnUsage) Add(r client.Usage) {
 	u.InputTokens += r.InputTokens
 	u.OutputTokens += r.OutputTokens
@@ -193,6 +197,28 @@ func (u *TurnUsage) Add(r client.Usage) {
 	u.CacheReadTokens += r.CacheReadTokens
 	u.CacheCreationTokens += r.CacheCreationTokens
 	u.LLMCalls++
+
+	// Cache telemetry: track capability and miss streaks
+	if r.CacheCreationTokens > 0 || r.CacheReadTokens > 0 {
+		u.cacheCapable = true
+	}
+	if !u.cacheCapable {
+		return // provider doesn't support caching — don't track misses
+	}
+
+	// First LLM call always creates cache, never reads — don't count as miss
+	if u.LLMCalls == 1 {
+		return
+	}
+
+	if r.CacheReadTokens > 0 {
+		u.cacheMissStreak = 0
+	} else {
+		u.cacheMissStreak++
+		if u.cacheMissStreak >= 3 {
+			fmt.Fprintf(os.Stderr, "[agent] cache miss streak: %d consecutive turns with 0 cache reads (input_tokens=%d)\n", u.cacheMissStreak, r.InputTokens)
+		}
+	}
 }
 
 type EventHandler interface {
@@ -797,6 +823,16 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		}
 
 		usage.Add(resp.Usage)
+		// Log cache metrics for debugging prompt cache effectiveness
+		if resp.Usage.CacheReadTokens > 0 || resp.Usage.CacheCreationTokens > 0 {
+			ratio := float64(0)
+			if resp.Usage.InputTokens > 0 {
+				ratio = float64(resp.Usage.CacheReadTokens) / float64(resp.Usage.InputTokens) * 100
+			}
+			fmt.Fprintf(os.Stderr, "[agent] cache: read=%d creation=%d input=%d ratio=%.1f%%\n",
+				resp.Usage.CacheReadTokens, resp.Usage.CacheCreationTokens,
+				resp.Usage.InputTokens, ratio)
+		}
 		lastInputTokens = resp.Usage.InputTokens
 		lastOutputTokens = resp.Usage.OutputTokens
 		if resp.Model != "" {

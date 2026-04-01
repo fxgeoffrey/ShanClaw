@@ -13,7 +13,6 @@ import (
 const (
 	maxMemoryChars       = 2000
 	maxInstructionsChars = 16000
-	maxContextChars      = 800
 )
 
 // PromptOptions configures the system prompt assembly.
@@ -21,56 +20,55 @@ type PromptOptions struct {
 	BasePrompt   string   // persona + core operational rules
 	Memory       string   // from LoadMemory (~500 tokens budget)
 	Instructions string   // from LoadInstructions (~4000 tokens budget)
-	ToolNames    []string // from ToolRegistry, auto-generated
+	ToolNames    []string // from ToolRegistry.SortedNames(), deterministic
 	ServerTools  []string // server tool names (optional)
 	MCPContext   string   // context from MCP servers (auth info, usage hints)
 	Skills       []*skills.Skill
 	CWD          string // current working directory
-	SessionInfo  string // optional session context
-	MemoryDir     string // directory containing MEMORY.md for agent memory writes
-	// StickyContext holds session-scoped facts injected verbatim into the system prompt.
+	SessionInfo  string // optional session context (currently unused by agent loop)
+	MemoryDir    string // directory containing MEMORY.md for agent memory writes
+	// StickyContext holds session-scoped facts injected verbatim into StableContext.
 	// Never truncated or compacted. Use for key transactional data (IDs, amounts, names)
 	// that must survive context compaction. Populated by the daemon runner with session
 	// source/channel/task metadata, or by callers needing persistent session facts.
 	StickyContext string
 }
 
-// BuildSystemPrompt assembles the complete system prompt from layers.
-func BuildSystemPrompt(opts PromptOptions) string {
+// PromptParts separates the system prompt into cacheable and volatile sections.
+// The gateway caches System as a single block. StableContext and VolatileContext
+// are injected into the user message with a <!-- cache_break --> separator.
+type PromptParts struct {
+	System          string // static: persona + rules + guidance + tool names + skills (cached by gateway)
+	StableContext   string // deterministic per-session: sticky facts (before cache_break)
+	VolatileContext string // changes per-turn: memory, instructions, date/time, CWD, MCP (after cache_break)
+}
+
+// BuildSystemPrompt assembles prompt parts from layers.
+// System contains only content that is stable across turns.
+// Volatile content (memory, instructions, date/time, CWD, MCP) goes to VolatileContext.
+// Sticky session facts go to StableContext.
+func BuildSystemPrompt(opts PromptOptions) PromptParts {
+	system := buildStaticSystem(opts)
+	stable := buildStableContext(opts)
+	volatile := buildVolatileContext(opts)
+	return PromptParts{
+		System:          system,
+		StableContext:   stable,
+		VolatileContext: volatile,
+	}
+}
+
+// buildStaticSystem assembles content that never changes between turns in a session.
+func buildStaticSystem(opts PromptOptions) string {
 	var sb strings.Builder
 
 	// 1. Base prompt (persona + core rules — unlimited)
 	sb.WriteString(opts.BasePrompt)
 
-	// 2. Context (date/CWD/session — operationally critical, placed early to avoid "lost in the middle")
-	contextParts := buildContext(opts.CWD, opts.SessionInfo)
-	if contextParts != "" {
-		sb.WriteString("\n\n## Context\n")
-		sb.WriteString(truncate(contextParts, maxContextChars))
-	}
-
-	// 3. Memory
-	if mem := strings.TrimSpace(opts.Memory); mem != "" {
-		sb.WriteString("\n\n## Memory\n")
-		sb.WriteString(truncate(mem, maxMemoryChars))
-	}
-
-	// 4. Sticky Context (never truncated — session-critical facts that must survive compaction)
-	if sticky := strings.TrimSpace(opts.StickyContext); sticky != "" {
-		sb.WriteString("\n\n## Session Facts\n")
-		sb.WriteString(sticky)
-	}
-
-	// 5. Instructions
-	if inst := strings.TrimSpace(opts.Instructions); inst != "" {
-		sb.WriteString("\n\n## Instructions\n")
-		sb.WriteString(truncate(inst, maxInstructionsChars))
-	}
-
-	// 6. Available Tools (unlimited, auto-generated)
+	// 2. Available Tools (stable once session starts)
 	sb.WriteString("\n\n## Available Tools\n")
 	if len(opts.ToolNames) > 0 {
-		sb.WriteString("You have these local tools: ")
+		sb.WriteString("You have these tools: ")
 		sb.WriteString(strings.Join(opts.ToolNames, ", "))
 		sb.WriteString(".")
 	}
@@ -83,7 +81,7 @@ func BuildSystemPrompt(opts PromptOptions) string {
 		sb.WriteString(".")
 	}
 
-	// 7. Available Skills
+	// 3. Available Skills (stable once session starts)
 	if len(opts.Skills) > 0 {
 		sb.WriteString("\n\n## Available Skills\n\n")
 		sb.WriteString("You can activate a skill by calling the `use_skill` tool with the skill name.\n")
@@ -95,22 +93,16 @@ func BuildSystemPrompt(opts PromptOptions) string {
 		}
 	}
 
-	// 8. macOS automation guidance (only on darwin with relevant tools)
+	// 4. macOS automation guidance (only on darwin with relevant tools)
 	if guidance := macOSAutomationGuidance(opts.ToolNames); guidance != "" {
 		sb.WriteString("\n\n")
 		sb.WriteString(guidance)
 	}
 
-	// 9. MCP server context
-	if mcp := strings.TrimSpace(opts.MCPContext); mcp != "" {
-		sb.WriteString("\n\n## MCP Server Context\n")
-		sb.WriteString(mcp)
-	}
-
-	// 10. Memory Persistence guidance
+	// 5. Memory Persistence guidance (stable — depends only on memoryDir presence)
 	if opts.MemoryDir != "" {
 		sb.WriteString("\n\n## Memory Persistence\n")
-		sb.WriteString("Your current memory is shown above in the Memory section. When you discover something worth remembering across future conversations, use the `memory_append` tool to add new entries.\n")
+		sb.WriteString("Your current memory is shown in the context section below. When you discover something worth remembering across future conversations, use the `memory_append` tool to add new entries.\n")
 		sb.WriteString("IMPORTANT: NEVER use file_write or file_edit on MEMORY.md — they race under concurrent sessions. The memory_append tool is flock-protected and safe.\n")
 		sb.WriteString("Good candidates for memory:\n")
 		sb.WriteString("- Decisions the user made (technical, design, or preferences)\n")
@@ -124,17 +116,50 @@ func BuildSystemPrompt(opts PromptOptions) string {
 	return sb.String()
 }
 
-// buildContext assembles the context section from CWD and session info.
-func buildContext(cwd, sessionInfo string) string {
-	var parts []string
-	parts = append(parts, "Current date: "+time.Now().Format("2006-01-02 15:04 MST"))
-	if cwd != "" {
-		parts = append(parts, "Working directory: "+cwd)
+// buildStableContext assembles deterministic per-session content (sticky facts).
+// This content is re-injected from persisted fields each turn and placed before
+// the <!-- cache_break --> marker in the user message.
+func buildStableContext(opts PromptOptions) string {
+	if sticky := strings.TrimSpace(opts.StickyContext); sticky != "" {
+		return "## Session Facts\n" + sticky
 	}
-	if sessionInfo != "" {
-		parts = append(parts, sessionInfo)
+	return ""
+}
+
+// buildVolatileContext assembles content that changes between turns.
+// Placed after the <!-- cache_break --> marker in the user message.
+func buildVolatileContext(opts PromptOptions) string {
+	var sb strings.Builder
+
+	// Date/time + CWD + session info
+	sb.WriteString("## Context\n")
+	sb.WriteString("Current date: " + time.Now().Format("2006-01-02 15:04 MST"))
+	if opts.CWD != "" {
+		sb.WriteString("\nWorking directory: " + opts.CWD)
 	}
-	return strings.Join(parts, "\n")
+	if opts.SessionInfo != "" {
+		sb.WriteString("\n" + opts.SessionInfo)
+	}
+
+	// Memory
+	if mem := strings.TrimSpace(opts.Memory); mem != "" {
+		sb.WriteString("\n\n## Memory\n")
+		sb.WriteString(truncate(mem, maxMemoryChars))
+	}
+
+	// Instructions
+	if inst := strings.TrimSpace(opts.Instructions); inst != "" {
+		sb.WriteString("\n\n## Instructions\n")
+		sb.WriteString(truncate(inst, maxInstructionsChars))
+	}
+
+	// MCP server context
+	if mcp := strings.TrimSpace(opts.MCPContext); mcp != "" {
+		sb.WriteString("\n\n## MCP Server Context\n")
+		sb.WriteString(mcp)
+	}
+
+	return sb.String()
 }
 
 // truncate limits s to maxChars, appending [truncated] if trimmed.

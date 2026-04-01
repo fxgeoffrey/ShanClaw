@@ -182,9 +182,13 @@ type TurnUsage struct {
 	Model               string // actual model from gateway response
 	CacheReadTokens     int
 	CacheCreationTokens int
+	// Cache telemetry state (session-scoped, not reset between turns)
+	cacheCapable    bool // true once any response has cache tokens > 0
+	cacheMissStreak int  // consecutive non-first turns with 0 cache reads
 }
 
-// Add accumulates usage from a single LLM response into the turn totals.
+// Add accumulates usage from a single LLM response into the turn totals
+// and updates cache telemetry state.
 func (u *TurnUsage) Add(r client.Usage) {
 	u.InputTokens += r.InputTokens
 	u.OutputTokens += r.OutputTokens
@@ -193,6 +197,28 @@ func (u *TurnUsage) Add(r client.Usage) {
 	u.CacheReadTokens += r.CacheReadTokens
 	u.CacheCreationTokens += r.CacheCreationTokens
 	u.LLMCalls++
+
+	// Cache telemetry: track capability and miss streaks
+	if r.CacheCreationTokens > 0 || r.CacheReadTokens > 0 {
+		u.cacheCapable = true
+	}
+	if !u.cacheCapable {
+		return // provider doesn't support caching — don't track misses
+	}
+
+	// First LLM call always creates cache, never reads — don't count as miss
+	if u.LLMCalls == 1 {
+		return
+	}
+
+	if r.CacheReadTokens > 0 {
+		u.cacheMissStreak = 0
+	} else {
+		u.cacheMissStreak++
+		if u.cacheMissStreak >= 3 {
+			fmt.Fprintf(os.Stderr, "[agent] cache miss streak: %d consecutive turns with 0 cache reads (input_tokens=%d)\n", u.cacheMissStreak, r.InputTokens)
+		}
+	}
 }
 
 type EventHandler interface {
@@ -420,17 +446,33 @@ type approvedToolCall struct {
 	tool  Tool                // resolved tool
 }
 
+// assembleUserMessage combines volatile context and user query with cache_break markers.
+// The gateway's Anthropic provider splits on <!-- cache_break -->, caching the prefix.
+// Layout: [stableContext]\n<!-- cache_break -->\n[volatileContext]\n\n[userMessage]
+func assembleUserMessage(parts prompt.PromptParts, userMessage string) string {
+	var sb strings.Builder
+
+	if parts.StableContext != "" {
+		sb.WriteString(parts.StableContext)
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("<!-- cache_break -->\n")
+	sb.WriteString(parts.VolatileContext)
+	sb.WriteString("\n\n")
+	sb.WriteString(userMessage)
+
+	return sb.String()
+}
+
 func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []client.Message) (string, *TurnUsage, error) {
 	a.injectedMessages = nil   // reset for this run
 	a.runMessages = nil        // reset for this run
 	a.runMsgInjected = nil     // reset for this run
 	a.runMsgTimestamps = nil   // reset for this run
 
-	// Build system prompt using prompt builder with instructions/memory
-	var toolNames []string
-	for _, t := range a.tools.All() {
-		toolNames = append(toolNames, t.Info().Name)
-	}
+	// Build tool names from sorted ordering for deterministic system prompt
+	toolNames := a.tools.SortedNames()
 
 	cwd, _ := os.Getwd()
 	instrText, _ := instructions.LoadInstructions(a.shannonDir, ".", 4000)
@@ -459,7 +501,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		mem, _ = instructions.LoadMemory(a.shannonDir, 200)
 	}
 
-	systemPrompt := prompt.BuildSystemPrompt(prompt.PromptOptions{
+	parts := prompt.BuildSystemPrompt(prompt.PromptOptions{
 		BasePrompt:    basePrompt,
 		Memory:        mem,
 		Instructions:  instrText,
@@ -471,7 +513,8 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		StickyContext: a.stickyContext,
 	})
 
-	// Append cloud delegation guidance if tool is registered
+	// Append cloud delegation guidance to the static system prompt
+	systemPrompt := parts.System
 	if _, hasCloud := a.tools.Get("cloud_delegate"); hasCloud {
 		systemPrompt += cloudDelegationGuidance
 	}
@@ -481,7 +524,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 	if history != nil {
 		messages = append(messages, ctxwin.SanitizeHistory(history)...)
 	}
-	messages = append(messages, client.Message{Role: "user", Content: client.NewTextContent(userMessage)})
+	messages = append(messages, client.Message{Role: "user", Content: client.NewTextContent(assembleUserMessage(parts, userMessage))})
 
 	// Track where new messages start so RunMessages() can return only this run's
 	// conversation (user prompt + tool calls + results + assistant replies),
@@ -498,6 +541,15 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			n := len(messages) - newMsgOffset
 			a.runMessages = make([]client.Message, n)
 			copy(a.runMessages, messages[newMsgOffset:])
+			// Strip volatile context framing from the initial user message
+			// so session history stays clean. Volatile context (date/time,
+			// memory, instructions, CWD) is re-injected fresh each Run().
+			if len(a.runMessages) > 0 && a.runMessages[0].Role == "user" {
+				a.runMessages[0] = client.Message{
+					Role:    "user",
+					Content: client.NewTextContent(userMessage),
+				}
+			}
 			a.runMsgInjected = make([]bool, n)
 			a.runMsgTimestamps = make([]time.Time, n)
 			now := time.Now()
@@ -525,7 +577,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 	// of the messages slice. Call immediately after appending any message.
 	stampMessage := func() { msgTimestamps[len(messages)-1] = time.Now() }
 
-	toolSchemas := a.tools.Schemas()
+	toolSchemas := a.tools.SortedSchemas()
 	usage := &TurnUsage{}
 
 	// Read tracker: enforces read-before-edit for file_edit/file_write
@@ -780,6 +832,16 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		}
 
 		usage.Add(resp.Usage)
+		// Log cache metrics for debugging prompt cache effectiveness
+		if resp.Usage.CacheReadTokens > 0 || resp.Usage.CacheCreationTokens > 0 {
+			ratio := float64(0)
+			if resp.Usage.InputTokens > 0 {
+				ratio = float64(resp.Usage.CacheReadTokens) / float64(resp.Usage.InputTokens) * 100
+			}
+			fmt.Fprintf(os.Stderr, "[agent] cache: read=%d creation=%d input=%d ratio=%.1f%%\n",
+				resp.Usage.CacheReadTokens, resp.Usage.CacheCreationTokens,
+				resp.Usage.InputTokens, ratio)
+		}
 		lastInputTokens = resp.Usage.InputTokens
 		lastOutputTokens = resp.Usage.OutputTokens
 		if resp.Model != "" {

@@ -135,3 +135,6 @@ func (t *MCPTool) Run(ctx context.Context, argsJSON string) (agent.ToolResult, e
 }
 
 func (t *MCPTool) RequiresApproval() bool { return false }
+
+// ToolSource implements agent.ToolSourcer for deterministic tool ordering.
+func (t *MCPTool) ToolSource() agent.ToolSource { return agent.SourceMCP }

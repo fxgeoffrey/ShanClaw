@@ -7,253 +7,208 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/skills"
 )
 
-func TestBuildSystemPrompt_FullAssembly(t *testing.T) {
-	result := BuildSystemPrompt(PromptOptions{
-		BasePrompt:   "You are Shannon.",
-		Memory:       "User prefers Go.",
+func TestBuildSystemPrompt_SystemIsStatic(t *testing.T) {
+	// Two calls with different volatile content must produce identical System fields
+	opts1 := PromptOptions{
+		BasePrompt: "You are Shannon.",
+		ToolNames:  []string{"bash", "file_read"},
+		Memory:     "User prefers Go.",
+		CWD:        "/home/user/project",
+	}
+	opts2 := PromptOptions{
+		BasePrompt: "You are Shannon.",
+		ToolNames:  []string{"bash", "file_read"},
+		Memory:     "User prefers Rust now.",
+		CWD:        "/tmp/other",
+	}
+
+	parts1 := BuildSystemPrompt(opts1)
+	parts2 := BuildSystemPrompt(opts2)
+
+	if parts1.System != parts2.System {
+		t.Errorf("System field changed between calls with different volatile content.\nFirst:\n%s\nSecond:\n%s", parts1.System, parts2.System)
+	}
+}
+
+func TestBuildSystemPrompt_VolatileContainsMemory(t *testing.T) {
+	parts := BuildSystemPrompt(PromptOptions{
+		BasePrompt: "Base.",
+		Memory:     "User prefers Go.",
+	})
+
+	if strings.Contains(parts.System, "User prefers Go.") {
+		t.Error("System should not contain memory content")
+	}
+	if !strings.Contains(parts.VolatileContext, "User prefers Go.") {
+		t.Error("VolatileContext should contain memory content")
+	}
+}
+
+func TestBuildSystemPrompt_VolatileContainsInstructions(t *testing.T) {
+	parts := BuildSystemPrompt(PromptOptions{
+		BasePrompt:   "Base.",
 		Instructions: "Always use gofmt.",
-		ToolNames:    []string{"file_read", "file_write", "bash"},
-		ServerTools:  []string{"web_search", "code_review"},
-		CWD:          "/home/user/project",
-		SessionInfo:  "Session: abc123",
 	})
 
-	// Verify assembly order: base → context → memory → instructions → tools
-	sections := []struct {
-		name    string
-		content string
-	}{
-		{"base", "You are Shannon."},
-		{"context header", "## Context"},
-		{"cwd", "Working directory: /home/user/project"},
-		{"session", "Session: abc123"},
-		{"memory header", "## Memory"},
-		{"memory content", "User prefers Go."},
-		{"instructions header", "## Instructions"},
-		{"instructions content", "Always use gofmt."},
-		{"tools header", "## Available Tools"},
-		{"local tools", "You have these local tools: file_read, file_write, bash."},
-		{"server tools", "You also have server-side tools: web_search, code_review."},
+	if strings.Contains(parts.System, "Always use gofmt.") {
+		t.Error("System should not contain instructions")
 	}
-
-	lastIdx := -1
-	for _, s := range sections {
-		idx := strings.Index(result, s.content)
-		if idx == -1 {
-			t.Errorf("missing %s: %q", s.name, s.content)
-			continue
-		}
-		if idx <= lastIdx {
-			t.Errorf("%s appears before previous section (idx=%d, lastIdx=%d)", s.name, idx, lastIdx)
-		}
-		lastIdx = idx
+	if !strings.Contains(parts.VolatileContext, "Always use gofmt.") {
+		t.Error("VolatileContext should contain instructions")
 	}
 }
 
-func TestBuildSystemPrompt_MinimalOptions(t *testing.T) {
-	result := BuildSystemPrompt(PromptOptions{
-		BasePrompt: "Base only.",
-	})
-
-	if !strings.HasPrefix(result, "Base only.") {
-		t.Errorf("expected base prompt at start, got: %q", result[:20])
-	}
-
-	// No memory or instructions sections
-	if strings.Contains(result, "## Memory") {
-		t.Errorf("unexpected Memory section when memory is empty")
-	}
-	if strings.Contains(result, "## Instructions") {
-		t.Errorf("unexpected Instructions section when instructions is empty")
-	}
-
-	// Tools section should still exist (even if empty)
-	if !strings.Contains(result, "## Available Tools") {
-		t.Errorf("expected Available Tools section")
-	}
-}
-
-func TestBuildSystemPrompt_EmptyMemoryAndInstructions(t *testing.T) {
-	result := BuildSystemPrompt(PromptOptions{
+func TestBuildSystemPrompt_VolatileContainsCWD(t *testing.T) {
+	parts := BuildSystemPrompt(PromptOptions{
 		BasePrompt: "Base.",
-		Memory:     "   ",
-		ToolNames:  []string{"bash"},
+		CWD:        "/tmp/test",
 	})
 
-	if strings.Contains(result, "## Memory") {
-		t.Errorf("unexpected Memory section for whitespace-only memory")
+	if strings.Contains(parts.System, "/tmp/test") {
+		t.Error("System should not contain CWD")
+	}
+	if !strings.Contains(parts.VolatileContext, "/tmp/test") {
+		t.Error("VolatileContext should contain CWD")
 	}
 }
 
-func TestBuildSystemPrompt_OnlyLocalTools(t *testing.T) {
-	result := BuildSystemPrompt(PromptOptions{
+func TestBuildSystemPrompt_VolatileContainsDateTime(t *testing.T) {
+	parts := BuildSystemPrompt(PromptOptions{
 		BasePrompt: "Base.",
-		ToolNames:  []string{"file_read", "grep"},
 	})
 
-	if !strings.Contains(result, "You have these local tools: file_read, grep.") {
-		t.Errorf("expected local tools line, got:\n%s", result)
+	if strings.Contains(parts.System, "Current date:") {
+		t.Error("System should not contain date/time")
 	}
-	if strings.Contains(result, "server-side") {
-		t.Errorf("unexpected server tools line when no server tools")
+	if !strings.Contains(parts.VolatileContext, "Current date:") {
+		t.Error("VolatileContext should contain date/time")
 	}
 }
 
-func TestBuildSystemPrompt_OnlyServerTools(t *testing.T) {
-	result := BuildSystemPrompt(PromptOptions{
+func TestBuildSystemPrompt_VolatileContainsMCPContext(t *testing.T) {
+	parts := BuildSystemPrompt(PromptOptions{
+		BasePrompt: "Base.",
+		MCPContext: "Playwright: connected to Chrome on port 9222",
+	})
+
+	if strings.Contains(parts.System, "Playwright") {
+		t.Error("System should not contain MCP context")
+	}
+	if !strings.Contains(parts.VolatileContext, "Playwright") {
+		t.Error("VolatileContext should contain MCP context")
+	}
+}
+
+func TestBuildSystemPrompt_StableContextContainsStickyFacts(t *testing.T) {
+	parts := BuildSystemPrompt(PromptOptions{
+		BasePrompt:    "Base.",
+		StickyContext: "Customer: Alice. Order #8891.",
+	})
+
+	if strings.Contains(parts.System, "Alice") {
+		t.Error("System should not contain sticky context")
+	}
+	if strings.Contains(parts.VolatileContext, "Alice") {
+		t.Error("VolatileContext should not contain sticky context")
+	}
+	if !strings.Contains(parts.StableContext, "Customer: Alice. Order #8891.") {
+		t.Error("StableContext should contain sticky facts")
+	}
+}
+
+func TestBuildSystemPrompt_EmptyStickyContext(t *testing.T) {
+	parts := BuildSystemPrompt(PromptOptions{
+		BasePrompt: "Base.",
+	})
+
+	if parts.StableContext != "" {
+		t.Errorf("StableContext should be empty, got: %q", parts.StableContext)
+	}
+}
+
+func TestBuildSystemPrompt_SystemContainsToolNames(t *testing.T) {
+	parts := BuildSystemPrompt(PromptOptions{
+		BasePrompt: "Base.",
+		ToolNames:  []string{"file_read", "bash"},
+	})
+
+	if !strings.Contains(parts.System, "file_read") {
+		t.Error("System should contain tool names")
+	}
+}
+
+func TestBuildSystemPrompt_SystemContainsServerToolNames(t *testing.T) {
+	parts := BuildSystemPrompt(PromptOptions{
 		BasePrompt:  "Base.",
 		ServerTools: []string{"web_search"},
 	})
 
-	if strings.Contains(result, "local tools") {
-		t.Errorf("unexpected local tools line when no local tools")
+	if !strings.Contains(parts.System, "web_search") {
+		t.Error("System should contain server tool names")
 	}
-	if !strings.Contains(result, "You also have server-side tools: web_search.") {
-		t.Errorf("expected server tools line, got:\n%s", result)
+}
+
+func TestBuildSystemPrompt_SystemContainsSkills(t *testing.T) {
+	parts := BuildSystemPrompt(PromptOptions{
+		BasePrompt: "Base.",
+		Skills: []*skills.Skill{
+			{Name: "pdf", Description: "Extract text from PDFs"},
+		},
+	})
+
+	if !strings.Contains(parts.System, "## Available Skills") {
+		t.Error("System should contain skills section")
+	}
+	if !strings.Contains(parts.System, "| pdf") {
+		t.Error("System should contain skill entry")
+	}
+}
+
+func TestBuildSystemPrompt_SystemContainsMemoryPersistenceGuidance(t *testing.T) {
+	parts := BuildSystemPrompt(PromptOptions{
+		BasePrompt: "Base.",
+		MemoryDir:  "/home/user/.shannon/agents/test/",
+	})
+
+	if !strings.Contains(parts.System, "## Memory Persistence") {
+		t.Error("System should contain memory persistence guidance")
+	}
+}
+
+func TestBuildSystemPrompt_MinimalOptions(t *testing.T) {
+	parts := BuildSystemPrompt(PromptOptions{
+		BasePrompt: "Base only.",
+	})
+
+	if !strings.HasPrefix(parts.System, "Base only.") {
+		t.Errorf("System should start with base prompt")
+	}
+	if strings.Contains(parts.System, "## Memory") {
+		t.Error("System should not have Memory section")
 	}
 }
 
 func TestBuildSystemPrompt_MemoryTruncation(t *testing.T) {
 	bigMemory := strings.Repeat("m", maxMemoryChars+500)
-	result := BuildSystemPrompt(PromptOptions{
+	parts := BuildSystemPrompt(PromptOptions{
 		BasePrompt: "Base.",
 		Memory:     bigMemory,
 	})
 
-	memIdx := strings.Index(result, "## Memory\n")
-	if memIdx == -1 {
-		t.Fatalf("missing Memory section")
-	}
-	memSection := result[memIdx:]
-
-	if !strings.Contains(memSection, "[truncated]") {
-		t.Errorf("expected truncation marker in memory section")
-	}
-
-	// Memory content should be exactly maxMemoryChars + "[truncated]" suffix
-	memContent := memSection[len("## Memory\n"):]
-	// Find end of memory section (next ## or end)
-	nextSection := strings.Index(memContent, "\n\n##")
-	if nextSection != -1 {
-		memContent = memContent[:nextSection]
-	}
-	// Count the m's
-	mCount := strings.Count(memContent, "m")
-	if mCount != maxMemoryChars {
-		t.Errorf("expected %d chars of memory content, got %d", maxMemoryChars, mCount)
+	if !strings.Contains(parts.VolatileContext, "[truncated]") {
+		t.Error("expected truncation marker in volatile context memory")
 	}
 }
 
 func TestBuildSystemPrompt_InstructionsTruncation(t *testing.T) {
 	bigInstructions := strings.Repeat("i", maxInstructionsChars+1000)
-	result := BuildSystemPrompt(PromptOptions{
+	parts := BuildSystemPrompt(PromptOptions{
 		BasePrompt:   "Base.",
 		Instructions: bigInstructions,
 	})
 
-	if !strings.Contains(result, "[truncated]") {
-		t.Errorf("expected truncation marker in instructions section")
-	}
-}
-
-func TestBuildSystemPrompt_ContextTruncation(t *testing.T) {
-	bigSession := strings.Repeat("s", maxContextChars+500)
-	result := BuildSystemPrompt(PromptOptions{
-		BasePrompt:  "Base.",
-		SessionInfo: bigSession,
-	})
-
-	if !strings.Contains(result, "[truncated]") {
-		t.Errorf("expected truncation marker in context section")
-	}
-}
-
-func TestBuildSystemPrompt_NoContext(t *testing.T) {
-	result := BuildSystemPrompt(PromptOptions{
-		BasePrompt: "Base.",
-	})
-
-	// Context section always present (contains current date)
-	if !strings.Contains(result, "## Context") {
-		t.Errorf("expected Context section with current date")
-	}
-	if !strings.Contains(result, "Current date:") {
-		t.Errorf("expected current date in context")
-	}
-}
-
-func TestBuildSystemPrompt_CWDOnly(t *testing.T) {
-	result := BuildSystemPrompt(PromptOptions{
-		BasePrompt: "Base.",
-		CWD:        "/tmp/test",
-	})
-
-	if !strings.Contains(result, "## Context") {
-		t.Errorf("expected Context section with CWD")
-	}
-	if !strings.Contains(result, "Working directory: /tmp/test") {
-		t.Errorf("expected CWD in context")
-	}
-}
-
-func TestBuildSystemPrompt_SessionInfoOnly(t *testing.T) {
-	result := BuildSystemPrompt(PromptOptions{
-		BasePrompt:  "Base.",
-		SessionInfo: "Resuming session X",
-	})
-
-	if !strings.Contains(result, "Resuming session X") {
-		t.Errorf("expected session info in context")
-	}
-}
-
-func TestBuildSystemPrompt_StickyContext(t *testing.T) {
-	result := BuildSystemPrompt(PromptOptions{
-		BasePrompt:    "Base.",
-		Memory:        "Some memory.",
-		StickyContext: "Customer: Alice. Order #8891. Refund amount: $247.83.",
-	})
-
-	memIdx := strings.Index(result, "## Memory")
-	stickyIdx := strings.Index(result, "## Session Facts")
-	toolsIdx := strings.Index(result, "## Available Tools")
-
-	if stickyIdx == -1 {
-		t.Fatal("missing ## Session Facts section")
-	}
-	if memIdx != -1 && stickyIdx < memIdx {
-		t.Errorf("Session Facts appears before Memory (sticky=%d, mem=%d)", stickyIdx, memIdx)
-	}
-	if stickyIdx > toolsIdx {
-		t.Errorf("Session Facts appears after Available Tools (sticky=%d, tools=%d)", stickyIdx, toolsIdx)
-	}
-	if !strings.Contains(result, "Customer: Alice. Order #8891. Refund amount: $247.83.") {
-		t.Error("StickyContext content not found verbatim in output")
-	}
-}
-
-func TestBuildSystemPrompt_StickyContext_NeverTruncated(t *testing.T) {
-	longFacts := strings.Repeat("fact: x. ", 500) // ~4500 chars, well over any limit
-	result := BuildSystemPrompt(PromptOptions{
-		BasePrompt:    "Base.",
-		StickyContext: longFacts,
-	})
-
-	if strings.Contains(result, "[truncated]") {
-		t.Error("StickyContext must never be truncated")
-	}
-	// TrimSpace is applied before injection, so check trimmed content
-	if !strings.Contains(result, strings.TrimSpace(longFacts)) {
-		t.Error("StickyContext full content must appear verbatim")
-	}
-}
-
-func TestBuildSystemPrompt_NoStickyContext(t *testing.T) {
-	result := BuildSystemPrompt(PromptOptions{
-		BasePrompt: "Base.",
-	})
-	if strings.Contains(result, "## Session Facts") {
-		t.Error("unexpected Session Facts section when StickyContext is empty")
+	if !strings.Contains(parts.VolatileContext, "[truncated]") {
+		t.Error("expected truncation marker in volatile context instructions")
 	}
 }
 
@@ -277,38 +232,5 @@ func TestTruncate(t *testing.T) {
 				t.Errorf("truncate(%q, %d) = %q, want %q", tt.input, tt.max, got, tt.expected)
 			}
 		})
-	}
-}
-
-func TestBuildSystemPrompt_SkillCatalog(t *testing.T) {
-	opts := PromptOptions{
-		BasePrompt: "Base prompt.",
-		Skills: []*skills.Skill{
-			{Name: "pdf", Description: "Extract text from PDFs"},
-			{Name: "mcp-builder", Description: "Guide for creating MCP servers"},
-		},
-	}
-	result := BuildSystemPrompt(opts)
-	if !strings.Contains(result, "## Available Skills") {
-		t.Error("missing Available Skills section")
-	}
-	if !strings.Contains(result, "| pdf") {
-		t.Error("missing pdf skill in catalog")
-	}
-	if !strings.Contains(result, "| mcp-builder") {
-		t.Error("missing mcp-builder skill in catalog")
-	}
-	if !strings.Contains(result, "use_skill") {
-		t.Error("missing use_skill instruction")
-	}
-}
-
-func TestBuildSystemPrompt_NoSkills(t *testing.T) {
-	opts := PromptOptions{
-		BasePrompt: "Base prompt.",
-	}
-	result := BuildSystemPrompt(opts)
-	if strings.Contains(result, "## Available Skills") {
-		t.Error("should not have Available Skills section when no skills")
 	}
 }

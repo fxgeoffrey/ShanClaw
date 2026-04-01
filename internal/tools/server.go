@@ -70,3 +70,6 @@ func (t *ServerTool) Run(ctx context.Context, argsJSON string) (agent.ToolResult
 
 // RequiresApproval returns false — the server enforces its own access control.
 func (t *ServerTool) RequiresApproval() bool { return false }
+
+// ToolSource implements agent.ToolSourcer for deterministic tool ordering.
+func (t *ServerTool) ToolSource() agent.ToolSource { return agent.SourceGateway }

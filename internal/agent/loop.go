@@ -834,9 +834,13 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		usage.Add(resp.Usage)
 		// Log cache metrics for debugging prompt cache effectiveness
 		if resp.Usage.CacheReadTokens > 0 || resp.Usage.CacheCreationTokens > 0 {
+			// Cache hit ratio: cache_read / total_prompt_tokens.
+			// Anthropic: input_tokens excludes cached tokens; they're additive.
+			// Total prompt = input + cache_read + cache_creation.
 			ratio := float64(0)
-			if resp.Usage.InputTokens > 0 {
-				ratio = float64(resp.Usage.CacheReadTokens) / float64(resp.Usage.InputTokens) * 100
+			totalPrompt := resp.Usage.InputTokens + resp.Usage.CacheReadTokens + resp.Usage.CacheCreationTokens
+			if totalPrompt > 0 {
+				ratio = float64(resp.Usage.CacheReadTokens) / float64(totalPrompt) * 100
 			}
 			fmt.Fprintf(os.Stderr, "[agent] cache: read=%d creation=%d input=%d ratio=%.1f%%\n",
 				resp.Usage.CacheReadTokens, resp.Usage.CacheCreationTokens,

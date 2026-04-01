@@ -1,6 +1,6 @@
 # ShanClaw (`shan`)
 
-AI agent runtime powered by Shannon. Daemon mode connects to Shannon Cloud via WebSocket for channel messaging (Slack, LINE, Feishu, Telegram, webhook), with local tool execution and streaming results. Also provides interactive TUI, one-shot CLI, and MCP server. Named agents with independent instructions/memory, local tools for macOS computer control, MCP client for third-party integrations (GitHub, databases, etc.), local scheduled tasks via launchd, and remote research/swarm orchestration via the Gateway API.
+AI agent runtime powered by Shannon. Daemon mode connects to Shannon Cloud via WebSocket for channel messaging (Slack, LINE, Feishu, Telegram, webhook), with local tool execution and streaming results. Also provides interactive TUI, one-shot CLI, and MCP server. Named agents with independent instructions/memory, local tools for macOS computer control, MCP client for third-party integrations (GitHub, databases, etc.), local scheduled tasks via launchd, and remote research/swarm orchestration via the Shannon Gateway API.
 
 ## Installation
 
@@ -356,13 +356,15 @@ Tool call from LLM
 
 ## Permission Engine
 
-5-layer command checking:
+5-layer command resolution:
 
 1. **Hard-block** — built-in constants (rm -rf /, mkfs, dd, curl|sh, etc.), cannot be overridden
 2. **Denied commands** — `permissions.denied_commands` in config
-3. **Compound command splitting** — commands split on `&&`, `||`, `;`, `|`, each sub-command checked independently
-4. **Allowed commands** — `permissions.allowed_commands` in config (glob patterns)
+3. **Allowed commands** — `permissions.allowed_commands` in config (glob patterns)
+4. **Default safe commands** — built-in safe list (ls, git status, go test, make, etc.)
 5. **User approval** — interactive prompt or `-y` flag
+
+Compound commands (`&&`, `||`, `;`, `|`) are split and each sub-command checked independently.
 
 Additional checks:
 - **File paths**: symlink protection (`filepath.EvalSymlinks`), sensitive file patterns (`.env`, `*.pem`, `id_rsa`), allowed_dirs
@@ -684,6 +686,7 @@ agent:
   thinking_budget: 10000           # thinking token budget (default: 10000)
   model: ""                        # specific model override (empty = use model_tier)
   context_window: 128000           # context window in tokens (default: 128000)
+  reasoning_effort: ""             # "low", "medium", "high" (empty = model default)
 
 # Tool settings
 tools:
@@ -729,9 +732,12 @@ Use `/config` in the TUI to see the merged config with sources showing which fil
 AI behavior customization loaded from markdown files:
 
 - `~/.shannon/instructions.md` — global instructions
+- `~/.shannon/rules/*.md` — global rules (sorted alphabetically)
 - `.shannon/instructions.md` — project instructions
+- `.shannon/rules/*.md` — project rules
+- `.shannon/instructions.local.md` — project local override (gitignored)
 
-Both are loaded into the system prompt (token-budgeted, deduplicated).
+All are loaded into the system prompt (token-budgeted, deduplicated). Markdown links to `.md` files in the same directory are auto-expanded inline.
 
 ### Persistent Memory
 

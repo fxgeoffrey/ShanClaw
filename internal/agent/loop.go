@@ -761,7 +761,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		filterOldImages(messages, maxRecentImages)
 
 		// Compress old tool results to save context (keep recent turns verbose)
-		compressOldToolResults(messages, compressAfter, maxResultChars)
+		compressOldToolResults(ctx, messages, compressAfter, maxResultChars, a.client)
 
 		// Progress checkpoint at ~60% of effective limit
 		if !checkpointDone && totalToolCalls > 0 {
@@ -905,7 +905,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 					}
 				}
 
-				compressOldToolResults(messages, 1, 100) // aggressive: keep only 1 recent
+				compressOldToolResults(ctx, messages, 1, 100, nil) // aggressive: no LLM, just truncate
 				summary, sumErr := ctxwin.GenerateSummary(ctx, a.client, messages)
 				compactionSummary := ""
 				if sumErr != nil {
@@ -2143,9 +2143,12 @@ func toolContentLength(tc any) int {
 // compressOldToolResults replaces verbose tool results in old messages
 // with short summaries using a 3-tier strategy:
 //   - Tier 3 (most recent keepRecent): keep full results
-//   - Tier 2 (keepRecent to tier1Threshold from end): truncate to maxChars with head+tail
+//   - Tier 2 (keepRecent to tier1Threshold from end): LLM summary if >2000 chars, else head+tail
 //   - Tier 1 (older than tier1Threshold from end): strip to metadata only
-func compressOldToolResults(messages []client.Message, keepRecent int, maxChars int) {
+//
+// When completer is non-nil, Tier 2 upgrades large results to semantic summaries.
+// When nil, Tier 2 falls back to mechanical head+tail truncation (zero LLM cost).
+func compressOldToolResults(ctx context.Context, messages []client.Message, keepRecent int, maxChars int, completer ctxwin.Completer) {
 	const tier1Threshold = 10
 
 	// Pre-scan: build tool_use_id → name+args map for tier-1 metadata.
@@ -2179,6 +2182,7 @@ func compressOldToolResults(messages []client.Message, keepRecent int, maxChars 
 	}
 
 	// Apply tiered compression
+	mcCount := 0 // micro-compact LLM calls this pass (capped at microCompactMaxPerPass)
 	total := len(toolResultIndices)
 	for i, idx := range toolResultIndices {
 		distFromEnd := total - 1 - i
@@ -2201,18 +2205,79 @@ func compressOldToolResults(messages []client.Message, keepRecent int, maxChars 
 				messages[idx].Content = client.NewTextContent(compressed)
 			}
 		} else {
-			// Tier 2: truncate to maxChars with head+tail
-			if msg.Role == "user" && msg.Content.HasBlocks() {
-				messages[idx].Content = compressToolResultBlocks(msg.Content, maxChars)
-			} else {
-				text := msg.Content.Text()
-				compressed := compressToolResultText(text, maxChars)
-				if compressed != text {
-					messages[idx].Content = client.NewTextContent(compressed)
-				}
-			}
+			// Tier 2: LLM summary for large results, else head+tail truncation.
+			messages[idx].Content = compressTier2(ctx, msg, maxChars, completer, toolCallMap, &mcCount)
 		}
 	}
+}
+
+// compressTier2 applies Tier 2 compression to a single tool result message.
+// For results > microCompactMinChars that haven't been summarized yet and the
+// per-pass cap hasn't been hit, it tries LLM summarization. Otherwise falls
+// back to mechanical head+tail truncation.
+func compressTier2(ctx context.Context, msg client.Message, maxChars int, completer ctxwin.Completer, toolCallMap map[string]toolCallInfo, mcCount *int) client.MessageContent {
+	if msg.Role == "user" && msg.Content.HasBlocks() {
+		return compressTier2Blocks(ctx, msg.Content, maxChars, completer, toolCallMap, mcCount)
+	}
+	// XML text format
+	text := msg.Content.Text()
+	compressed := compressToolResultText(text, maxChars)
+	if compressed != text {
+		return client.NewTextContent(compressed)
+	}
+	return msg.Content
+}
+
+// compressTier2Blocks handles native tool_result blocks for Tier 2.
+func compressTier2Blocks(ctx context.Context, mc client.MessageContent, maxChars int, completer ctxwin.Completer, toolCallMap map[string]toolCallInfo, mcCount *int) client.MessageContent {
+	blocks := mc.Blocks()
+	var newBlocks []client.ContentBlock
+	for _, b := range blocks {
+		if b.Type != "tool_result" {
+			newBlocks = append(newBlocks, b)
+			continue
+		}
+
+		content := client.ToolResultText(b)
+		charLen := len([]rune(content))
+
+		// Try micro-compact if: large enough, not already summarized, under attempt cap, not skipped tool
+		toolName := "unknown"
+		if info, ok := toolCallMap[b.ToolUseID]; ok {
+			toolName = info.Name
+		}
+		if completer != nil && charLen > microCompactMinChars && !isMicroCompacted(content) && *mcCount < microCompactMaxPerPass && !microCompactSkipTools[toolName] {
+			*mcCount++ // count attempts, not just successes — caps latency
+			if summary, ok := microCompactResult(ctx, completer, toolName, content); ok {
+				b.ToolContent = summary
+				newBlocks = append(newBlocks, b)
+				continue
+			}
+			// LLM failed — fall through to mechanical truncation
+		}
+
+		// Fallback: mechanical head+tail truncation
+		switch v := b.ToolContent.(type) {
+		case string:
+			if len([]rune(v)) > maxChars {
+				b.ToolContent = truncateHeadTail(v, maxChars)
+			}
+		case []client.ContentBlock:
+			var newNested []client.ContentBlock
+			for _, nb := range v {
+				if nb.Type == "text" && len([]rune(nb.Text)) > maxChars {
+					nb.Text = truncateHeadTail(nb.Text, maxChars)
+				}
+				if nb.Type == "image" {
+					nb = client.ContentBlock{Type: "text", Text: "[image removed to save context]"}
+				}
+				newNested = append(newNested, nb)
+			}
+			b.ToolContent = newNested
+		}
+		newBlocks = append(newBlocks, b)
+	}
+	return client.NewBlockContent(newBlocks)
 }
 
 // truncateHeadTail truncates content to maxChars using a 75/25 head/tail split.

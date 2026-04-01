@@ -348,7 +348,7 @@ func TestCompressOldToolResults_TieredBehavior(t *testing.T) {
 	}
 
 	// keepRecent=3, maxChars=300
-	compressOldToolResults(messages, 3, 300)
+	compressOldToolResults(context.Background(), messages, 3, 300, nil)
 
 	// Check each tool result message (every odd index starting from 2)
 	for i := 0; i < 15; i++ {
@@ -424,7 +424,7 @@ func TestCompressOldToolResults_EmergencyMode(t *testing.T) {
 		})
 	}
 
-	compressOldToolResults(messages, 1, 100)
+	compressOldToolResults(context.Background(), messages, 1, 100, nil)
 
 	// Only the last tool result should be full
 	for i := 0; i < 5; i++ {

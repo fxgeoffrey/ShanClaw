@@ -536,6 +536,8 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		loop.SetInjectCh(route.injectCh)
 	}
 	loop.SetSessionID(sess.ID)
+	spillCleanup := loop.SpillCleanupFunc()
+	defer spillCleanup()
 
 	result, usage, runErr := loop.Run(ctx, prompt, history)
 	if runErr != nil && !errors.Is(runErr, agent.ErrMaxIterReached) {

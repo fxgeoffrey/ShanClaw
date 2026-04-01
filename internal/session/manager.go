@@ -12,9 +12,10 @@ import (
 // Manager provides session lifecycle operations. It is safe for concurrent use
 // across multiple route entries that share the same sessions directory.
 type Manager struct {
-	mu      sync.Mutex
-	store   *Store
-	current *Session
+	mu         sync.Mutex
+	store      *Store
+	current    *Session
+	onCloseFns []func() // cleanup callbacks invoked on Close
 }
 
 func NewManager(sessionsDir string) *Manager {
@@ -74,7 +75,22 @@ func (m *Manager) Search(query string, limit int) ([]SearchResult, error) {
 	return m.store.Search(query, limit)
 }
 
+// OnClose registers a function to be called when the manager is closed.
+// Used by the agent loop to clean up spill files for the session.
+func (m *Manager) OnClose(fn func()) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onCloseFns = append(m.onCloseFns, fn)
+}
+
 func (m *Manager) Close() error {
+	m.mu.Lock()
+	fns := m.onCloseFns
+	m.onCloseFns = nil
+	m.mu.Unlock()
+	for _, fn := range fns {
+		fn()
+	}
 	return m.store.Close()
 }
 

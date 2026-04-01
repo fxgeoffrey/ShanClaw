@@ -429,6 +429,20 @@ func (a *AgentLoop) SetSessionID(id string) {
 	a.sessionID = id
 }
 
+// SpillCleanupFunc returns a closure that removes disk-spilled tool result
+// files for the current session ID. The session ID is captured at call time,
+// so the closure is safe to register early and invoke later (e.g. on
+// Manager.Close) even if the loop is reused for a different session.
+func (a *AgentLoop) SpillCleanupFunc() func() {
+	sid := a.sessionID
+	dir := a.shannonDir
+	return func() {
+		if sid != "" {
+			cleanupSpills(dir, sid)
+		}
+	}
+}
+
 func (a *AgentLoop) SetEnableStreaming(enable bool) {
 	a.enableStreaming = enable
 }
@@ -1376,6 +1390,17 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			// Cloud deliverables use a higher context limit (60K chars ~15K tokens)
 			// to preserve detail for follow-up turns while still bounding context pressure.
 			cleanResult := stripLineNumbers(result.Content)
+			fullResult := cleanResult // preserved for cloud bypass (spill replaces cleanResult)
+
+			// Disk spill: results > 50K chars are saved to a temp file and
+			// replaced with a short preview so they don't blow up context.
+			if len([]rune(cleanResult)) > spillThreshold {
+				if spilled, spillErr := spillToDisk(a.shannonDir, a.sessionID, generateCallID(), cleanResult); spillErr == nil {
+					cleanResult = spilled
+				}
+				// On spill error, fall through to normal truncation.
+			}
+
 			maxChars := a.resultTrunc
 			if result.CloudResult {
 				maxChars = 60000
@@ -1418,9 +1443,10 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				}
 			}
 
-			// Track cloud result for bypass after Phase 3
+			// Track cloud result for bypass after Phase 3.
+			// Use fullResult (pre-spill) so the user gets the complete deliverable.
 			if result.CloudResult && !result.IsError {
-				cloudResultContent = cleanResult
+				cloudResultContent = fullResult
 			}
 
 			// Reset cloud_delegate lock on failure so it can be retried

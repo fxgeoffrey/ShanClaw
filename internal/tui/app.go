@@ -984,6 +984,8 @@ func (m *Model) runAgentLoop(query string, history []client.Message) tea.Cmd {
 		} else {
 			m.agentLoop.SetSessionID("")
 		}
+		spillCleanup := m.agentLoop.SpillCleanupFunc()
+		defer spillCleanup()
 		result, usage, err := m.agentLoop.Run(ctx, query, history)
 		if result != "" && (err == nil || errors.Is(err, agent.ErrMaxIterReached)) {
 			sess := m.sessions.Current()

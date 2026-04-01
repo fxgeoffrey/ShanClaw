@@ -57,7 +57,7 @@ type approvalRequestMsg struct {
 }
 
 type healthCheckMsg struct {
-	gatewayOK  bool
+	gatewayOK bool
 	updateMsg string
 }
 
@@ -75,8 +75,9 @@ type streamOutputMsg struct {
 
 // outputBlock stores both raw and rendered text so output can be re-rendered on resize.
 type outputBlock struct {
-	raw      string // original markdown (empty for plain text)
-	rendered string // width-specific rendered text
+	raw      string                 // original markdown (empty for plain text)
+	rendered string                 // width-specific rendered text
+	rerender func(width int) string // optional: re-render at new width (e.g. startup header)
 }
 
 // spinnerTickMsg is a slow fallback that advances spinner phrase text
@@ -113,58 +114,58 @@ type toolResultEntry struct {
 }
 
 type Model struct {
-	cfg           *config.Config
-	gateway       *client.GatewayClient
-	sessions      *session.Manager
-	toolRegistry  *agent.ToolRegistry
-	toolCleanup   func()
-	agentLoop     *agent.AgentLoop
-	textarea      textarea.Model
-	output        []outputBlock
-	pendingPrints []string
+	cfg                 *config.Config
+	gateway             *client.GatewayClient
+	sessions            *session.Manager
+	toolRegistry        *agent.ToolRegistry
+	toolCleanup         func()
+	agentLoop           *agent.AgentLoop
+	textarea            textarea.Model
+	output              []outputBlock
+	pendingPrints       []string
 	processingStartTime time.Time
 	spinnerIdx          int
-	spinnerTexts   []string
-	glyphIdx       int
-	colorIdx       int
-	lastSessions      []session.SessionSummary // cached for session picker
-	sessionPickerIdx  int
-	state         state
-	width         int
-	height        int
-	version       string
-	approvalCh    chan bool
-	program       *tea.Program
-	shannonDir    string
-	auditor       *audit.AuditLogger
-	hookRunner    *hooks.HookRunner
-	customCommands       map[string]string // name → prompt content from commands/*.md
-	bypassPermissions    bool
-	agentOverride        *agents.Agent  // per-agent override for re-application after async tool load
-	loadedSkills         []*skills.Skill // skills for current agent (survives loop re-creation)
-	skillsPtr            *[]*skills.Skill // pointer into use_skill tool's skills slice
-	remoteCleanup        func()         // cleanup for MCP connections from async load
-	cancelRun            context.CancelFunc // cancels the running agent loop
-	injectCh             chan string        // injection channel for mid-run messages
+	spinnerTexts        []string
+	glyphIdx            int
+	colorIdx            int
+	lastSessions        []session.SessionSummary // cached for session picker
+	sessionPickerIdx    int
+	state               state
+	width               int
+	height              int
+	version             string
+	approvalCh          chan bool
+	program             *tea.Program
+	shannonDir          string
+	auditor             *audit.AuditLogger
+	hookRunner          *hooks.HookRunner
+	customCommands      map[string]string // name → prompt content from commands/*.md
+	bypassPermissions   bool
+	agentOverride       *agents.Agent      // per-agent override for re-application after async tool load
+	loadedSkills        []*skills.Skill    // skills for current agent (survives loop re-creation)
+	skillsPtr           *[]*skills.Skill   // pointer into use_skill tool's skills slice
+	remoteCleanup       func()             // cleanup for MCP connections from async load
+	cancelRun           context.CancelFunc // cancels the running agent loop
+	injectCh            chan string        // injection channel for mid-run messages
 	// Tool result display
-	pendingToolName   string
-	pendingToolArgs   string
-	lastToolResults    []toolResultEntry
-	toolExpandLevel    int // 0=summary only, 1=compact lines, 2=expanded details
+	pendingToolName string
+	pendingToolArgs string
+	lastToolResults []toolResultEntry
+	toolExpandLevel int // 0=summary only, 1=compact lines, 2=expanded details
 	// Slash command completion menu
 	slashCommands []slashCmd // built once in New(), includes builtins + custom/agent cmds
 	menuVisible   bool
 	menuIndex     int
 	menuItems     []slashCmd
 	// Startup header animation
-	headerFrame    int
-	headerDone     bool
-	headerHealth   *healthCheckMsg      // buffered until animation ends
-	headerSessions []session.SessionSummary // cached at startup for View()
-	headerTipIdx   int                      // stable random tip index
-	headerCWD      string                   // cached working directory
-	markdownCacheMu  sync.RWMutex
-	markdownCache    map[string]string
+	headerFrame     int
+	headerDone      bool
+	headerHealth    *healthCheckMsg          // buffered until animation ends
+	headerSessions  []session.SessionSummary // cached at startup for View()
+	headerTipIdx    int                      // stable random tip index
+	headerCWD       string                   // cached working directory
+	markdownCacheMu sync.RWMutex
+	markdownCache   map[string]string
 }
 
 type slashCmd struct {
@@ -194,7 +195,16 @@ func (m *Model) cwd() string {
 // header to scrollback, and transitions to stateInput.
 func (m *Model) finishHeaderAnimation() tea.Cmd {
 	finalHeader := renderStartupHeader(headerTotalFrames-1, m.width, m.version, m.cfg.ModelTier, m.cfg.Endpoint, m.headerCWD, m.headerSessions, m.headerTipIdx)
-	m.appendOutput(finalHeader)
+	// Capture stable values for the rerender closure so the header can be
+	// re-rendered at a new width on terminal resize.
+	version, tier, ep, cwd := m.version, m.cfg.ModelTier, m.cfg.Endpoint, m.headerCWD
+	sessions, tipIdx := m.headerSessions, m.headerTipIdx
+	m.output = append(m.output, outputBlock{
+		rendered: finalHeader,
+		rerender: func(width int) string {
+			return renderStartupHeader(headerTotalFrames-1, width, version, tier, ep, cwd, sessions, tipIdx)
+		},
+	})
 	m.appendOutput("")
 	m.headerDone = true
 	m.state = stateInput
@@ -211,7 +221,7 @@ func (m *Model) finishHeaderAnimation() tea.Cmd {
 		m.appendOutput("")
 		m.headerHealth = nil
 	}
-	return nil // let the Update wrapper's flushPrints handle draining
+	return m.rerenderOutput()
 }
 
 func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model {
@@ -366,15 +376,15 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 	}
 
 	m := &Model{
-		cfg:          cfg,
-		gateway:      gateway,
-		sessions:     sessMgr,
-		agentLoop:    loop,
-		textarea:     ta,
-		width:        width,
-		version:      version,
-		approvalCh:   make(chan bool, 1),
-		spinnerTexts: settings.SpinnerTexts,
+		cfg:            cfg,
+		gateway:        gateway,
+		sessions:       sessMgr,
+		agentLoop:      loop,
+		textarea:       ta,
+		width:          width,
+		version:        version,
+		approvalCh:     make(chan bool, 1),
+		spinnerTexts:   settings.SpinnerTexts,
 		toolRegistry:   reg,
 		toolCleanup:    toolCleanup,
 		shannonDir:     shannonDir,
@@ -459,8 +469,14 @@ func (m *Model) checkHealth() tea.Cmd {
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	model, cmd := m.update(msg)
+	// Note: when cmd is rerenderOutput (e.g. agentDoneMsg, approvalRequestMsg),
+	// it already drained pendingPrints, so flushPrints returns nil here.
 	if flush := m.flushPrints(); flush != nil {
-		cmd = tea.Batch(cmd, flush)
+		if cmd != nil {
+			cmd = tea.Sequence(flush, cmd)
+		} else {
+			cmd = flush
+		}
 	}
 	return model, cmd
 }
@@ -509,7 +525,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cancelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 				m.appendOutput(cancelStyle.Render("  [Cancelled]"))
 				m.state = stateInput
-				return m, nil
+				return m, m.rerenderOutput()
 			}
 			if m.menuVisible {
 				m.menuVisible = false
@@ -657,6 +673,12 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil && !errors.Is(msg.err, context.Canceled) {
 			m.appendOutput("Error: " + msg.err.Error())
 		}
+		// Display the assistant response (rendered here instead of OnText to
+		// avoid a race where the Println Cmd arrives after state has changed).
+		if msg.result != "" && (msg.err == nil || errors.Is(msg.err, agent.ErrMaxIterReached)) {
+			m.appendMarkdownOutput(msg.result, m.renderMarkdownCached(msg.result, m.width))
+			m.appendOutput("")
+		}
 		// Tool count summary (individual tool lines already shown during execution)
 		if len(m.lastToolResults) > 0 {
 			m.toolExpandLevel = 0
@@ -677,7 +699,10 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.sessions.Save()
-		return m, nil
+		// Full clear-and-repaint so the response, usage line, and input bar
+		// are all positioned correctly — incremental Println can mis-position
+		// lines when the view height changes between processing and input.
+		return m, m.rerenderOutput()
 
 	case approvalRequestMsg:
 		m.state = stateApproval
@@ -685,7 +710,9 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		warnIcon := lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("?")
 		keyArg := toolKeyArg(msg.tool, msg.args)
 		m.appendOutput(dimStyle.Render(fmt.Sprintf("⏵ %s(%s)  %s  Allow?", msg.tool, keyArg, warnIcon)))
-		return m, nil
+		// Full repaint on state transition to avoid cursor mis-positioning
+		// (same race as agentDoneMsg — view changes before pending Println arrives).
+		return m, m.rerenderOutput()
 
 	case serverToolsLoadedMsg:
 		if msg.cleanup != nil {
@@ -1058,9 +1085,6 @@ func (m *Model) adjustTextareaHeight() {
 }
 
 // flushPrints returns a Cmd that prints all pending output above the view.
-// Println sends to an unbuffered channel (p.msgs) so it MUST NOT be called
-// synchronously inside Update — that deadlocks. Running it as a Cmd
-// (in a goroutine) avoids the deadlock.
 func (m *Model) flushPrints() tea.Cmd {
 	if len(m.pendingPrints) == 0 {
 		return nil
@@ -1068,46 +1092,41 @@ func (m *Model) flushPrints() tea.Cmd {
 	texts := make([]string, len(m.pendingPrints))
 	copy(texts, m.pendingPrints)
 	m.pendingPrints = m.pendingPrints[:0]
-	return func() tea.Msg {
-		for _, text := range texts {
-			m.program.Println(text)
-		}
-		return nil
-	}
+	return tea.Println(strings.Join(texts, "\n"))
 }
 
 // rerenderOutput re-renders all output blocks at the current width and reprints them.
-// Used when the terminal is resized. Returns a tea.Cmd that clears the screen and
-// reprints all output via program.Println.
+// Used when the terminal is resized and when handing off from the startup
+// animation to scrollback-backed output.
 func (m *Model) rerenderOutput() tea.Cmd {
 	width := m.width
 	blocks := make([]outputBlock, len(m.output))
 	copy(blocks, m.output)
 
-	// Re-render markdown blocks at new width (always, so future output uses new width).
+	// Re-render blocks at new width (always, so future output uses new width).
 	for i, b := range blocks {
-		if b.raw != "" {
+		if b.rerender != nil {
+			blocks[i].rendered = b.rerender(width)
+			m.output[i].rendered = blocks[i].rendered
+		} else if b.raw != "" {
 			blocks[i].rendered = m.renderMarkdownCached(b.raw, width)
 			m.output[i].rendered = blocks[i].rendered
 		}
 	}
 
-	// During active streaming new blocks are being appended continuously.
-	// Clearing and reprinting a snapshot would interleave badly with streamed output,
-	// causing duplicated or missing lines. Skip the repaint; the new width will take
-	// effect for all subsequent output naturally.
-	if m.state == stateProcessing {
-		return nil
+	lines := make([]string, 0, len(blocks))
+	for _, b := range blocks {
+		lines = append(lines, b.rendered)
 	}
 
-	return func() tea.Msg {
-		// Clear screen: move cursor to top-left + clear entire screen
-		m.program.Println("\033[2J\033[H")
-		for _, b := range blocks {
-			m.program.Println(b.rendered)
-		}
-		return nil
-	}
+	// The full repaint includes the latest output snapshot, so suppress any
+	// queued incremental prints from this update to avoid duplicate lines.
+	m.pendingPrints = m.pendingPrints[:0]
+
+	return tea.Sequence(
+		tea.ClearScreen,
+		tea.Println(strings.Join(lines, "\n")),
+	)
 }
 
 func markdownCacheKey(text string, width int) string {
@@ -1211,7 +1230,6 @@ func (m *Model) sendMarkdownOutput(raw, rendered string) {
 
 // sendStatus sends an ephemeral status pill from a goroutine. It replaces the
 // previous status (like the desktop frontend's status pills).
-
 
 func (m *Model) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 	parts := strings.Fields(input)
@@ -1572,7 +1590,7 @@ func (m *Model) runRemote(query string, ctx map[string]any, strategy string) tea
 		}
 
 		if finalResult != "" {
-				m.sendMarkdownOutput(finalResult, m.renderMarkdownCached(finalResult, m.width))
+			// Response display is handled by agentDoneMsg to avoid races.
 			sess := m.sessions.Current()
 			workflowUserTime := time.Now()
 			sess.Messages = append(sess.Messages,
@@ -1646,7 +1664,6 @@ func (h *tuiEventHandler) OnToolCall(name string, args string) {
 	}
 }
 
-
 func (h *tuiEventHandler) OnToolResult(name string, args string, result agent.ToolResult, elapsed time.Duration) {
 	if h.model.program != nil {
 		h.model.program.Send(toolResultMsg{
@@ -1660,7 +1677,10 @@ func (h *tuiEventHandler) OnToolResult(name string, args string, result agent.To
 }
 
 func (h *tuiEventHandler) OnText(text string) {
-	h.model.sendMarkdownOutput(text, h.model.renderMarkdownCached(text, h.model.width))
+	// Response display is handled by agentDoneMsg to avoid a race where the
+	// Println Cmd from flushPrints arrives after agentDoneMsg has already
+	// switched the view, causing the first line to render mid-screen.
+	// The text is available as agentDoneMsg.result.
 }
 
 func (h *tuiEventHandler) OnStreamDelta(delta string) {
@@ -1773,7 +1793,6 @@ func (m *Model) updateMenu() {
 		m.menuIndex = 0
 	}
 }
-
 
 const dropListSize = 5
 

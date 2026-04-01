@@ -662,6 +662,8 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		compactionSummary    string // cached summary from compaction
 		compactionApplied    bool   // true once messages have been shaped
 		summaryFailures      int    // consecutive summary failures; backs off after 3
+		toolSearchFired      bool
+		latestUserText       = userMessage // most recent real user request (not tool results or injected nudges)
 		cloudNudgeFired      bool
 		cloudDelegateClaimed bool   // set on first cloud_delegate attempt; blocks subsequent calls unless it fails
 		cloudResultContent   string // non-empty when a cloud deliverable should bypass LLM summarization
@@ -709,6 +711,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			}
 			if len(injected) > 0 {
 				combined := strings.Join(injected, "\n\n")
+				latestUserText = combined // track for deferred-tool continuation nudge
 				messages = append(messages, client.Message{
 					Role:    "user",
 					Content: client.NewTextContent("[New message from user]\n" + combined),
@@ -995,6 +998,26 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				continue
 			}
 
+			// Post-tool_search continuation nudge: tool_search loaded schemas
+			// but the model stopped with text instead of calling the loaded tools.
+			// Inject a nudge with the most recent user message and loop.
+			// Uses the latest user message (not the original run input) so that
+			// daemon mid-run injections are respected.
+			if toolSearchFired {
+				toolSearchFired = false
+				messages = append(messages, client.Message{
+					Role:    "assistant",
+					Content: client.NewTextContent(resp.OutputText),
+				})
+				stampMessage()
+				messages = append(messages, client.Message{
+					Role:    "user",
+					Content: client.NewTextContent("[system] The deferred tool schemas are now loaded. Here is the current request — continue working on it now using the loaded tools:\n\n" + latestUserText),
+				})
+				markInjected()
+				continue
+			}
+
 			// Only render text for the final response — intermediate text
 			// from checkpoint/hallucination paths must not leak to the user.
 			// If earlier iterations were truncated, prepend the accumulated text.
@@ -1213,6 +1236,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		}
 
 		// Deferred mode: check if tool_search loaded new tools, rebuild schemas.
+		toolSearchFired = false
 		if deferredMode {
 			for _, ac := range approved {
 				if ac.fc.Name == "tool_search" {
@@ -1228,6 +1252,9 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 							}
 						}
 						toolSchemas = rebuildSchemas(effTools, baseSchemas, loadedDeferred)
+						if len(names) > 0 {
+							toolSearchFired = true
+						}
 					}
 				}
 			}

@@ -25,7 +25,7 @@ func newToolSearchTool(reg *ToolRegistry, deferred map[string]bool) *toolSearchT
 func (t *toolSearchTool) Info() ToolInfo {
 	return ToolInfo{
 		Name:        "tool_search",
-		Description: "Load the full schema for a deferred tool so you can call it. Use \"select:name1,name2\" for exact lookup or a keyword to search by name/description.",
+		Description: "Load deferred tool schemas so you can call them in this same request. After calling tool_search, immediately continue the task using the loaded tools — do not stop or ask the user to proceed. Use \"select:name1,name2\" for exact lookup or a keyword to search by name/description.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -86,6 +86,7 @@ func (t *toolSearchTool) Run(_ context.Context, argsJSON string) (ToolResult, er
 	if len(matched) == 0 {
 		sb.WriteString("\nNo matching deferred tools found.")
 	} else {
+		sb.WriteString("\nSchemas loaded. Call these tools now to continue the user's task — do not stop or describe what was loaded.")
 		schemas := t.registry.FullSchemas(matched)
 		for i, s := range schemas {
 			schemaJSON, _ := json.MarshalIndent(s, "", "  ")

@@ -106,8 +106,12 @@ func buildStaticSystem(opts PromptOptions) string {
 	// 3b. Deferred Tools (only in deferred mode)
 	if len(opts.DeferredTools) > 0 {
 		sb.WriteString("\n\n## Deferred Tools\n\n")
-		sb.WriteString("The following tools are available via tool_search. Call tool_search with\n")
-		sb.WriteString("\"select:<name>\" to load the full schema before using them.\n\n")
+		sb.WriteString("The following tools are available via tool_search. When you need one,\n")
+		sb.WriteString("call tool_search to load its schema, then IMMEDIATELY call the loaded\n")
+		sb.WriteString("tool in your next response. NEVER stop to describe what you loaded or\n")
+		sb.WriteString("ask the user what to do after loading — the user's request is already\n")
+		sb.WriteString("stated above. Treat tool_search as a transparent preparation step,\n")
+		sb.WriteString("not as an action to report on.\n\n")
 		for _, dt := range opts.DeferredTools {
 			sb.WriteString(fmt.Sprintf("- %s: %s\n", dt.Name, dt.Description))
 		}

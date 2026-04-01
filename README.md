@@ -1,6 +1,6 @@
 # ShanClaw (`shan`)
 
-Interactive AI agent CLI powered by Shannon. Named agents with independent instructions/memory, local tools for computer control, MCP client for third-party integrations (GitHub, Slack, databases, etc.), daemon mode for channel messaging (Slack, Telegram, LINE), local scheduled tasks via launchd, and remote research/swarm orchestration via the Gateway API. macOS focused.
+AI agent runtime powered by Shannon. Daemon mode connects to Shannon Cloud via WebSocket for channel messaging (Slack, LINE, Feishu, Telegram, webhook), with local tool execution and streaming results. Also provides interactive TUI, one-shot CLI, and MCP server. Named agents with independent instructions/memory, local tools for macOS computer control, MCP client for third-party integrations (GitHub, databases, etc.), local scheduled tasks via launchd, and remote research/swarm orchestration via the Gateway API.
 
 ## Installation
 
@@ -26,7 +26,7 @@ Requires **Go 1.25+**:
 
 ```bash
 git clone https://github.com/Kocoro-lab/ShanClaw.git
-cd shan
+cd ShanClaw
 go install .
 ```
 
@@ -295,6 +295,7 @@ Local tools executed on your macOS machine:
 | `system_info` | No | OS, arch, hostname, CPU, memory, disk |
 | `process` | Auto for list/ports | Process management: list, ports, kill |
 | `http` | Network allowlist | HTTP client, localhost auto-approved |
+| `think` | No | Scratchpad for reasoning — not sent to tools, stays in context |
 
 ### macOS Control
 
@@ -308,6 +309,7 @@ Local tools executed on your macOS machine:
 | `screenshot` | Yes | Screen capture (fullscreen/window/region). Visual fallback when accessibility tree is insufficient |
 | `computer` | Yes | Mouse/keyboard via CGEvent (CJK/emoji safe). Click, type, hotkey, move, screenshot. Fallback when accessibility refs don't work or for drag operations. No Python dependency. |
 | `browser` | Yes | Browser automation via Playwright MCP (preferred), pinchtab, or chromedp fallback. When Playwright MCP is configured, the legacy browser tool is auto-disabled. Isolated profile for web scraping; pinchtab connects to user's real browser for authenticated sessions. |
+| `ghostty` | Yes | Ghostty terminal control: open tabs, splits, send input. Requires [Ghostty](https://ghostty.org) >= 1.3.0. |
 
 ### Scheduling
 
@@ -323,6 +325,14 @@ Local tools executed on your macOS machine:
 | Tool | Approval | Description |
 |------|----------|-------------|
 | `session_search` | No | FTS5 keyword search across past session messages |
+
+### Memory, Skills & Cloud
+
+| Tool | Approval | Description |
+|------|----------|-------------|
+| `memory_append` | No | Append entries to agent MEMORY.md (flock-protected) |
+| `use_skill` | No | Activate a skill by name — returns full SKILL.md body |
+| `cloud_delegate` | Yes | Delegate tasks to Shannon Cloud for remote research/swarm execution |
 
 ### Tool Approval Flow
 

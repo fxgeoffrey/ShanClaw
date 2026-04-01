@@ -1,15 +1,15 @@
-# Shan CLI — Project Guide
+# ShanClaw — Project Guide
 
 ## What This Is
 
-Go CLI tool (`shan`) — the command-line interface to the Shannon AI platform. Interactive TUI, one-shot mode, daemon mode for channel messaging, and local scheduled tasks.
+Go CLI tool (`shan`) — the runtime for Shannon AI agents. Production stack is **daemon + ShanClaw Desktop + Shannon Cloud**: the daemon connects to Cloud via WebSocket, receives channel messages (Slack, LINE, Feishu, Telegram, webhook), runs the agent loop locally with full tool access, and streams results back. Also supports interactive TUI, one-shot CLI, MCP server, and local scheduled tasks.
 
 ## Tech Stack
 
 - **Go 1.25.7** — `go.mod` is source of truth
 - **Cobra** — CLI framework (`cmd/root.go`, `cmd/daemon.go`, `cmd/schedule.go`)
+- **gorilla/websocket** — daemon WebSocket client (primary production path)
 - **Bubbletea v1.3.10 + Bubbles v1.0.0** — TUI (`internal/tui/app.go`)
-- **gorilla/websocket** — daemon WebSocket client
 - **adhocore/gronx** — cron expression validation
 - **modernc.org/sqlite** — pure-Go SQLite for session FTS5 search index
 - **chromedp** — browser automation (isolated Chrome profile)
@@ -26,9 +26,19 @@ cmd/
   update.go            # /update command
 
 internal/
+  daemon/                # ── PRIMARY PRODUCTION PATH ──
+    server.go          # HTTP API server (agent CRUD, config, instructions, reload)
+    runner.go          # Agent run orchestration, session routing, output format profiles
+    client.go          # WebSocket client with reconnect, bounded concurrency
+    router.go          # SessionKey, SessionCache, route locking
+    approval.go        # ApprovalBroker: interactive tool approval over WS
+    types.go           # Shared daemon types (incl. approval_request/response)
   agent/
     loop.go            # AgentLoop.Run() — core agentic loop, SwitchAgent()
     tools.go           # Tool interface, ToolRegistry, FilterByAllow/Deny, Schemas()
+    partition.go       # partitionToolCalls (read-only batching), executeBatches
+    spill.go           # Disk spill for large tool results (>50K → temp file + preview)
+    deferred.go        # Deferred tool loading (tool_search schema merging)
     loopdetect.go      # 9 stuck-loop detectors
     readtracker.go     # read-before-edit enforcement
     approval_cache.go  # per-turn approval caching
@@ -46,15 +56,8 @@ internal/
     setup.go           # --setup wizard
   context/
     window.go          # EstimateTokens, ShouldCompact, ShapeHistory
-    summarize.go       # GenerateSummary with Completer interface
+    summarize.go       # GenerateSummary (two-phase: analysis scratchpad → summary)
     persist.go         # PersistLearnings: write-before-compact memory extraction
-  daemon/
-    approval.go        # ApprovalBroker: interactive tool approval over WS
-    client.go          # WebSocket client with reconnect, bounded concurrency
-    router.go          # SessionKey, SessionCache
-    server.go          # HTTP API server (agent CRUD, config, instructions, reload)
-    runner.go          # Agent run orchestration for daemon
-    types.go           # Shared daemon types (incl. approval_request/response)
   schedule/
     schedule.go        # Schedule CRUD, atomic writes, file locking, validation
     launchd_darwin.go  # plist generation, launchctl (darwin only)
@@ -68,10 +71,10 @@ internal/
   instructions/
     loader.go          # LoadInstructions, LoadMemory, LoadCustomCommands
   prompt/
-    builder.go         # BuildSystemPrompt — 7 layers (includes skill catalog), token-budgeted
+    builder.go         # BuildSystemPrompt — PromptParts (static/stable/volatile), output format profiles
   session/
     store.go           # Session JSON persistence + SQLite index integration
-    manager.go         # NewSession, Resume, Save, List, Search, Close
+    manager.go         # NewSession, Resume, Save, List, Search, Close, OnClose callbacks
     index.go           # SQLite FTS5 search index (sessions.db)
     title.go           # Session title generation helper
   mcp/
@@ -83,10 +86,11 @@ internal/
     validate.go        # ValidateSkillName (Anthropic spec regex)
   tools/
     register.go        # RegisterLocalTools, RegisterAll, CompleteRegistration, ApplyToolFilter
-    # 23 tool files: file_read, file_write, file_edit, glob, grep, bash,
+    # Tool files: file_read, file_write, file_edit, glob, grep, bash,
     # directory_list, think, http, system_info, clipboard, notify, process,
-    # applescript, accessibility, browser, screenshot, computer,
-    # cloud_delegate, imaging, pinchtab, safe_path, skill (use_skill)
+    # applescript, accessibility, ghostty, browser, screenshot, computer,
+    # wait (wait_for), cloud_delegate, imaging (helper), pinchtab (legacy),
+    # safe_path, skill (use_skill), memory_append
     schedule.go        # schedule_create/list/update/remove tools
     session_search.go  # session_search tool (FTS5 keyword search)
     mcp_tool.go        # MCPTool adapter
@@ -111,6 +115,13 @@ hard-block constants → denied_commands → shell AST parsing → allowed_comma
 ```
 Unknown tools → denied by default (fail-safe).
 
+### Daemon Architecture (Production Path)
+- Daemon connects to Shannon Cloud via WebSocket, receives channel messages, runs agent loop locally.
+- **Session routing**: `SessionCache` with per-route locking. Route key = `agent:<name>`, `session:<id>`, or `default:<source>:<channel>`. Web/webhook/cron/schedule sources bypass routing (always fresh). Routed managers are long-lived; ephemeral managers (heartbeat, bypass) get `defer Close()`.
+- **Output format profiles**: `outputFormatForSource()` maps `req.Source` to `"markdown"` (default) or `"plain"` (cloud-distributed channels: slack, line, feishu, lark, telegram, webhook). Cloud owns final channel rendering — ShanClaw outputs neutral text for those paths.
+- **Tool status events**: `OnToolCall("running")` fires at actual execution start (inside `executeBatches`, after semaphore acquire), not during permission checks.
+- **Disk spill**: Tool results >50K chars written to `~/.shannon/tmp/`, replaced with 2K preview + file path in context. Cleaned up per-run (daemon/TUI) or on manager close (one-shot).
+
 ### Daemon Approval Protocol
 - **Interactive mode** (default): Tools requiring approval send `approval_request` over WS → Cloud relays to Ptfrog → user responds → `approval_response` relayed back. Agent loop blocks until response.
 - **Auto-approve mode** (`daemon.auto_approve: true` or per-agent `auto_approve: true`): Skips WS round-trip, permission engine still enforced.
@@ -130,6 +141,7 @@ Scalars override, lists merge+dedup, structs field-level merge. MCP server env v
 - Global skills: `~/.shannon/skills/<skill-name>/SKILL.md` (shared across agents)
 - Sessions: `~/.shannon/sessions/` (default) or `~/.shannon/agents/<name>/sessions/` (per-agent)
 - Session index: `<sessions-dir>/sessions.db` (SQLite FTS5, auto-rebuilt from JSON if deleted)
+- Spill files: `~/.shannon/tmp/tool_result_<session>_<call_id>.txt` (cleaned up per-run in daemon/TUI, on manager close in one-shot)
 - Schedule index: `~/.shannon/schedules.json`
 - Schedule plists: `~/Library/LaunchAgents/com.shannon.schedule.<id>.plist`
 - Audit log: `~/.shannon/logs/audit.log`
@@ -141,6 +153,14 @@ Scalars override, lists merge+dedup, structs field-level merge. MCP server env v
 ### Build Tags
 `internal/schedule/launchd_darwin.go` uses `//go:build darwin`. `launchd_stub.go` provides no-op stubs for non-darwin. Tests that touch launchctl go in `_darwin_test.go`.
 
+### Context Management
+- **Proactive compaction**: `PersistLearnings` → `GenerateSummary` (two-phase: `<analysis>` scratchpad → `<summary>`) → `ShapeHistory` at 85% context window.
+- **Reactive compaction**: On context-length error, emergency compress + single retry. `reactiveCompacted` flag prevents loops.
+- **Tiered result compression**: Tier 1 (>10 msg old) → metadata only. Tier 2 (3–10) → head+tail truncation. Tier 3 (0–2) → full.
+- **Memory staleness**: `annotateStaleness()` appends `[N days ago]` to memory headings.
+- **Deferred tool loading**: When tool count > 30, MCP/gateway tools sent as name+description only. Model calls `tool_search` to load full schemas on demand.
+- **System reminders**: Short `<system-reminder>` hints appended to `file_read`, `file_write`, `file_edit`, `bash` results. Reinforces key instructions in long sessions. Skipped for `cloud_delegate` (user-visible output).
+
 ### Anti-Hallucination
 XML `<tool_exec>` delimiters in conversation context with random hex call_id. Preamble text suppressed when response has tool calls. Fabricated tool calls detected and stripped.
 
@@ -148,9 +168,11 @@ XML `<tool_exec>` delimiters in conversation context with random hex call_id. Pr
 
 ```bash
 go test ./...                              # all tests
-go test ./internal/agents/ -v              # agent loader tests
+go test ./internal/daemon/ -v              # daemon: WS client, router, E2E routing
+go test ./internal/agent/ -v               # agent loop, partitioning, spill, deferred
+go test ./internal/agents/ -v              # agent loader
 go test ./internal/schedule/ -v            # schedule CRUD + plist tests
-go test ./internal/daemon/ -v              # WS client + router tests
+go test ./test/ -v                         # E2E: vision pipeline, persist learnings
 go build ./...                             # build check
 ```
 
@@ -164,13 +186,15 @@ Schedule tests use `t.TempDir()` as `plistDir` — they never write to real `~/L
 - Release: `git tag -a vX.Y.Z` → `git push origin vX.Y.Z` → CI builds + publishes
 - `docs/plans/` is gitignored — never commit plan files
 
-## 26 Local Tools
+## 28 Local Tools
 
 **File ops:** file_read, file_write, file_edit, glob, grep, directory_list
 **Shell/system:** bash, system_info, process, http, think
-**macOS GUI:** accessibility (primary), applescript, screenshot, computer, clipboard, notify, browser
+**macOS GUI:** accessibility (primary), applescript, screenshot, computer, clipboard, notify, browser, wait_for, ghostty
 **Schedule:** schedule_create, schedule_list, schedule_update, schedule_remove
 **Session:** session_search
 **Memory:** memory_append (flock-protected append to MEMORY.md)
 **Skills:** use_skill
 **Cloud:** cloud_delegate
+
+**Conditional:** tool_search (added in deferred mode when tool count > 30 — loads full schemas for MCP/gateway tools on demand. Lives in `internal/agent/deferred.go`, not `tools/`.)

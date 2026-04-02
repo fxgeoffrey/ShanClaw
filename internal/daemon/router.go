@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Kocoro-lab/ShanClaw/internal/agent"
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
 	"github.com/Kocoro-lab/ShanClaw/internal/session"
 )
@@ -24,7 +25,8 @@ type routeEntry struct {
 	done          chan struct{}
 	sessionID     string
 	lastAccess    time.Time
-	injectCh      chan string // buffered channel for mid-run message injection
+	injectCh      chan agent.InjectedMessage // buffered channel for mid-run follow-up injection
+	activeCWD     string
 	evicting      bool
 	manager       *session.Manager
 }
@@ -225,36 +227,92 @@ const (
 	InjectNoActiveRun InjectResult = iota // no in-flight run; caller should start one
 	InjectOK                              // message delivered to the running loop
 	InjectQueueFull                       // active run exists but queue is saturated
+	InjectBusy                            // run exists but is not yet ready to receive injected messages
+	InjectCWDConflict                     // active run uses a different immutable cwd
 )
 
 // InjectMessage sends a message into a running agent loop for this route.
-// Returns InjectOK on success, InjectNoActiveRun if no run is in-flight
-// (caller should start a new run), or InjectQueueFull if the channel is
-// saturated (caller should NOT start a new run — the active run still owns
-// this route).
-func (sc *SessionCache) InjectMessage(key, text string) InjectResult {
+// Returns:
+//   - InjectOK when the follow-up was delivered to the active run
+//   - InjectNoActiveRun when no run is in-flight (caller may start a new run)
+//   - InjectQueueFull when the active run owns the route but its queue is saturated
+//   - InjectBusy when the active run exists but is not yet ready to receive injections
+//   - InjectCWDConflict when the follow-up tries to change cwd mid-run
+func (sc *SessionCache) InjectMessage(key string, msg agent.InjectedMessage) InjectResult {
 	if key == "" {
 		return InjectNoActiveRun
 	}
 	sc.mu.Lock()
 	entry, ok := sc.routes[key]
-	sc.mu.Unlock()
 	if !ok || entry == nil {
+		sc.mu.Unlock()
 		return InjectNoActiveRun
 	}
-	entry.mu.Lock()
 	ch := entry.injectCh
 	done := entry.done
-	entry.mu.Unlock()
-	if ch == nil || done == nil {
+	activeCWD := entry.activeCWD
+	sc.mu.Unlock()
+	if done == nil {
 		return InjectNoActiveRun
 	}
+	if ch == nil {
+		return InjectBusy
+	}
+	requestCWD := normalizeCWDForCompare(msg.CWD)
+	if requestCWD != "" && requestCWD != normalizeCWDForCompare(activeCWD) {
+		return InjectCWDConflict
+	}
 	select {
-	case ch <- text:
+	case ch <- msg:
 		return InjectOK
 	default:
 		return InjectQueueFull
 	}
+}
+
+// normalizeCWDForCompare cleans and symlink-resolves a CWD path for comparison.
+// This prevents false cwd_conflict on macOS where /tmp → /private/tmp.
+func normalizeCWDForCompare(cwd string) string {
+	cwd = filepath.Clean(strings.TrimSpace(cwd))
+	if cwd == "." || cwd == "" {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
+		return resolved
+	}
+	return cwd
+}
+
+// SetRouteRunState updates the externally visible run state for a route.
+// This is used by injection/cancel paths that must not block on entry.mu while
+// the active run holds it for the duration of execution.
+func (sc *SessionCache) SetRouteRunState(key string, done chan struct{}, injectCh chan agent.InjectedMessage, activeCWD string) {
+	if key == "" {
+		return
+	}
+	sc.mu.Lock()
+	entry, ok := sc.routes[key]
+	if ok && entry != nil {
+		entry.done = done
+		entry.injectCh = injectCh
+		entry.activeCWD = activeCWD
+	}
+	sc.mu.Unlock()
+}
+
+// ClearRouteRunState removes the externally visible in-flight run state for a route.
+func (sc *SessionCache) ClearRouteRunState(key string) {
+	if key == "" {
+		return
+	}
+	sc.mu.Lock()
+	entry, ok := sc.routes[key]
+	if ok && entry != nil {
+		entry.done = nil
+		entry.injectCh = nil
+		entry.activeCWD = ""
+	}
+	sc.mu.Unlock()
 }
 
 // CancelRoute cancels the in-flight run for a route without waiting.

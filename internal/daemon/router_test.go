@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/Kocoro-lab/ShanClaw/internal/agent"
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
 	"github.com/Kocoro-lab/ShanClaw/internal/session"
 )
@@ -183,7 +184,7 @@ func TestSessionCache_InjectMessage_ActiveRoute(t *testing.T) {
 
 	// Directly insert a route entry to simulate an in-flight run
 	// without holding entry.mu (mirrors the state during RunAgent execution).
-	injectCh := make(chan string, 5)
+	injectCh := make(chan agent.InjectedMessage, 5)
 	sc.mu.Lock()
 	sc.routes["agent:test"] = &routeEntry{
 		injectCh: injectCh,
@@ -191,7 +192,7 @@ func TestSessionCache_InjectMessage_ActiveRoute(t *testing.T) {
 	}
 	sc.mu.Unlock()
 
-	result := sc.InjectMessage("agent:test", "new instruction")
+	result := sc.InjectMessage("agent:test", agent.InjectedMessage{Text: "new instruction"})
 	if result != InjectOK {
 		t.Fatalf("expected InjectOK, got %d", result)
 	}
@@ -199,8 +200,8 @@ func TestSessionCache_InjectMessage_ActiveRoute(t *testing.T) {
 	// Verify message is in channel
 	select {
 	case msg := <-injectCh:
-		if msg != "new instruction" {
-			t.Fatalf("expected 'new instruction', got %q", msg)
+		if msg.Text != "new instruction" {
+			t.Fatalf("expected 'new instruction', got %q", msg.Text)
 		}
 	default:
 		t.Fatal("expected message in channel")
@@ -211,7 +212,7 @@ func TestSessionCache_InjectMessage_NoActiveRoute(t *testing.T) {
 	sc := NewSessionCache(t.TempDir())
 	defer sc.CloseAll()
 
-	result := sc.InjectMessage("agent:nonexistent", "hello")
+	result := sc.InjectMessage("agent:nonexistent", agent.InjectedMessage{Text: "hello"})
 	if result != InjectNoActiveRun {
 		t.Fatalf("expected InjectNoActiveRun, got %d", result)
 	}
@@ -221,7 +222,7 @@ func TestSessionCache_InjectMessage_NilChannel(t *testing.T) {
 	sc := NewSessionCache(t.TempDir())
 	defer sc.CloseAll()
 
-	// Route exists but injectCh is nil (no active run)
+	// Route exists with an active run, but injection is not ready yet.
 	sc.mu.Lock()
 	sc.routes["agent:test"] = &routeEntry{
 		done: make(chan struct{}),
@@ -229,9 +230,9 @@ func TestSessionCache_InjectMessage_NilChannel(t *testing.T) {
 	}
 	sc.mu.Unlock()
 
-	result := sc.InjectMessage("agent:test", "hello")
-	if result != InjectNoActiveRun {
-		t.Fatalf("expected InjectNoActiveRun, got %d", result)
+	result := sc.InjectMessage("agent:test", agent.InjectedMessage{Text: "hello"})
+	if result != InjectBusy {
+		t.Fatalf("expected InjectBusy, got %d", result)
 	}
 }
 
@@ -239,7 +240,7 @@ func TestSessionCache_InjectMessage_EmptyKey(t *testing.T) {
 	sc := NewSessionCache(t.TempDir())
 	defer sc.CloseAll()
 
-	result := sc.InjectMessage("", "hello")
+	result := sc.InjectMessage("", agent.InjectedMessage{Text: "hello"})
 	if result != InjectNoActiveRun {
 		t.Fatalf("expected InjectNoActiveRun, got %d", result)
 	}
@@ -250,7 +251,7 @@ func TestSessionCache_InjectMessage_QueueFull(t *testing.T) {
 	defer sc.CloseAll()
 
 	// Create route with channel of size 1
-	injectCh := make(chan string, 1)
+	injectCh := make(chan agent.InjectedMessage, 1)
 	sc.mu.Lock()
 	sc.routes["agent:test"] = &routeEntry{
 		injectCh: injectCh,
@@ -259,15 +260,85 @@ func TestSessionCache_InjectMessage_QueueFull(t *testing.T) {
 	sc.mu.Unlock()
 
 	// Fill the channel
-	result1 := sc.InjectMessage("agent:test", "first")
+	result1 := sc.InjectMessage("agent:test", agent.InjectedMessage{Text: "first"})
 	if result1 != InjectOK {
 		t.Fatalf("expected InjectOK, got %d", result1)
 	}
 
 	// Second should fail with QueueFull
-	result2 := sc.InjectMessage("agent:test", "second")
+	result2 := sc.InjectMessage("agent:test", agent.InjectedMessage{Text: "second"})
 	if result2 != InjectQueueFull {
 		t.Fatalf("expected InjectQueueFull, got %d", result2)
+	}
+}
+
+func TestSessionCache_InjectMessage_BusyDuringStartup(t *testing.T) {
+	sc := NewSessionCache(t.TempDir())
+	defer sc.CloseAll()
+
+	sc.mu.Lock()
+	sc.routes["agent:test"] = &routeEntry{
+		done: make(chan struct{}),
+	}
+	sc.mu.Unlock()
+
+	result := sc.InjectMessage("agent:test", agent.InjectedMessage{Text: "hello"})
+	if result != InjectBusy {
+		t.Fatalf("expected InjectBusy, got %d", result)
+	}
+}
+
+func TestSessionCache_InjectMessage_CWDConflict(t *testing.T) {
+	sc := NewSessionCache(t.TempDir())
+	defer sc.CloseAll()
+
+	injectCh := make(chan agent.InjectedMessage, 1)
+	projectA := t.TempDir()
+	projectB := t.TempDir()
+	sc.mu.Lock()
+	sc.routes["agent:test"] = &routeEntry{
+		injectCh:  injectCh,
+		done:      make(chan struct{}),
+		activeCWD: projectA,
+	}
+	sc.mu.Unlock()
+
+	result := sc.InjectMessage("agent:test", agent.InjectedMessage{Text: "hello", CWD: projectB})
+	if result != InjectCWDConflict {
+		t.Fatalf("expected InjectCWDConflict, got %d", result)
+	}
+	select {
+	case <-injectCh:
+		t.Fatal("did not expect conflicting message to be injected")
+	default:
+	}
+}
+
+func TestSessionCache_InjectMessage_SameCWDAllowed(t *testing.T) {
+	sc := NewSessionCache(t.TempDir())
+	defer sc.CloseAll()
+
+	injectCh := make(chan agent.InjectedMessage, 1)
+	project := t.TempDir()
+	sc.mu.Lock()
+	sc.routes["agent:test"] = &routeEntry{
+		injectCh:  injectCh,
+		done:      make(chan struct{}),
+		activeCWD: project,
+	}
+	sc.mu.Unlock()
+
+	result := sc.InjectMessage("agent:test", agent.InjectedMessage{Text: "hello", CWD: project})
+	if result != InjectOK {
+		t.Fatalf("expected InjectOK, got %d", result)
+	}
+	select {
+	case msg := <-injectCh:
+		if msg.Text != "hello" || msg.CWD != project {
+			t.Fatalf("unexpected injected message: %#v", msg)
+		}
+	default:
+		t.Fatal("expected message in channel")
 	}
 }
 

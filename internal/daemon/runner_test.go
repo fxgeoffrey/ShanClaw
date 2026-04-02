@@ -64,6 +64,26 @@ func TestRunAgentRequest_ModelOverride(t *testing.T) {
 	}
 }
 
+func TestRunAgentRequest_Validate_WithValidCWD(t *testing.T) {
+	req := RunAgentRequest{
+		Text: "test",
+		CWD:  t.TempDir(),
+	}
+	if err := req.Validate(); err != nil {
+		t.Fatalf("valid cwd request should not fail: %v", err)
+	}
+}
+
+func TestRunAgentRequest_Validate_WithInvalidCWD(t *testing.T) {
+	req := RunAgentRequest{
+		Text: "test",
+		CWD:  "/nonexistent/path/for/inject-validation",
+	}
+	if err := req.Validate(); err == nil {
+		t.Fatal("expected invalid cwd error")
+	}
+}
+
 func TestComputeRouteKey_BypassRouting(t *testing.T) {
 	req := RunAgentRequest{Agent: "my-agent", BypassRouting: true}
 	if got := ComputeRouteKey(req); got != "" {

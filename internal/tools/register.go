@@ -78,19 +78,16 @@ func RegisterLocalTools(cfg *config.Config) (*agent.ToolRegistry, *[]*skills.Ski
 }
 
 // CloneWithRuntimeConfig returns a registry clone with session-scoped local tool
-// settings applied. This keeps per-run config changes off the shared registry.
-//
-// Note: only BashTool is deep-copied with per-session settings. All other tool
-// instances are shared pointers from the source registry. This is safe because
-// other per-run mutable state (e.g., cloud_delegate handler) is re-wired after
-// cloning by the caller (rebuildAgentLoop / RunAgent). If future tools gain
-// per-session mutable state, they must be deep-copied here too.
+// settings applied. Tools with per-run mutable state (BashTool, CloudDelegateTool)
+// are deep-copied so concurrent routes don't share mutable fields.
 func CloneWithRuntimeConfig(reg *agent.ToolRegistry, cfg *config.Config) *agent.ToolRegistry {
 	if reg == nil {
 		return nil
 	}
 
 	cloned := reg.Clone()
+
+	// Deep-copy BashTool with session-scoped settings.
 	if bashTool, ok := cloned.Get("bash"); ok {
 		if existing, ok := bashTool.(*BashTool); ok {
 			bashCopy := *existing
@@ -103,6 +100,15 @@ func CloneWithRuntimeConfig(reg *agent.ToolRegistry, cfg *config.Config) *agent.
 				}
 			}
 			cloned.Register(&bashCopy)
+		}
+	}
+
+	// Deep-copy CloudDelegateTool so per-run handler/agent context
+	// mutations don't race across concurrent daemon routes.
+	if cdTool, ok := cloned.Get("cloud_delegate"); ok {
+		if existing, ok := cdTool.(*CloudDelegateTool); ok {
+			cdCopy := *existing
+			cloned.Register(&cdCopy)
 		}
 	}
 

@@ -148,8 +148,8 @@ type Model struct {
 	skillsPtr           *[]*skills.Skill   // pointer into use_skill tool's skills slice
 	remoteCleanup       func()             // cleanup for MCP connections from async load
 	cancelRun           context.CancelFunc // cancels the running agent loop
-	injectCh            chan string        // injection channel for mid-run messages
-	resumedSession      bool               // true when the current session was resumed (not newly created)
+	injectCh            chan agent.InjectedMessage
+	resumedSession      bool // true when the current session was resumed (not newly created)
 	// Tool result display
 	pendingToolName string
 	pendingToolArgs string
@@ -1029,7 +1029,7 @@ func (m *Model) handleSubmit() (tea.Model, tea.Cmd) {
 	// If already processing, inject into running loop instead of blocking
 	if m.state == stateProcessing && m.injectCh != nil {
 		select {
-		case m.injectCh <- input:
+		case m.injectCh <- agent.InjectedMessage{Text: input}:
 			// Append to session messages for context persistence
 			sess := m.sessions.Current()
 			sess.Messages = append(sess.Messages, client.Message{
@@ -1064,7 +1064,7 @@ func (m *Model) handleSubmit() (tea.Model, tea.Cmd) {
 func (m *Model) runAgentLoop(query string, history []client.Message) tea.Cmd {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancelRun = cancel
-	m.injectCh = make(chan string, 10)
+	m.injectCh = make(chan agent.InjectedMessage, 10)
 	return func() tea.Msg {
 		if sess := m.sessions.Current(); sess != nil {
 			effectiveCWD := m.applyRuntimeContext(sess)

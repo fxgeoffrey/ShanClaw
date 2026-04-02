@@ -235,6 +235,15 @@ type EventHandler interface {
 	OnCloudPlan(planType string, content string, needsReview bool)
 }
 
+// InjectedMessage is a mid-run follow-up message delivered by the caller.
+// Text is appended as a new user turn at the next iteration boundary.
+// CWD is optional metadata used by higher layers to enforce immutable
+// project-context policies; the loop currently ignores it.
+type InjectedMessage struct {
+	Text string
+	CWD  string
+}
+
 type AgentLoop struct {
 	client            *client.GatewayClient
 	tools             *ToolRegistry
@@ -258,13 +267,13 @@ type AgentLoop struct {
 	agentBasePrompt   string
 	agentSkills       []*skills.Skill
 	contextWindow     int
-	memoryDir         string           // directory containing MEMORY.md; re-read each Run(), write-before-compact target
-	stickyContext     string           // session-scoped facts injected verbatim into system prompt; never truncated
-	outputFormat      string           // "markdown" (default) or "plain" — controls formatting guidance in volatile context
-	workingSet        *WorkingSet      // session-scoped deferred schema cache injected by the caller
-	sessionID         string           // session ID for audit log correlation
-	sessionCWD        string           // session-scoped working directory; set by runner/TUI before Run()
-	injectCh          chan string      // receives user messages injected mid-run
+	memoryDir         string      // directory containing MEMORY.md; re-read each Run(), write-before-compact target
+	stickyContext     string      // session-scoped facts injected verbatim into system prompt; never truncated
+	outputFormat      string      // "markdown" (default) or "plain" — controls formatting guidance in volatile context
+	workingSet        *WorkingSet // session-scoped deferred schema cache injected by the caller
+	sessionID         string      // session ID for audit log correlation
+	sessionCWD        string      // session-scoped working directory; set by runner/TUI before Run()
+	injectCh          chan InjectedMessage
 	injectedMessages  []string         // messages injected during the last Run(); cleared on each Run() call
 	runMessages       []client.Message // conversation messages accumulated during the last Run() (excludes system+history)
 	runMsgInjected    []bool           // parallel to runMessages: true = system-injected guardrail/nudge
@@ -376,7 +385,7 @@ func (a *AgentLoop) InvalidateWorkingSet() {
 // Messages sent to this channel are appended as user turns at the
 // next iteration boundary. The channel is drained (non-blocking)
 // so multiple messages are batched.
-func (a *AgentLoop) SetInjectCh(ch chan string) {
+func (a *AgentLoop) SetInjectCh(ch chan InjectedMessage) {
 	a.injectCh = ch
 }
 
@@ -809,7 +818,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			for {
 				select {
 				case msg := <-a.injectCh:
-					injected = append(injected, msg)
+					injected = append(injected, msg.Text)
 				default:
 					break drain
 				}

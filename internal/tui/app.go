@@ -1024,6 +1024,9 @@ func (m *Model) runAgentLoop(query string, history []client.Message) tea.Cmd {
 			}
 			effectiveCWD := cwdctx.ResolveEffectiveCWD("", sessionCWD, agentCWD)
 			if err := cwdctx.ValidateCWD(effectiveCWD); err != nil {
+				// Log the invalid CWD but fall back to process CWD rather than
+				// crashing the TUI. This matches daemon behavior for the fallback
+				// tier (os.Getwd) — the CWD was simply not usable.
 				fmt.Fprintf(os.Stderr, "[tui] invalid session CWD %q, falling back to process CWD: %v\n", effectiveCWD, err)
 				effectiveCWD, _ = os.Getwd()
 			}

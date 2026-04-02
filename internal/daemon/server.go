@@ -148,7 +148,9 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("GET /instructions", s.handleGetInstructions)
 	mux.HandleFunc("PUT /instructions", s.handlePutInstructions)
 	mux.HandleFunc("GET /sessions", s.handleSessions)
+	mux.HandleFunc("GET /sessions/{id}", s.handleGetSession)
 	mux.HandleFunc("DELETE /sessions/{id}", s.handleDeleteSession)
+	mux.HandleFunc("POST /sessions/{id}/edit", s.handleEditMessage)
 	mux.HandleFunc("GET /sessions/search", s.handleSessionSearch)
 	mux.HandleFunc("GET /permissions", s.handlePermissions)
 	mux.HandleFunc("POST /permissions/request", s.handlePermissionsRequest)
@@ -431,6 +433,43 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"sessions": filtered})
 }
 
+// handleGetSession 返回指定 session 的完整内容（包含消息列表）。
+// 前端可通过消息数组的下标作为 message_index 传给 POST /sessions/{id}/edit。
+func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
+	if s.deps == nil {
+		writeError(w, http.StatusInternalServerError, "daemon deps not configured")
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "session id required")
+		return
+	}
+	// 防止路径穿越
+	if id != filepath.Base(id) || strings.ContainsAny(id, `/\`) {
+		writeError(w, http.StatusBadRequest, "invalid session id")
+		return
+	}
+	agentName := r.URL.Query().Get("agent")
+	if agentName != "" {
+		if err := agents.ValidateAgentName(agentName); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	mgr := s.deps.SessionCache.GetOrCreateManager(s.deps.SessionCache.SessionsDir(agentName))
+	sess, err := mgr.Load(id)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("session %q not found", id))
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, sess)
+}
+
 func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	if s.deps == nil {
 		writeError(w, http.StatusInternalServerError, "daemon deps not configured")
@@ -495,6 +534,82 @@ func (s *Server) handleSessionSearch(w http.ResponseWriter, r *http.Request) {
 		results = []session.SearchResult{}
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{"results": results})
+}
+
+// handleEditMessage 截断指定 session 的历史消息并以新内容重新触发 agent。
+// 请求体：{"message_index": N, "new_content": "...", "agent": "可选"}
+// message_index 表示保留前 N 条消息，N 之后的消息全部丢弃，再以 new_content 重新发送。
+func (s *Server) handleEditMessage(w http.ResponseWriter, r *http.Request) {
+	if s.deps == nil {
+		http.Error(w, `{"error":"daemon deps not configured"}`, http.StatusInternalServerError)
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "session id required")
+		return
+	}
+	// 防止路径穿越
+	if id != filepath.Base(id) || strings.ContainsAny(id, `/\`) {
+		writeError(w, http.StatusBadRequest, "invalid session id")
+		return
+	}
+
+	var body struct {
+		MessageIndex int    `json:"message_index"`
+		NewContent   string `json:"new_content"`
+		Agent        string `json:"agent,omitempty"`
+	}
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	if strings.TrimSpace(body.NewContent) == "" {
+		writeError(w, http.StatusBadRequest, "new_content is required")
+		return
+	}
+	if body.Agent != "" {
+		if err := agents.ValidateAgentName(body.Agent); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
+	// 先取消当前 session 路由的活跃任务（如有），防止与截断操作并发
+	s.deps.SessionCache.CancelRoute("session:" + sanitizeRouteValue(id))
+
+	// 截断 session 历史消息
+	mgr := s.deps.SessionCache.GetOrCreateManager(s.deps.SessionCache.SessionsDir(body.Agent))
+	if err := mgr.TruncateMessages(id, body.MessageIndex); err != nil {
+		if os.IsNotExist(err) {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("session %q not found", id))
+			return
+		}
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// 以新内容重新触发 agent，复用现有消息发送流程
+	runReq := RunAgentRequest{
+		Text:      body.NewContent,
+		Agent:     body.Agent,
+		SessionID: id,
+		Source:    "shanclaw",
+	}
+	runReq.EnsureRouteKey()
+
+	if strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
+		s.handleMessageSSE(w, r, runReq)
+		return
+	}
+
+	handler := &httpEventHandler{}
+	result, err := RunAgent(r.Context(), s.deps, runReq, handler)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
 }
 
 // handleMessage runs an agent turn via POST. Supports synchronous JSON and SSE streaming.

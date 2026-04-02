@@ -127,8 +127,17 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 		}()
 	}
 
-	gw := client.NewGatewayClient(cfg.Endpoint, cfg.APIKey)
-	reg, skillsPtr, _, cleanup, serverErr := tools.RegisterAll(gw, cfg, agentOverride)
+	effectiveCWD, err := resolveOneShotCWD(agentOverride)
+	if err != nil {
+		return err
+	}
+	runCfg, err := config.RuntimeConfigForCWD(cfg, effectiveCWD)
+	if err != nil {
+		return fmt.Errorf("runtime config: %w", err)
+	}
+
+	gw := client.NewGatewayClient(runCfg.Endpoint, runCfg.APIKey)
+	reg, skillsPtr, _, cleanup, serverErr := tools.RegisterAll(gw, runCfg, agentOverride)
 	defer cleanup()
 	if serverErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: %v\n", serverErr)
@@ -139,7 +148,7 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 	if agentOverride != nil {
 		cloudAgentPrompt = agentOverride.Prompt
 	}
-	tools.RegisterCloudDelegate(reg, gw, cfg, nil, agentName, cloudAgentPrompt) // handler set later via loop.SetHandler
+	tools.RegisterCloudDelegate(reg, gw, runCfg, nil, agentName, cloudAgentPrompt) // handler set later via loop.SetHandler
 
 	shannonDir := config.ShannonDir()
 
@@ -158,25 +167,25 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 	}
 
 	// Resolve scoped MCP context
-	scopedMCPCtx := tools.ResolveMCPContext(cfg, agentOverride)
+	scopedMCPCtx := tools.ResolveMCPContext(runCfg, agentOverride)
 
-	hookRunner := hooks.NewHookRunner(cfg.Hooks)
-	loop := agent.NewAgentLoop(gw, reg, cfg.ModelTier, shannonDir, cfg.Agent.MaxIterations, cfg.Tools.ResultTruncation, cfg.Tools.ArgsTruncation, &cfg.Permissions, auditor, hookRunner)
-	loop.SetMaxTokens(cfg.Agent.MaxTokens)
-	loop.SetTemperature(cfg.Agent.Temperature)
-	loop.SetContextWindow(cfg.Agent.ContextWindow)
-	if cfg.Agent.Model != "" {
-		loop.SetSpecificModel(cfg.Agent.Model)
+	hookRunner := hooks.NewHookRunner(runCfg.Hooks)
+	loop := agent.NewAgentLoop(gw, reg, runCfg.ModelTier, shannonDir, runCfg.Agent.MaxIterations, runCfg.Tools.ResultTruncation, runCfg.Tools.ArgsTruncation, &runCfg.Permissions, auditor, hookRunner)
+	loop.SetMaxTokens(runCfg.Agent.MaxTokens)
+	loop.SetTemperature(runCfg.Agent.Temperature)
+	loop.SetContextWindow(runCfg.Agent.ContextWindow)
+	if runCfg.Agent.Model != "" {
+		loop.SetSpecificModel(runCfg.Agent.Model)
 	}
-	if cfg.Agent.Thinking {
-		if cfg.Agent.ThinkingMode == "enabled" {
-			loop.SetThinking(&client.ThinkingConfig{Type: "enabled", BudgetTokens: cfg.Agent.ThinkingBudget})
+	if runCfg.Agent.Thinking {
+		if runCfg.Agent.ThinkingMode == "enabled" {
+			loop.SetThinking(&client.ThinkingConfig{Type: "enabled", BudgetTokens: runCfg.Agent.ThinkingBudget})
 		} else {
 			loop.SetThinking(&client.ThinkingConfig{Type: "adaptive"})
 		}
 	}
-	if cfg.Agent.ReasoningEffort != "" {
-		loop.SetReasoningEffort(cfg.Agent.ReasoningEffort)
+	if runCfg.Agent.ReasoningEffort != "" {
+		loop.SetReasoningEffort(runCfg.Agent.ReasoningEffort)
 	}
 	// Per-agent model config overrides
 	if agentOverride != nil && agentOverride.Config != nil && agentOverride.Config.Agent != nil {
@@ -239,10 +248,6 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 	sess := sessMgr.NewSession()
 	sess.Title = sessionTitleFromQuery(query)
 	loop.SetSessionID(sess.ID)
-	effectiveCWD, err := resolveOneShotCWD(agentOverride)
-	if err != nil {
-		return err
-	}
 	sess.CWD = effectiveCWD
 	loop.SetSessionCWD(effectiveCWD)
 	sessMgr.OnSessionClose(sess.ID, loop.SpillCleanupFunc())

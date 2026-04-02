@@ -21,18 +21,18 @@ type ConfigSource struct {
 }
 
 type Config struct {
-	Endpoint        string                          `mapstructure:"endpoint"          yaml:"endpoint"          json:"endpoint"`
-	APIKey          string                          `mapstructure:"api_key"           yaml:"api_key"           json:"api_key"`
-	ModelTier       string                          `mapstructure:"model_tier"        yaml:"model_tier"        json:"model_tier"`
-	AutoUpdateCheck bool                            `mapstructure:"auto_update_check" yaml:"auto_update_check" json:"auto_update_check"`
-	Permissions     permissions.PermissionsConfig   `mapstructure:"permissions"       yaml:"permissions"       json:"permissions"`
-	Agent           AgentConfig                     `mapstructure:"agent"             yaml:"agent"             json:"agent"`
-	Tools           ToolsConfig                     `mapstructure:"tools"             yaml:"tools"             json:"tools"`
-	Cloud           CloudConfig                     `mapstructure:"cloud"             yaml:"cloud"             json:"cloud"`
-	Daemon          DaemonConfig                    `mapstructure:"daemon"            yaml:"daemon"            json:"daemon"`
-	Hooks           hooks.HookConfig                `mapstructure:"hooks"             yaml:"hooks"             json:"hooks"`
-	MCPServers      map[string]mcp.MCPServerConfig  `mapstructure:"mcp_servers"       yaml:"mcp_servers"       json:"mcp_servers"`
-	Sources         map[string]ConfigSource         `mapstructure:"-"                 yaml:"-"                 json:"-"`
+	Endpoint        string                         `mapstructure:"endpoint"          yaml:"endpoint"          json:"endpoint"`
+	APIKey          string                         `mapstructure:"api_key"           yaml:"api_key"           json:"api_key"`
+	ModelTier       string                         `mapstructure:"model_tier"        yaml:"model_tier"        json:"model_tier"`
+	AutoUpdateCheck bool                           `mapstructure:"auto_update_check" yaml:"auto_update_check" json:"auto_update_check"`
+	Permissions     permissions.PermissionsConfig  `mapstructure:"permissions"       yaml:"permissions"       json:"permissions"`
+	Agent           AgentConfig                    `mapstructure:"agent"             yaml:"agent"             json:"agent"`
+	Tools           ToolsConfig                    `mapstructure:"tools"             yaml:"tools"             json:"tools"`
+	Cloud           CloudConfig                    `mapstructure:"cloud"             yaml:"cloud"             json:"cloud"`
+	Daemon          DaemonConfig                   `mapstructure:"daemon"            yaml:"daemon"            json:"daemon"`
+	Hooks           hooks.HookConfig               `mapstructure:"hooks"             yaml:"hooks"             json:"hooks"`
+	MCPServers      map[string]mcp.MCPServerConfig `mapstructure:"mcp_servers"       yaml:"mcp_servers"       json:"mcp_servers"`
+	Sources         map[string]ConfigSource        `mapstructure:"-"                 yaml:"-"                 json:"-"`
 }
 
 type AgentConfig struct {
@@ -43,8 +43,8 @@ type AgentConfig struct {
 	ThinkingMode    string  `mapstructure:"thinking_mode"    yaml:"thinking_mode"    json:"thinking_mode"` // "adaptive" (default) or "enabled" (fixed budget)
 	ThinkingBudget  int     `mapstructure:"thinking_budget"  yaml:"thinking_budget"  json:"thinking_budget"`
 	ReasoningEffort string  `mapstructure:"reasoning_effort" yaml:"reasoning_effort" json:"reasoning_effort"`
-	Model           string  `mapstructure:"model"            yaml:"model"            json:"model"`           // specific model override
-	ContextWindow   int     `mapstructure:"context_window"   yaml:"context_window"   json:"context_window"`  // model context window in tokens
+	Model           string  `mapstructure:"model"            yaml:"model"            json:"model"`          // specific model override
+	ContextWindow   int     `mapstructure:"context_window"   yaml:"context_window"   json:"context_window"` // model context window in tokens
 }
 
 type ToolsConfig struct {
@@ -142,27 +142,80 @@ func Load() (*Config, error) {
 	cfg.Sources = buildDefaultSources()
 	markGlobalSources(&cfg, globalFile)
 
-	// Merge project-level configs (.shannon/config.yaml and .shannon/config.local.yaml)
-	cwd, _ := os.Getwd()
-	if cwd != "" {
-		projectFile := filepath.Join(cwd, ".shannon", "config.yaml")
-		mergeOverlayFile(&cfg, projectFile, "project")
-
-		localFile := filepath.Join(cwd, ".shannon", "config.local.yaml")
-		mergeOverlayFile(&cfg, localFile, "local")
-	}
-
-	// Validate thinking_mode (only when thinking is enabled)
-	if cfg.Agent.Thinking {
-		switch cfg.Agent.ThinkingMode {
-		case "adaptive", "enabled":
-			// valid
-		default:
-			return nil, fmt.Errorf("invalid agent.thinking_mode %q: must be \"adaptive\" or \"enabled\"", cfg.Agent.ThinkingMode)
-		}
+	if err := validateConfig(&cfg); err != nil {
+		return nil, err
 	}
 
 	return &cfg, nil
+}
+
+// Clone returns a deep copy of cfg so callers can derive per-run settings
+// without mutating the shared base config.
+func Clone(cfg *Config) *Config {
+	if cfg == nil {
+		return nil
+	}
+
+	cloned := *cfg
+
+	cloned.Permissions.AllowedDirs = append([]string(nil), cfg.Permissions.AllowedDirs...)
+	cloned.Permissions.AllowedCommands = append([]string(nil), cfg.Permissions.AllowedCommands...)
+	cloned.Permissions.DeniedCommands = append([]string(nil), cfg.Permissions.DeniedCommands...)
+	cloned.Permissions.SensitivePatterns = append([]string(nil), cfg.Permissions.SensitivePatterns...)
+	cloned.Permissions.NetworkAllowlist = append([]string(nil), cfg.Permissions.NetworkAllowlist...)
+
+	cloned.Hooks.PreToolUse = append([]hooks.HookEntry(nil), cfg.Hooks.PreToolUse...)
+	cloned.Hooks.PostToolUse = append([]hooks.HookEntry(nil), cfg.Hooks.PostToolUse...)
+	cloned.Hooks.SessionStart = append([]hooks.HookEntry(nil), cfg.Hooks.SessionStart...)
+	cloned.Hooks.Stop = append([]hooks.HookEntry(nil), cfg.Hooks.Stop...)
+
+	if cfg.MCPServers != nil {
+		cloned.MCPServers = make(map[string]mcp.MCPServerConfig, len(cfg.MCPServers))
+		for name, serverCfg := range cfg.MCPServers {
+			serverCopy := serverCfg
+			serverCopy.Args = append([]string(nil), serverCfg.Args...)
+			if serverCfg.Env != nil {
+				serverCopy.Env = make(map[string]string, len(serverCfg.Env))
+				for k, v := range serverCfg.Env {
+					serverCopy.Env[k] = v
+				}
+			}
+			cloned.MCPServers[name] = serverCopy
+		}
+	}
+
+	if cfg.Sources != nil {
+		cloned.Sources = make(map[string]ConfigSource, len(cfg.Sources))
+		for key, src := range cfg.Sources {
+			cloned.Sources[key] = src
+		}
+	}
+
+	return &cloned
+}
+
+// RuntimeConfigForCWD returns a per-run config view for cwd by applying only
+// session-safe project overlays from cwd/.shannon/*.yaml on top of base.
+func RuntimeConfigForCWD(base *Config, cwd string) (*Config, error) {
+	if base == nil {
+		return nil, fmt.Errorf("base config is nil")
+	}
+
+	cfg := Clone(base)
+
+	if cwd != "" {
+		projectFile := filepath.Join(cwd, ".shannon", "config.yaml")
+		mergeRuntimeOverlayFile(cfg, projectFile, "project")
+
+		localFile := filepath.Join(cwd, ".shannon", "config.local.yaml")
+		mergeRuntimeOverlayFile(cfg, localFile, "local")
+	}
+
+	if err := validateConfig(cfg); err != nil {
+		return nil, err
+	}
+
+	return cfg, nil
 }
 
 // migrateOldConfig handles the transition from llm_url+gateway_url to single endpoint.
@@ -215,7 +268,7 @@ type overlayConfig struct {
 	APIKey          *string                        `yaml:"api_key"`
 	ModelTier       *string                        `yaml:"model_tier"`
 	AutoUpdateCheck *bool                          `yaml:"auto_update_check"`
-	Permissions     *permissions.PermissionsConfig  `yaml:"permissions"`
+	Permissions     *permissions.PermissionsConfig `yaml:"permissions"`
 	Agent           *overlayAgentConfig            `yaml:"agent"`
 	Tools           *overlayToolsConfig            `yaml:"tools"`
 	Daemon          *overlayDaemonConfig           `yaml:"daemon"`
@@ -250,23 +303,25 @@ type overlayToolsConfig struct {
 // buildDefaultSources returns source entries for all config keys set to "default".
 func buildDefaultSources() map[string]ConfigSource {
 	return map[string]ConfigSource{
-		"endpoint":                 {Level: "default"},
-		"api_key":                  {Level: "default"},
-		"model_tier":               {Level: "default"},
-		"auto_update_check":        {Level: "default"},
-		"agent.max_iterations":     {Level: "default"},
-		"agent.temperature":        {Level: "default"},
-		"agent.max_tokens":         {Level: "default"},
-		"agent.thinking":           {Level: "default"},
-		"agent.thinking_mode":      {Level: "default"},
-		"agent.thinking_budget":    {Level: "default"},
-		"agent.context_window":     {Level: "default"},
-		"tools.bash_timeout":       {Level: "default"},
-		"tools.bash_max_output":    {Level: "default"},
-		"tools.result_truncation":  {Level: "default"},
-		"tools.args_truncation":    {Level: "default"},
+		"endpoint":                  {Level: "default"},
+		"api_key":                   {Level: "default"},
+		"model_tier":                {Level: "default"},
+		"auto_update_check":         {Level: "default"},
+		"agent.max_iterations":      {Level: "default"},
+		"agent.temperature":         {Level: "default"},
+		"agent.max_tokens":          {Level: "default"},
+		"agent.thinking":            {Level: "default"},
+		"agent.thinking_mode":       {Level: "default"},
+		"agent.thinking_budget":     {Level: "default"},
+		"agent.reasoning_effort":    {Level: "default"},
+		"agent.model":               {Level: "default"},
+		"agent.context_window":      {Level: "default"},
+		"tools.bash_timeout":        {Level: "default"},
+		"tools.bash_max_output":     {Level: "default"},
+		"tools.result_truncation":   {Level: "default"},
+		"tools.args_truncation":     {Level: "default"},
 		"tools.server_tool_timeout": {Level: "default"},
-		"tools.grep_max_results":   {Level: "default"},
+		"tools.grep_max_results":    {Level: "default"},
 	}
 }
 
@@ -303,6 +358,12 @@ func markGlobalSources(cfg *Config, file string) {
 	}
 	if viper.IsSet("agent.thinking_budget") {
 		cfg.Sources["agent.thinking_budget"] = src
+	}
+	if viper.IsSet("agent.reasoning_effort") {
+		cfg.Sources["agent.reasoning_effort"] = src
+	}
+	if viper.IsSet("agent.model") {
+		cfg.Sources["agent.model"] = src
 	}
 	if viper.IsSet("agent.context_window") {
 		cfg.Sources["agent.context_window"] = src
@@ -344,8 +405,14 @@ func markGlobalSources(cfg *Config, file string) {
 }
 
 // mergeOverlayFile reads a YAML file and merges it on top of cfg.
+// mergeRuntimeOverlayFile merges session-safe fields from a project config
+// overlay file. Process-global fields (endpoint, api_key, auto_update_check,
+// daemon, mcp_servers) are intentionally skipped — they stay process-scoped.
 // Scalars override; lists are merged and deduplicated.
-func mergeOverlayFile(cfg *Config, file string, level string) {
+func mergeRuntimeOverlayFile(cfg *Config, file string, level string) {
+	if cfg == nil {
+		return
+	}
 	data, err := os.ReadFile(file)
 	if err != nil {
 		return // file doesn't exist or unreadable — skip silently
@@ -358,22 +425,10 @@ func mergeOverlayFile(cfg *Config, file string, level string) {
 
 	src := ConfigSource{File: file, Level: level}
 
-	// Scalar overrides
-	if overlay.Endpoint != nil {
-		cfg.Endpoint = *overlay.Endpoint
-		cfg.Sources["endpoint"] = src
-	}
-	if overlay.APIKey != nil {
-		cfg.APIKey = strings.TrimSpace(*overlay.APIKey)
-		cfg.Sources["api_key"] = src
-	}
+	// Scalar overrides (session-safe fields only)
 	if overlay.ModelTier != nil {
 		cfg.ModelTier = *overlay.ModelTier
 		cfg.Sources["model_tier"] = src
-	}
-	if overlay.AutoUpdateCheck != nil {
-		cfg.AutoUpdateCheck = *overlay.AutoUpdateCheck
-		cfg.Sources["auto_update_check"] = src
 	}
 
 	// Agent field-level merge
@@ -468,24 +523,23 @@ func mergeOverlayFile(cfg *Config, file string, level string) {
 		}
 	}
 
-	// Daemon field-level merge
-	if overlay.Daemon != nil {
-		if overlay.Daemon.AutoApprove != nil {
-			cfg.Daemon.AutoApprove = *overlay.Daemon.AutoApprove
-			cfg.Sources["daemon.auto_approve"] = src
-		}
-	}
+	// Process-global fields (endpoint, api_key, auto_update_check, daemon,
+	// mcp_servers) are intentionally NOT merged here — they stay process-scoped.
+}
 
-	// MCP servers: merge by name (overlay adds or overrides individual servers)
-	if len(overlay.MCPServers) > 0 {
-		if cfg.MCPServers == nil {
-			cfg.MCPServers = make(map[string]mcp.MCPServerConfig)
-		}
-		for name, serverCfg := range overlay.MCPServers {
-			cfg.MCPServers[name] = serverCfg
-		}
-		cfg.Sources["mcp_servers"] = src
+func validateConfig(cfg *Config) error {
+	if cfg == nil {
+		return fmt.Errorf("config is nil")
 	}
+	if cfg.Agent.Thinking {
+		switch cfg.Agent.ThinkingMode {
+		case "adaptive", "enabled":
+			// valid
+		default:
+			return fmt.Errorf("invalid agent.thinking_mode %q: must be \"adaptive\" or \"enabled\"", cfg.Agent.ThinkingMode)
+		}
+	}
+	return nil
 }
 
 // fixMCPEnvKeyCasing re-reads MCP servers from YAML to restore env var key casing.

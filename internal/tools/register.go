@@ -77,6 +77,38 @@ func RegisterLocalTools(cfg *config.Config) (*agent.ToolRegistry, *[]*skills.Ski
 	return reg, skillsPtr, cleanup
 }
 
+// CloneWithRuntimeConfig returns a registry clone with session-scoped local tool
+// settings applied. This keeps per-run config changes off the shared registry.
+//
+// Note: only BashTool is deep-copied with per-session settings. All other tool
+// instances are shared pointers from the source registry. This is safe because
+// other per-run mutable state (e.g., cloud_delegate handler) is re-wired after
+// cloning by the caller (rebuildAgentLoop / RunAgent). If future tools gain
+// per-session mutable state, they must be deep-copied here too.
+func CloneWithRuntimeConfig(reg *agent.ToolRegistry, cfg *config.Config) *agent.ToolRegistry {
+	if reg == nil {
+		return nil
+	}
+
+	cloned := reg.Clone()
+	if bashTool, ok := cloned.Get("bash"); ok {
+		if existing, ok := bashTool.(*BashTool); ok {
+			bashCopy := *existing
+			if cfg != nil {
+				bashCopy.ExtraSafeCommands = append([]string(nil), cfg.Permissions.AllowedCommands...)
+				if cfg.Tools.BashMaxOutput > 0 {
+					bashCopy.MaxOutput = cfg.Tools.BashMaxOutput
+				} else {
+					bashCopy.MaxOutput = 0
+				}
+			}
+			cloned.Register(&bashCopy)
+		}
+	}
+
+	return cloned
+}
+
 // gatewayAllowedTools is the allowlist of server-side tools worth registering
 // locally. Cloud-only tools (python_executor, calculator, etc.) are excluded
 // to prevent the LLM from choosing them over better local equivalents.

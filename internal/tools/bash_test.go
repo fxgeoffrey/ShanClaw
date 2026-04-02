@@ -5,6 +5,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/Kocoro-lab/ShanClaw/internal/config"
+	"github.com/Kocoro-lab/ShanClaw/internal/permissions"
 )
 
 func TestBash_Run(t *testing.T) {
@@ -117,4 +120,56 @@ func TestBash_MaxOutput(t *testing.T) {
 			t.Error("small output should not be truncated")
 		}
 	})
+}
+
+func TestCloneWithRuntimeConfig_UpdatesBashSettingsWithoutMutatingSource(t *testing.T) {
+	reg, _, cleanup := RegisterLocalTools(&config.Config{
+		Permissions: permissions.PermissionsConfig{
+			AllowedCommands: []string{"git status"},
+		},
+		Tools: config.ToolsConfig{
+			BashMaxOutput: 30000,
+		},
+	})
+	defer cleanup()
+
+	cloned := CloneWithRuntimeConfig(reg, &config.Config{
+		Permissions: permissions.PermissionsConfig{
+			AllowedCommands: []string{"make test"},
+		},
+		Tools: config.ToolsConfig{
+			BashMaxOutput: 4096,
+		},
+	})
+
+	originalTool, ok := reg.Get("bash")
+	if !ok {
+		t.Fatal("expected original bash tool")
+	}
+	clonedTool, ok := cloned.Get("bash")
+	if !ok {
+		t.Fatal("expected cloned bash tool")
+	}
+
+	originalBash, ok := originalTool.(*BashTool)
+	if !ok {
+		t.Fatal("expected original bash tool type")
+	}
+	runtimeBash, ok := clonedTool.(*BashTool)
+	if !ok {
+		t.Fatal("expected cloned bash tool type")
+	}
+
+	if runtimeBash.MaxOutput != 4096 {
+		t.Fatalf("expected cloned bash max output 4096, got %d", runtimeBash.MaxOutput)
+	}
+	if len(runtimeBash.ExtraSafeCommands) != 1 || runtimeBash.ExtraSafeCommands[0] != "make test" {
+		t.Fatalf("unexpected cloned safe commands: %#v", runtimeBash.ExtraSafeCommands)
+	}
+	if originalBash.MaxOutput != 30000 {
+		t.Fatalf("expected original bash max output to stay 30000, got %d", originalBash.MaxOutput)
+	}
+	if len(originalBash.ExtraSafeCommands) != 1 || originalBash.ExtraSafeCommands[0] != "git status" {
+		t.Fatalf("unexpected original safe commands: %#v", originalBash.ExtraSafeCommands)
+	}
 }

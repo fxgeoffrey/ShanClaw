@@ -18,6 +18,7 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/audit"
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
 	ctxwin "github.com/Kocoro-lab/ShanClaw/internal/context"
+	"github.com/Kocoro-lab/ShanClaw/internal/cwdctx"
 	"github.com/Kocoro-lab/ShanClaw/internal/hooks"
 	"github.com/Kocoro-lab/ShanClaw/internal/instructions"
 	"github.com/Kocoro-lab/ShanClaw/internal/permissions"
@@ -262,6 +263,7 @@ type AgentLoop struct {
 	outputFormat      string           // "markdown" (default) or "plain" — controls formatting guidance in volatile context
 	workingSet        *WorkingSet      // session-scoped deferred schema cache injected by the caller
 	sessionID         string           // session ID for audit log correlation
+	sessionCWD        string           // session-scoped working directory; set by runner/TUI before Run()
 	injectCh          chan string      // receives user messages injected mid-run
 	injectedMessages  []string         // messages injected during the last Run(); cleared on each Run() call
 	runMessages       []client.Message // conversation messages accumulated during the last Run() (excludes system+history)
@@ -448,6 +450,11 @@ func (a *AgentLoop) SetSessionID(id string) {
 	a.sessionID = id
 }
 
+// SetSessionCWD sets the session-scoped working directory for this loop.
+func (a *AgentLoop) SetSessionCWD(cwd string) {
+	a.sessionCWD = cwd
+}
+
 // SpillCleanupFunc returns a closure that removes disk-spilled tool result
 // files for the current session ID. The session ID is captured at call time,
 // so the closure is safe to register early and invoke later (e.g. on
@@ -564,8 +571,15 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 	coldDeferred := remainingDeferredNames(deferred, loadedDeferred)
 	deferredMode := len(coldDeferred) > 0 && shouldDefer(a.tools, a.tools.SortedNames(), schemaTokenBudget)
 
-	cwd, _ := os.Getwd()
-	instrText, _ := instructions.LoadInstructions(a.shannonDir, ".", 4000)
+	cwd := a.sessionCWD
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	projectDir := filepath.Join(cwd, ".shannon")
+	instrText, _ := instructions.LoadInstructions(a.shannonDir, projectDir, 4000)
+	if cwd != "" {
+		ctx = cwdctx.WithSessionCWD(ctx, cwd)
+	}
 
 	// Persona: named agents replace the identity line; core rules always included.
 	persona := defaultPersona
@@ -714,6 +728,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 
 	// Read tracker: enforces read-before-edit for file_edit/file_write
 	readTracker := NewReadTracker()
+	readTracker.SetCWD(cwd)
 	// Pre-seed MEMORY.md as "read" — its content is already in the system prompt,
 	// so the agent can file_edit it directly without a redundant file_read.
 	if a.memoryDir != "" {

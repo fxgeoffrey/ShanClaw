@@ -667,7 +667,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 
 	// Loop behavior constants
 	const maxRecentImages = 5  // keep only last N screenshot messages in context
-	const compressAfter = 3    // compress tool results older than N turns from the end
+	const compressAfter = 8    // compress tool results older than N from the end
 	const maxResultChars = 300 // compressed tool result max chars
 
 	// Loop detection + task-aware state
@@ -1485,7 +1485,8 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			if ToolFamilies[fc.Name] != "" {
 				resultSig = extractResultSignature(result.Content)
 			}
-			detector.Record(fc.Name, argsStr, result.IsError, errMsg, resultSig)
+			nonActionable := isNonActionableSearch(fc.Name, result)
+			detector.Record(fc.Name, argsStr, result.IsError, errMsg, resultSig, nonActionable)
 
 			// Check for stuck loops (escalate to worst action seen)
 			action, msg := detector.Check(fc.Name)
@@ -2140,8 +2141,18 @@ func toolContentLength(tc any) int {
 //
 // When completer is non-nil, Tier 2 upgrades large results to semantic summaries.
 // When nil, Tier 2 falls back to mechanical head+tail truncation (zero LLM cost).
+// tier2FloorTools are read/search/repo-inspection tools that never degrade to
+// Tier 1 (metadata-only stubs). When these would normally hit Tier 1, they stay
+// at Tier 2 (mechanical head+tail truncation) to preserve actual content excerpts.
+var tier2FloorTools = map[string]bool{
+	"file_read":      true,
+	"grep":           true,
+	"glob":           true,
+	"directory_list": true,
+}
+
 func compressOldToolResults(ctx context.Context, messages []client.Message, keepRecent int, maxChars int, completer ctxwin.Completer) {
-	const tier1Threshold = 10
+	const tier1Threshold = 20
 
 	// Pre-scan: build tool_use_id → name+args map for tier-1 metadata.
 	toolCallMap := buildToolCallMap(messages)
@@ -2186,7 +2197,7 @@ func compressOldToolResults(ctx context.Context, messages []client.Message, keep
 
 		msg := messages[idx]
 
-		if distFromEnd >= tier1Threshold {
+		if distFromEnd >= tier1Threshold && !hasTier2FloorTool(msg, toolCallMap) {
 			// Tier 1: strip to metadata
 			if msg.Role == "user" && msg.Content.HasBlocks() {
 				messages[idx].Content = stripToMetadata(msg.Content, toolCallMap)
@@ -2196,11 +2207,47 @@ func compressOldToolResults(ctx context.Context, messages []client.Message, keep
 				compressed := compressToolResultText(text, 50)
 				messages[idx].Content = client.NewTextContent(compressed)
 			}
-		} else {
+		} else if distFromEnd >= keepRecent {
 			// Tier 2: LLM summary for large results, else head+tail truncation.
 			messages[idx].Content = compressTier2(ctx, msg, maxChars, completer, toolCallMap, &mcCount)
 		}
 	}
+}
+
+// hasTier2FloorTool returns true if any tool result in the message belongs to
+// a floor tool that should never degrade to Tier 1. Checks both native blocks
+// (via toolCallMap) and XML text format (via regex).
+//
+// NOTE: The XML detection mirrors compressOldToolResults' own XML detection,
+// which checks assistant-role messages. Live XML tool results are actually
+// appended as user-role (line ~1513), so the compressor doesn't currently find
+// them either. This is a pre-existing gap — both paths are consistent.
+func hasTier2FloorTool(msg client.Message, toolCallMap map[string]toolCallInfo) bool {
+	// Native format: check tool_result blocks
+	if msg.Role == "user" && msg.Content.HasBlocks() {
+		for _, b := range msg.Content.Blocks() {
+			if b.Type == "tool_result" {
+				if info, ok := toolCallMap[b.ToolUseID]; ok && tier2FloorTools[info.Name] {
+					return true
+				}
+			}
+		}
+	}
+	// XML format: extract tool name from text (matches compressor's detection path)
+	text := msg.Content.Text()
+	if strings.Contains(text, "<tool_exec ") || strings.Contains(text, "I called ") {
+		if matches := toolResultPattern.FindStringSubmatch(text); len(matches) > 1 {
+			if tier2FloorTools[matches[1]] {
+				return true
+			}
+		}
+		if matches := legacyToolResultPattern.FindStringSubmatch(text); len(matches) > 1 {
+			if tier2FloorTools[matches[1]] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // compressTier2 applies Tier 2 compression to a single tool result message.

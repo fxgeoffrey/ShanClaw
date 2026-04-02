@@ -316,29 +316,29 @@ func TestBuildToolCallMap_LongArgsTruncated(t *testing.T) {
 }
 
 func TestCompressOldToolResults_TieredBehavior(t *testing.T) {
-	// Create 15 tool result pairs (assistant tool_use + user tool_result).
-	// Each pair has a unique tool_use_id and content of known length.
+	// Create 25 tool result pairs to exercise all three tiers with current constants:
+	// tier1Threshold=20, keepRecent passed as 8 to match compressAfter.
+	const numTools = 25
+	const keepRecent = 8
+
 	var messages []client.Message
-	// Start with a user message
 	messages = append(messages, client.Message{
 		Role:    "user",
 		Content: client.NewTextContent("Do some work"),
 	})
 
-	for i := 0; i < 15; i++ {
+	for i := 0; i < numTools; i++ {
 		id := fmt.Sprintf("tu-%d", i)
 		name := fmt.Sprintf("tool_%d", i)
 		args := json.RawMessage(fmt.Sprintf(`{"arg":"value_%d"}`, i))
 		content := fmt.Sprintf("Result content for tool %d: %s", i, strings.Repeat("x", 500))
 
-		// Assistant message with tool_use
 		messages = append(messages, client.Message{
 			Role: "assistant",
 			Content: client.NewBlockContent([]client.ContentBlock{
 				client.NewToolUseBlock(id, name, args),
 			}),
 		})
-		// User message with tool_result
 		messages = append(messages, client.Message{
 			Role: "user",
 			Content: client.NewBlockContent([]client.ContentBlock{
@@ -347,12 +347,10 @@ func TestCompressOldToolResults_TieredBehavior(t *testing.T) {
 		})
 	}
 
-	// keepRecent=3, maxChars=300
-	compressOldToolResults(context.Background(), messages, 3, 300, nil)
+	compressOldToolResults(context.Background(), messages, keepRecent, 300, nil)
 
-	// Check each tool result message (every odd index starting from 2)
-	for i := 0; i < 15; i++ {
-		msgIdx := 2 + i*2 // user tool_result messages
+	for i := 0; i < numTools; i++ {
+		msgIdx := 2 + i*2
 		msg := messages[msgIdx]
 		blocks := msg.Content.Blocks()
 		if len(blocks) == 0 {
@@ -367,15 +365,15 @@ func TestCompressOldToolResults_TieredBehavior(t *testing.T) {
 			}
 		}
 
-		distFromEnd := 14 - i // 15 results, 0-indexed
+		distFromEnd := (numTools - 1) - i
 
-		if distFromEnd < 3 {
+		if distFromEnd < keepRecent {
 			// Tier 3: should be full (500+ chars)
 			if len(resultContent) < 500 {
 				t.Errorf("tool %d (dist=%d): expected tier 3 full content (%d chars), got %d chars",
 					i, distFromEnd, 500, len(resultContent))
 			}
-		} else if distFromEnd >= 10 {
+		} else if distFromEnd >= 20 {
 			// Tier 1: should contain "snipped"
 			if !strings.Contains(resultContent, "snipped") {
 				t.Errorf("tool %d (dist=%d): expected tier 1 metadata with 'snipped', got: %q",
@@ -396,6 +394,86 @@ func TestCompressOldToolResults_TieredBehavior(t *testing.T) {
 					i, distFromEnd, resultContent)
 			}
 		}
+	}
+}
+
+func TestCompressOldToolResults_Tier2FloorForReadTools(t *testing.T) {
+	// Verify that file_read and grep results never degrade to Tier 1 metadata stubs,
+	// even when they would normally be old enough for Tier 1.
+	const numTools = 26
+	var messages []client.Message
+	messages = append(messages, client.Message{
+		Role:    "user",
+		Content: client.NewTextContent("Start"),
+	})
+
+	// Tools 0-4: floor tools, 5-25: normal tools.
+	// With 26 total results, tool 5 sits exactly at distFromEnd=20, so it should
+	// hit Tier 1 and serve as the non-floor control case.
+	for i := 0; i < numTools; i++ {
+		id := fmt.Sprintf("tu-%d", i)
+		name := "tool_other"
+		if i < 3 {
+			name = "file_read"
+		} else if i < 5 {
+			name = "grep"
+		}
+		args := json.RawMessage(fmt.Sprintf(`{"arg":"value_%d"}`, i))
+		content := fmt.Sprintf("Result %d: %s", i, strings.Repeat("x", 500))
+
+		messages = append(messages, client.Message{
+			Role: "assistant",
+			Content: client.NewBlockContent([]client.ContentBlock{
+				client.NewToolUseBlock(id, name, args),
+			}),
+		})
+		messages = append(messages, client.Message{
+			Role: "user",
+			Content: client.NewBlockContent([]client.ContentBlock{
+				client.NewToolResultBlock(id, content, false),
+			}),
+		})
+	}
+
+	compressOldToolResults(context.Background(), messages, 8, 300, nil)
+
+	// Check the oldest file_read/grep results (tools 0-4, dist 25-21 from end)
+	// These should be Tier 2 (truncated with head+tail), NOT Tier 1 (snipped).
+	for i := 0; i < 5; i++ {
+		msgIdx := 2 + i*2
+		blocks := messages[msgIdx].Content.Blocks()
+		resultContent := ""
+		for _, b := range blocks {
+			if b.Type == "tool_result" {
+				if s, ok := b.ToolContent.(string); ok {
+					resultContent = s
+				}
+			}
+		}
+		if strings.Contains(resultContent, "snipped") {
+			t.Errorf("floor tool %d: should not be Tier 1 (snipped), got: %q", i, resultContent[:80])
+		}
+		if !strings.Contains(resultContent, "[... truncated") {
+			t.Errorf("floor tool %d: should be Tier 2 (truncated), got: %q", i, resultContent[:80])
+		}
+	}
+
+	// Non-floor control: tool 5 is old enough for Tier 1 and should become metadata-only.
+	normalIdx := 2 + 5*2
+	blocks := messages[normalIdx].Content.Blocks()
+	resultContent := ""
+	for _, b := range blocks {
+		if b.Type == "tool_result" {
+			if s, ok := b.ToolContent.(string); ok {
+				resultContent = s
+			}
+		}
+	}
+	if !strings.Contains(resultContent, "snipped") {
+		t.Fatalf("non-floor tool should be Tier 1 (snipped), got: %q", resultContent[:80])
+	}
+	if strings.Contains(resultContent, "[... truncated") {
+		t.Fatalf("non-floor tool should not stay in Tier 2, got: %q", resultContent[:80])
 	}
 }
 

@@ -51,6 +51,7 @@ func (t *GrepTool) Run(ctx context.Context, argsJSON string) (agent.ToolResult, 
 		maxResults = 100
 	}
 
+	// rg skips binary files by default — no flag needed.
 	cmdArgs := []string{"-n", "--max-count", fmt.Sprintf("%d", maxResults)}
 	if args.Glob != "" {
 		cmdArgs = append(cmdArgs, "--glob", args.Glob)
@@ -60,7 +61,7 @@ func (t *GrepTool) Run(ctx context.Context, argsJSON string) (agent.ToolResult, 
 	bin := "rg"
 	if _, err := exec.LookPath("rg"); err != nil {
 		bin = "grep"
-		cmdArgs = []string{"-rn", "--max-count", fmt.Sprintf("%d", maxResults), args.Pattern, path}
+		cmdArgs = []string{"-rn", "-I", "--max-count", fmt.Sprintf("%d", maxResults), args.Pattern, path}
 	}
 
 	cmd := exec.CommandContext(ctx, bin, cmdArgs...)

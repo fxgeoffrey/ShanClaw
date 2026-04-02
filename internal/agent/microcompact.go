@@ -26,9 +26,16 @@ const (
 // microCompactSkipTools lists tools whose results should never be micro-compacted.
 // think: internal reasoning, not factual — summarization destroys the purpose.
 // cloud_delegate: deliverables for the user, not agent working memory.
+// file_read, grep, glob, directory_list: code/search/repo-inspection results where
+// the model needs actual content (paths, signatures, line numbers), not summaries.
+// These always get mechanical head+tail truncation in Tier 2.
 var microCompactSkipTools = map[string]bool{
 	"think":          true,
 	"cloud_delegate": true,
+	"file_read":      true,
+	"grep":           true,
+	"glob":           true,
+	"directory_list": true,
 }
 
 const microCompactPrompt = `Summarize this tool result in 1-2 sentences. Preserve exact error strings, file paths, URLs, IDs, and numbers when present. Focus on the final outcome or conclusion.

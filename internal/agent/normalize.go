@@ -159,3 +159,36 @@ func extractResultSignature(content string) string {
 	sort.Strings(urls)
 	return strings.Join(urls, ",")
 }
+
+// isNonActionableSearch returns true if a search-family tool returned results
+// that don't help the model make progress: no matches, binary-only matches,
+// or errors. Productive searches (actual source code hits) return false.
+func isNonActionableSearch(toolName string, result ToolResult) bool {
+	if ToolFamilies[toolName] != "search" {
+		return false
+	}
+	if result.IsError {
+		return true
+	}
+	content := result.Content
+	if content == "no matches found" || content == "no files matched" {
+		return true
+	}
+	// Binary-only matches (defensive — after grep binary exclusion, this is rare)
+	if strings.HasPrefix(content, "Binary file ") && !strings.Contains(content, "\n") {
+		return true
+	}
+	// Multiple binary matches with no real content
+	lines := strings.Split(strings.TrimSpace(content), "\n")
+	allBinary := len(lines) > 0
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "Binary file ") {
+			allBinary = false
+			break
+		}
+	}
+	if allBinary {
+		return true
+	}
+	return false
+}

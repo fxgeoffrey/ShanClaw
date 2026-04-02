@@ -13,19 +13,20 @@ type LoopAction int
 
 const (
 	LoopContinue  LoopAction = iota // proceed normally
-	LoopNudge                        // inject "try different approach" message
-	LoopForceStop                    // force final response without tools
+	LoopNudge                       // inject "try different approach" message
+	LoopForceStop                   // force final response without tools
 )
 
 // ToolCallRecord tracks a single tool invocation for loop detection.
 type ToolCallRecord struct {
-	Name      string
-	ArgsHash  string // hex-encoded hash of raw args
-	TopicHash string // hex-encoded hash of normalized args (web tools)
-	ResultSig string // domain signature from results (web tools)
-	IsError   bool
-	ErrorSig  string // first 100 chars of error for grouping
-	IsSleep   bool   // bash command contains sleep
+	Name            string
+	ArgsHash        string // hex-encoded hash of raw args
+	TopicHash       string // hex-encoded hash of normalized args (web tools)
+	ResultSig       string // domain signature from results (web tools)
+	IsError         bool
+	ErrorSig        string // first 100 chars of error for grouping
+	IsSleep         bool   // bash command contains sleep
+	IsNonActionable bool   // search returned no useful results (no matches, binary noise, errors)
 }
 
 // LoopDetector uses a sliding window of recent tool calls to detect stuck loops.
@@ -39,9 +40,9 @@ type ToolCallRecord struct {
 //   - FamilyNoProgress: tools in the same family, counted by topic similarity
 //     (3 same-topic → nudge, 5 → stronger nudge, 7 → force stop)
 //     Fallback: same-tool count when topic tracking unavailable (5 → nudge, 7 → force stop)
-//   - SearchEscalation: consecutive search-family calls without intervening non-search tools
-//     (3 consecutive → nudge, 5 consecutive → force stop)
-//   - NoProgress: same tool called M+ times regardless of args (skip visual tools)
+//   - SearchEscalation: trailing unproductive search-family calls
+//     (5 unproductive → nudge, 8 unproductive → force stop)
+//   - NoProgress: same tool called M+ times regardless of args (skip visual/search tools)
 //   - Sleep: bash commands containing sleep (2 → nudge, 4 → force stop)
 //
 // Response escalation: threshold = nudge, threshold+1 = force stop (consecutive), 2x threshold = force stop (others).
@@ -101,7 +102,7 @@ func NewLoopDetector() *LoopDetector {
 }
 
 // Record adds a tool call to the sliding window.
-func (ld *LoopDetector) Record(name, argsJSON string, isError bool, errMsg string, resultSig string) {
+func (ld *LoopDetector) Record(name, argsJSON string, isError bool, errMsg string, resultSig string, isNonActionable bool) {
 	topicHash := ""
 	if ToolFamilies[name] != "" {
 		normalized := normalizeWebQuery(argsJSON)
@@ -110,13 +111,14 @@ func (ld *LoopDetector) Record(name, argsJSON string, isError bool, errMsg strin
 		}
 	}
 	rec := ToolCallRecord{
-		Name:      name,
-		ArgsHash:  hashArgs(argsJSON),
-		TopicHash: topicHash,
-		ResultSig: resultSig,
-		IsError:   isError,
-		ErrorSig:  truncateErrSig(errMsg, 100),
-		IsSleep:   name == "bash" && isSleepCommand(argsJSON),
+		Name:            name,
+		ArgsHash:        hashArgs(argsJSON),
+		TopicHash:       topicHash,
+		ResultSig:       resultSig,
+		IsError:         isError,
+		ErrorSig:        truncateErrSig(errMsg, 100),
+		IsSleep:         name == "bash" && isSleepCommand(argsJSON),
+		IsNonActionable: isNonActionable,
 	}
 	ld.history = append(ld.history, rec)
 	if len(ld.history) > ld.historySize {
@@ -302,9 +304,9 @@ func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 		// Fallback for families without topic/result tracking (e.g., GUI tools
 		// where normalizer can't extract topics from script/screenshot args).
 		// Count same-tool occurrences as a proxy for lack of progress.
-		// Skip repeatable tools (screenshot, computer, accessibility) — they're
-		// expected to be called many times in GUI automation workflows.
-		if progressCount == 0 && !ld.repeatableTools[name] {
+		// Skip repeatable tools and search-family tools (search has its own
+		// dedicated unproductive-streak detector below).
+		if progressCount == 0 && !ld.repeatableTools[name] && family != "search" {
 			sameToolInFamily := 0
 			for _, rec := range ld.history {
 				if rec.Name == name {
@@ -322,29 +324,35 @@ func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 		}
 	}
 
-	// 4. Search escalation: consecutive search-family calls without other tools between them.
-	// Catches grep→grep→grep or grep→glob→grep without acting on results.
+	// 4. Search escalation: count trailing unproductive search-family calls.
+	// A productive search (actionable results) resets the streak. Only
+	// non-actionable calls (no matches, errors, binary noise) count.
 	if family == "search" {
-		consecSearch := 0
+		unproductiveStreak := 0
 		for i := len(ld.history) - 1; i >= 0; i-- {
-			if ToolFamilies[ld.history[i].Name] == "search" {
-				consecSearch++
-			} else {
-				break
+			rec := ld.history[i]
+			if ToolFamilies[rec.Name] != "search" {
+				break // non-search tool breaks the streak
 			}
+			if !rec.IsNonActionable {
+				break // productive search resets the streak
+			}
+			unproductiveStreak++
 		}
-		if consecSearch >= 5 {
+		if unproductiveStreak >= 8 {
 			return LoopForceStop, fmt.Sprintf(
-				"You have made %d consecutive search calls without acting on results. Stop searching and use what you have, or ask the user for guidance.", consecSearch)
+				"You have made %d consecutive unproductive search calls. Stop searching and use what you have, or ask the user for guidance.", unproductiveStreak)
 		}
-		if consecSearch >= 3 {
+		if unproductiveStreak >= 5 {
 			return LoopNudge, fmt.Sprintf(
-				"You've made %d search calls without finding useful results. Reconsider your approach — try different search terms, check if the file/pattern exists, or ask the user for guidance.", consecSearch)
+				"You've made %d search calls without finding useful results. Reconsider your approach — try different search terms, check if the file/pattern exists, or ask the user for guidance.", unproductiveStreak)
 		}
 	}
 
-	// 5. No progress detector: same tool called too many times (skip for GUI tools)
-	if !ld.repeatableTools[name] {
+	// 5. No progress detector: same tool called too many times.
+	// Search-family tools are excluded because productive repository exploration
+	// often uses many grep/glob calls with different arguments.
+	if !ld.repeatableTools[name] && family != "search" {
 		count := 0
 		for _, rec := range ld.history {
 			if rec.Name == name {

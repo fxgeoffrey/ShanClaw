@@ -23,6 +23,7 @@ type AgentAPI struct {
 
 // AgentConfigAPI is the JSON representation of agent config.
 type AgentConfigAPI struct {
+	CWD        string             `json:"cwd,omitempty"`
 	Tools      *AgentToolsFilter  `json:"tools,omitempty"`
 	MCPServers *AgentMCPConfigAPI `json:"mcp_servers,omitempty"`
 	Agent      *AgentModelConfig  `json:"agent,omitempty"`
@@ -48,6 +49,7 @@ func (a *Agent) ToAPI() *AgentAPI {
 	}
 	if a.Config != nil {
 		api.Config = &AgentConfigAPI{
+			CWD:   a.Config.CWD,
 			Tools: a.Config.Tools,
 			Agent: a.Config.Agent,
 		}
@@ -99,6 +101,9 @@ func WriteAgentConfig(agentsDir, name string, cfg *AgentConfigAPI) error {
 		return os.Remove(path)
 	}
 	m := make(map[string]interface{})
+	if cfg.CWD != "" {
+		m["cwd"] = cfg.CWD
+	}
 	if cfg.Tools != nil {
 		m["tools"] = cfg.Tools
 	}

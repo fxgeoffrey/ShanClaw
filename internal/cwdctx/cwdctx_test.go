@@ -95,6 +95,29 @@ func TestIsUnderSessionCWD(t *testing.T) {
 	}
 }
 
+func TestResolvePath_CleansTraversalInAbsolutePath(t *testing.T) {
+	ctx := WithSessionCWD(context.Background(), "/projects/foo")
+	got := ResolvePath(ctx, "/projects/foo/../secret")
+	if got != "/projects/secret" {
+		t.Fatalf("expected /projects/secret, got %q", got)
+	}
+}
+
+func TestIsUnderSessionCWD_RejectsAbsoluteTraversal(t *testing.T) {
+	ctx := WithSessionCWD(context.Background(), "/projects/foo")
+	// Absolute path that traverses out of CWD
+	if IsUnderSessionCWD(ctx, "/projects/foo/../secret") {
+		t.Error("/projects/foo/../secret should NOT be under /projects/foo after cleaning")
+	}
+	if IsUnderSessionCWD(ctx, "/projects/foo/../../etc/passwd") {
+		t.Error("traversal via absolute path should be rejected")
+	}
+	// But legitimate subpath should still work
+	if !IsUnderSessionCWD(ctx, "/projects/foo/sub/../sub/file.txt") {
+		t.Error("/projects/foo/sub/../sub/file.txt should be under CWD after cleaning")
+	}
+}
+
 func TestResolveEffectiveCWD_Priority(t *testing.T) {
 	tests := []struct {
 		name    string

@@ -1023,6 +1023,10 @@ func (m *Model) runAgentLoop(query string, history []client.Message) tea.Cmd {
 				agentCWD = m.agentOverride.Config.CWD
 			}
 			effectiveCWD := cwdctx.ResolveEffectiveCWD("", sessionCWD, agentCWD)
+			if err := cwdctx.ValidateCWD(effectiveCWD); err != nil {
+				fmt.Fprintf(os.Stderr, "[tui] invalid session CWD %q, falling back to process CWD: %v\n", effectiveCWD, err)
+				effectiveCWD, _ = os.Getwd()
+			}
 			sess.CWD = effectiveCWD
 			m.agentLoop.SetSessionCWD(effectiveCWD)
 

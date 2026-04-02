@@ -60,14 +60,14 @@ func ResolvePath(ctx context.Context, path string) string {
 	}
 
 	if strings.HasPrefix(path, "~") {
-		return expandHome(path)
+		return filepath.Clean(expandHome(path))
 	}
 
 	if filepath.IsAbs(path) {
-		return path
+		return filepath.Clean(path)
 	}
 
-	return filepath.Join(base, path)
+	return filepath.Clean(filepath.Join(base, path))
 }
 
 // IsUnderSessionCWD checks if the resolved path is under the session CWD.
@@ -77,12 +77,11 @@ func IsUnderSessionCWD(ctx context.Context, path string) bool {
 		return false
 	}
 	resolved := ResolvePath(ctx, path)
-	// Ensure trailing separator to avoid /projects/foobar matching /projects/foo
-	base := sessionCWD
-	if !strings.HasSuffix(base, string(filepath.Separator)) {
-		base += string(filepath.Separator)
+	cwdClean := filepath.Clean(sessionCWD)
+	if resolved == cwdClean {
+		return true
 	}
-	return resolved == sessionCWD || strings.HasPrefix(resolved, base)
+	return strings.HasPrefix(resolved, cwdClean+string(filepath.Separator))
 }
 
 // ResolveEffectiveCWD returns the first non-empty value among requestCWD,

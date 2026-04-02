@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/cwdctx"
@@ -69,5 +70,25 @@ func TestGrep_ResolvesRelativePathFromSessionCWD(t *testing.T) {
 	}
 	if result.IsError {
 		t.Fatalf("unexpected error: %s", result.Content)
+	}
+}
+
+func TestBash_UsesSessionCWDWhenNoCWDField(t *testing.T) {
+	dir := t.TempDir()
+
+	ctx := cwdctx.WithSessionCWD(context.Background(), dir)
+	tool := &BashTool{}
+	result, err := tool.Run(ctx, `{"command":"pwd"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content)
+	}
+	got := strings.TrimSpace(result.Content)
+	// On macOS, /tmp may resolve to /private/tmp
+	resolved, _ := filepath.EvalSymlinks(dir)
+	if got != dir && got != resolved {
+		t.Fatalf("expected bash to run in %q, got %q", dir, got)
 	}
 }

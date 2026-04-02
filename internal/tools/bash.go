@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/agent"
+	"github.com/Kocoro-lab/ShanClaw/internal/cwdctx"
 )
 
 type BashTool struct {
@@ -87,8 +88,12 @@ func (t *BashTool) Run(ctx context.Context, argsJSON string) (agent.ToolResult, 
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", args.Command)
-	if t.CWD != "" {
-		cmd.Dir = t.CWD
+	dir := t.CWD
+	if dir == "" {
+		dir = cwdctx.FromContext(ctx)
+	}
+	if dir != "" {
+		cmd.Dir = dir
 	}
 	output, err := cmd.CombinedOutput()
 

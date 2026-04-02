@@ -115,6 +115,7 @@ type toolResultEntry struct {
 }
 
 type Model struct {
+	baseCfg             *config.Config
 	cfg                 *config.Config
 	gateway             *client.GatewayClient
 	sessions            *session.Manager
@@ -148,7 +149,7 @@ type Model struct {
 	remoteCleanup       func()             // cleanup for MCP connections from async load
 	cancelRun           context.CancelFunc // cancels the running agent loop
 	injectCh            chan string        // injection channel for mid-run messages
-	resumedSession      bool              // true when the current session was resumed (not newly created)
+	resumedSession      bool               // true when the current session was resumed (not newly created)
 	// Tool result display
 	pendingToolName string
 	pendingToolArgs string
@@ -189,6 +190,11 @@ func (m *Model) SetBypassPermissions(bypass bool) {
 }
 
 func (m *Model) cwd() string {
+	if m.sessions != nil {
+		if sess := m.sessions.Current(); sess != nil && sess.CWD != "" {
+			return sess.CWD
+		}
+	}
 	dir, _ := os.Getwd()
 	return dir
 }
@@ -258,7 +264,25 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 		sessDir = filepath.Join(shannonDir, "agents", agentOverride.Name, "sessions")
 	}
 	sessMgr := session.NewManager(sessDir)
-	sessMgr.NewSession()
+	sess := sessMgr.NewSession()
+
+	initialCWD, _ := os.Getwd()
+	if agentOverride != nil && agentOverride.Config != nil && agentOverride.Config.CWD != "" {
+		initialCWD = agentOverride.Config.CWD
+	}
+	if err := cwdctx.ValidateCWD(initialCWD); err != nil {
+		fallbackCWD, _ := os.Getwd()
+		initialCWD = fallbackCWD
+	}
+	if sess != nil {
+		sess.CWD = initialCWD
+	}
+
+	runtimeCfg, err := config.RuntimeConfigForCWD(cfg, initialCWD)
+	if err != nil {
+		log.Printf("WARNING: failed to load runtime config for %q: %v", initialCWD, err)
+		runtimeCfg = config.Clone(cfg)
+	}
 
 	// Create audit logger (best-effort)
 	var auditor *audit.AuditLogger
@@ -270,26 +294,26 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 	}
 
 	// Local tools only (fast, sync) — MCP + gateway loaded async in Init
-	reg, skillsPtr, toolCleanup := tools.RegisterLocalTools(cfg)
+	reg, skillsPtr, toolCleanup := tools.RegisterLocalTools(runtimeCfg)
 	tools.RegisterSessionSearch(reg, sessMgr)
 
-	hookRunner := hooks.NewHookRunner(cfg.Hooks)
-	loop := agent.NewAgentLoop(gateway, reg, cfg.ModelTier, shannonDir, cfg.Agent.MaxIterations, cfg.Tools.ResultTruncation, cfg.Tools.ArgsTruncation, &cfg.Permissions, auditor, hookRunner)
-	loop.SetMaxTokens(cfg.Agent.MaxTokens)
-	loop.SetTemperature(cfg.Agent.Temperature)
-	loop.SetContextWindow(cfg.Agent.ContextWindow)
-	if cfg.Agent.Model != "" {
-		loop.SetSpecificModel(cfg.Agent.Model)
+	hookRunner := hooks.NewHookRunner(runtimeCfg.Hooks)
+	loop := agent.NewAgentLoop(gateway, reg, runtimeCfg.ModelTier, shannonDir, runtimeCfg.Agent.MaxIterations, runtimeCfg.Tools.ResultTruncation, runtimeCfg.Tools.ArgsTruncation, &runtimeCfg.Permissions, auditor, hookRunner)
+	loop.SetMaxTokens(runtimeCfg.Agent.MaxTokens)
+	loop.SetTemperature(runtimeCfg.Agent.Temperature)
+	loop.SetContextWindow(runtimeCfg.Agent.ContextWindow)
+	if runtimeCfg.Agent.Model != "" {
+		loop.SetSpecificModel(runtimeCfg.Agent.Model)
 	}
-	if cfg.Agent.Thinking {
-		if cfg.Agent.ThinkingMode == "enabled" {
-			loop.SetThinking(&client.ThinkingConfig{Type: "enabled", BudgetTokens: cfg.Agent.ThinkingBudget})
+	if runtimeCfg.Agent.Thinking {
+		if runtimeCfg.Agent.ThinkingMode == "enabled" {
+			loop.SetThinking(&client.ThinkingConfig{Type: "enabled", BudgetTokens: runtimeCfg.Agent.ThinkingBudget})
 		} else {
 			loop.SetThinking(&client.ThinkingConfig{Type: "adaptive"})
 		}
 	}
-	if cfg.Agent.ReasoningEffort != "" {
-		loop.SetReasoningEffort(cfg.Agent.ReasoningEffort)
+	if runtimeCfg.Agent.ReasoningEffort != "" {
+		loop.SetReasoningEffort(runtimeCfg.Agent.ReasoningEffort)
 	}
 	// Per-agent model config overrides
 	if agentOverride != nil && agentOverride.Config != nil && agentOverride.Config.Agent != nil {
@@ -336,49 +360,11 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 
 	settings := config.LoadSettings()
 
-	// Load custom commands and add to slash command list.
-	// Build a per-instance slice so repeated New() calls don't accumulate into the global.
-	customCmds, _ := instructions.LoadCustomCommands(shannonDir, ".")
-	if customCmds == nil {
-		customCmds = make(map[string]string)
-	}
-	instanceCmds := make([]slashCmd, len(baseSlashCommands))
-	copy(instanceCmds, baseSlashCommands)
-	for name := range customCmds {
-		instanceCmds = append(instanceCmds, slashCmd{
-			cmd:  "/" + name,
-			desc: "Custom command",
-		})
-	}
-
-	// Built-in command names that agent commands/skills must not overwrite.
-	builtinCmds := agents.BuiltinCommands
-
-	// Merge agent-scoped commands and prompt-type skills
-	if agentOverride != nil {
-		for name, content := range agentOverride.Commands {
-			if builtinCmds[name] {
-				continue
-			}
-			customCmds[name] = content
-			instanceCmds = append(instanceCmds, slashCmd{
-				cmd:  "/" + name,
-				desc: "Agent command",
-			})
-		}
-		for _, s := range agentOverride.Skills {
-			if s.Prompt != "" && !builtinCmds[s.Name] {
-				customCmds[s.Name] = s.Prompt
-				instanceCmds = append(instanceCmds, slashCmd{
-					cmd:  "/" + s.Name,
-					desc: s.Description,
-				})
-			}
-		}
-	}
+	customCmds, instanceCmds := buildRuntimeCommands(shannonDir, initialCWD, agentOverride)
 
 	m := &Model{
-		cfg:            cfg,
+		baseCfg:        cfg,
+		cfg:            runtimeCfg,
 		gateway:        gateway,
 		sessions:       sessMgr,
 		agentLoop:      loop,
@@ -401,6 +387,138 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 	}
 
 	return m
+}
+
+func buildRuntimeCommands(shannonDir, projectDir string, agentOverride *agents.Agent) (map[string]string, []slashCmd) {
+	customCmds, _ := instructions.LoadCustomCommands(shannonDir, projectDir)
+	if customCmds == nil {
+		customCmds = make(map[string]string)
+	}
+
+	instanceCmds := make([]slashCmd, len(baseSlashCommands))
+	copy(instanceCmds, baseSlashCommands)
+	for name := range customCmds {
+		instanceCmds = append(instanceCmds, slashCmd{
+			cmd:  "/" + name,
+			desc: "Custom command",
+		})
+	}
+
+	builtinCmds := agents.BuiltinCommands
+	if agentOverride != nil {
+		for name, content := range agentOverride.Commands {
+			if builtinCmds[name] {
+				continue
+			}
+			customCmds[name] = content
+			instanceCmds = append(instanceCmds, slashCmd{
+				cmd:  "/" + name,
+				desc: "Agent command",
+			})
+		}
+		for _, s := range agentOverride.Skills {
+			if s.Prompt != "" && !builtinCmds[s.Name] {
+				customCmds[s.Name] = s.Prompt
+				instanceCmds = append(instanceCmds, slashCmd{
+					cmd:  "/" + s.Name,
+					desc: s.Description,
+				})
+			}
+		}
+	}
+
+	return customCmds, instanceCmds
+}
+
+func (m *Model) rebuildAgentLoop() {
+	if m == nil || m.cfg == nil || m.toolRegistry == nil {
+		return
+	}
+
+	m.hookRunner = hooks.NewHookRunner(m.cfg.Hooks)
+	loop := agent.NewAgentLoop(m.gateway, m.toolRegistry, m.cfg.ModelTier, m.shannonDir, m.cfg.Agent.MaxIterations, m.cfg.Tools.ResultTruncation, m.cfg.Tools.ArgsTruncation, &m.cfg.Permissions, m.auditor, m.hookRunner)
+	loop.SetMaxTokens(m.cfg.Agent.MaxTokens)
+	loop.SetTemperature(m.cfg.Agent.Temperature)
+	loop.SetContextWindow(m.cfg.Agent.ContextWindow)
+	if m.cfg.Agent.Model != "" {
+		loop.SetSpecificModel(m.cfg.Agent.Model)
+	}
+	if m.cfg.Agent.Thinking {
+		if m.cfg.Agent.ThinkingMode == "enabled" {
+			loop.SetThinking(&client.ThinkingConfig{Type: "enabled", BudgetTokens: m.cfg.Agent.ThinkingBudget})
+		} else {
+			loop.SetThinking(&client.ThinkingConfig{Type: "adaptive"})
+		}
+	}
+	if m.cfg.Agent.ReasoningEffort != "" {
+		loop.SetReasoningEffort(m.cfg.Agent.ReasoningEffort)
+	}
+	if m.agentOverride != nil && m.agentOverride.Config != nil && m.agentOverride.Config.Agent != nil {
+		ac := m.agentOverride.Config.Agent
+		if ac.Model != nil {
+			loop.SetSpecificModel(*ac.Model)
+		}
+		if ac.MaxIterations != nil {
+			loop.SetMaxIterations(*ac.MaxIterations)
+		}
+		if ac.Temperature != nil {
+			loop.SetTemperature(*ac.Temperature)
+		}
+		if ac.MaxTokens != nil {
+			loop.SetMaxTokens(*ac.MaxTokens)
+		}
+		if ac.ContextWindow != nil {
+			loop.SetContextWindow(*ac.ContextWindow)
+		}
+	}
+	loop.SetBypassPermissions(m.bypassPermissions)
+	loop.SetEnableStreaming(true)
+	if m.agentOverride != nil {
+		scopedMCPCtx := tools.ResolveMCPContext(m.cfg, m.agentOverride)
+		agentDir := filepath.Join(m.shannonDir, "agents", m.agentOverride.Name)
+		loop.SwitchAgent(m.agentOverride.Prompt, agentDir, nil, scopedMCPCtx, m.loadedSkills)
+	} else {
+		loop.SetMemoryDir(filepath.Join(m.shannonDir, "memory"))
+		if m.loadedSkills != nil {
+			loop.SetSkills(m.loadedSkills)
+		}
+		mcpCtx := tools.ResolveMCPContext(m.cfg)
+		if mcpCtx != "" {
+			loop.SetMCPContext(mcpCtx)
+		}
+	}
+	m.agentLoop = loop
+}
+
+func (m *Model) applyRuntimeContext(sess *session.Session) string {
+	var sessionCWD string
+	if m.resumedSession && sess != nil {
+		sessionCWD = sess.CWD
+	}
+	var agentCWD string
+	if m.agentOverride != nil && m.agentOverride.Config != nil {
+		agentCWD = m.agentOverride.Config.CWD
+	}
+	effectiveCWD := cwdctx.ResolveEffectiveCWD("", sessionCWD, agentCWD)
+	if err := cwdctx.ValidateCWD(effectiveCWD); err != nil {
+		fmt.Fprintf(os.Stderr, "[tui] invalid session CWD %q, falling back to process CWD: %v\n", effectiveCWD, err)
+		effectiveCWD, _ = os.Getwd()
+	}
+	if sess != nil {
+		sess.CWD = effectiveCWD
+	}
+
+	runCfg, err := config.RuntimeConfigForCWD(m.baseCfg, effectiveCWD)
+	if err != nil {
+		log.Printf("WARNING: failed to load runtime config for %q: %v", effectiveCWD, err)
+		runCfg = config.Clone(m.baseCfg)
+	}
+	m.cfg = runCfg
+	m.customCommands, m.slashCommands = buildRuntimeCommands(m.shannonDir, effectiveCWD, m.agentOverride)
+	m.toolRegistry = tools.CloneWithRuntimeConfig(m.toolRegistry, m.cfg)
+	m.rebuildAgentLoop()
+	m.updateMenu()
+	return effectiveCWD
 }
 
 func (m *Model) Init() tea.Cmd {
@@ -607,6 +725,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.appendOutput(fmt.Sprintf("Error: %v", err))
 					} else {
 						m.resumedSession = true
+						m.applyRuntimeContext(sess)
 						m.loadSessionHistory(sess)
 					}
 				}
@@ -722,60 +841,8 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.remoteCleanup = msg.cleanup
 		}
 		if msg.registry != nil {
-			m.toolRegistry = msg.registry
-			m.agentLoop = agent.NewAgentLoop(m.gateway, msg.registry, m.cfg.ModelTier, m.shannonDir, m.cfg.Agent.MaxIterations, m.cfg.Tools.ResultTruncation, m.cfg.Tools.ArgsTruncation, &m.cfg.Permissions, m.auditor, m.hookRunner)
-			m.agentLoop.SetMaxTokens(m.cfg.Agent.MaxTokens)
-			m.agentLoop.SetTemperature(m.cfg.Agent.Temperature)
-			m.agentLoop.SetContextWindow(m.cfg.Agent.ContextWindow)
-			if m.cfg.Agent.Model != "" {
-				m.agentLoop.SetSpecificModel(m.cfg.Agent.Model)
-			}
-			if m.cfg.Agent.Thinking {
-				if m.cfg.Agent.ThinkingMode == "enabled" {
-					m.agentLoop.SetThinking(&client.ThinkingConfig{Type: "enabled", BudgetTokens: m.cfg.Agent.ThinkingBudget})
-				} else {
-					m.agentLoop.SetThinking(&client.ThinkingConfig{Type: "adaptive"})
-				}
-			}
-			if m.cfg.Agent.ReasoningEffort != "" {
-				m.agentLoop.SetReasoningEffort(m.cfg.Agent.ReasoningEffort)
-			}
-			// Per-agent model config overrides
-			if m.agentOverride != nil && m.agentOverride.Config != nil && m.agentOverride.Config.Agent != nil {
-				ac := m.agentOverride.Config.Agent
-				if ac.Model != nil {
-					m.agentLoop.SetSpecificModel(*ac.Model)
-				}
-				if ac.MaxIterations != nil {
-					m.agentLoop.SetMaxIterations(*ac.MaxIterations)
-				}
-				if ac.Temperature != nil {
-					m.agentLoop.SetTemperature(*ac.Temperature)
-				}
-				if ac.MaxTokens != nil {
-					m.agentLoop.SetMaxTokens(*ac.MaxTokens)
-				}
-				if ac.ContextWindow != nil {
-					m.agentLoop.SetContextWindow(*ac.ContextWindow)
-				}
-			}
-			m.agentLoop.SetBypassPermissions(m.bypassPermissions)
-			m.agentLoop.SetEnableStreaming(true)
-			// Re-apply agent override (prompt, memory dir, MCP context, skills)
-			if m.agentOverride != nil {
-				scopedMCPCtx := tools.ResolveMCPContext(m.cfg, m.agentOverride)
-				agentDir := filepath.Join(m.shannonDir, "agents", m.agentOverride.Name)
-				m.agentLoop.SwitchAgent(m.agentOverride.Prompt, agentDir, nil, scopedMCPCtx, m.loadedSkills)
-			} else {
-				m.agentLoop.SetMemoryDir(filepath.Join(m.shannonDir, "memory"))
-				if m.loadedSkills != nil {
-					m.agentLoop.SetSkills(m.loadedSkills)
-				}
-				mcpCtx := tools.ResolveMCPContext(m.cfg)
-				if mcpCtx != "" {
-					m.agentLoop.SetMCPContext(mcpCtx)
-				}
-			}
+			m.toolRegistry = tools.CloneWithRuntimeConfig(msg.registry, m.cfg)
+			m.rebuildAgentLoop()
 		}
 		return m, nil
 
@@ -998,39 +1065,20 @@ func (m *Model) runAgentLoop(query string, history []client.Message) tea.Cmd {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancelRun = cancel
 	m.injectCh = make(chan string, 10)
-	m.agentLoop.SetInjectCh(m.injectCh)
 	return func() tea.Msg {
-		handler := &tuiEventHandler{model: m}
-		m.agentLoop.SetHandler(handler)
-		// Wire handler to cloud_delegate tool so it can stream events
-		if ct, ok := m.toolRegistry.Get("cloud_delegate"); ok {
-			if cdt, ok := ct.(*tools.CloudDelegateTool); ok {
-				cdt.SetHandler(handler)
-			}
-		}
-
 		if sess := m.sessions.Current(); sess != nil {
+			effectiveCWD := m.applyRuntimeContext(sess)
+			handler := &tuiEventHandler{model: m}
+			m.agentLoop.SetHandler(handler)
+			m.agentLoop.SetInjectCh(m.injectCh)
+			// Wire handler to cloud_delegate tool so it can stream events
+			if ct, ok := m.toolRegistry.Get("cloud_delegate"); ok {
+				if cdt, ok := ct.(*tools.CloudDelegateTool); ok {
+					cdt.SetHandler(handler)
+				}
+			}
 			m.agentLoop.SetSessionID(sess.ID)
 			m.agentLoop.SetWorkingSet(m.sessions.WorkingSet(sess.ID))
-
-			// Resolve effective CWD using the same cascade as daemon.
-			var sessionCWD string
-			if m.resumedSession {
-				sessionCWD = sess.CWD
-			}
-			var agentCWD string
-			if m.agentOverride != nil && m.agentOverride.Config != nil {
-				agentCWD = m.agentOverride.Config.CWD
-			}
-			effectiveCWD := cwdctx.ResolveEffectiveCWD("", sessionCWD, agentCWD)
-			if err := cwdctx.ValidateCWD(effectiveCWD); err != nil {
-				// Log the invalid CWD but fall back to process CWD rather than
-				// crashing the TUI. This matches daemon behavior for the fallback
-				// tier (os.Getwd) — the CWD was simply not usable.
-				fmt.Fprintf(os.Stderr, "[tui] invalid session CWD %q, falling back to process CWD: %v\n", effectiveCWD, err)
-				effectiveCWD, _ = os.Getwd()
-			}
-			sess.CWD = effectiveCWD
 			m.agentLoop.SetSessionCWD(effectiveCWD)
 
 			cleanupSpills := m.agentLoop.SpillCleanupFunc()
@@ -1039,6 +1087,14 @@ func (m *Model) runAgentLoop(query string, history []client.Message) tea.Cmd {
 				m.agentLoop.SetWorkingSet(nil)
 			})
 		} else {
+			handler := &tuiEventHandler{model: m}
+			m.agentLoop.SetHandler(handler)
+			m.agentLoop.SetInjectCh(m.injectCh)
+			if ct, ok := m.toolRegistry.Get("cloud_delegate"); ok {
+				if cdt, ok := ct.(*tools.CloudDelegateTool); ok {
+					cdt.SetHandler(handler)
+				}
+			}
 			m.agentLoop.SetSessionID("")
 			m.agentLoop.SetWorkingSet(nil)
 		}
@@ -1295,8 +1351,9 @@ func (m *Model) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 		if len(parts) > 1 {
 			switch parts[1] {
 			case "new":
-				m.sessions.NewSession()
+				sess := m.sessions.NewSession()
 				m.resumedSession = false
+				m.applyRuntimeContext(sess)
 				m.appendOutput("Started new session")
 			case "resume":
 				if len(parts) < 3 {
@@ -1312,6 +1369,7 @@ func (m *Model) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 						m.appendOutput(fmt.Sprintf("Error: %v", err))
 					} else {
 						m.resumedSession = true
+						m.applyRuntimeContext(sess)
 						m.loadSessionHistory(sess)
 					}
 				}
@@ -1319,9 +1377,14 @@ func (m *Model) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 		}
 	case "/model":
 		if len(parts) > 1 {
+			saveCfg := m.cfg
+			if m.baseCfg != nil {
+				m.baseCfg.ModelTier = parts[1]
+				saveCfg = m.baseCfg
+			}
 			m.cfg.ModelTier = parts[1]
 			m.agentLoop.SetModelTier(parts[1])
-			if err := config.Save(m.cfg); err != nil {
+			if err := config.Save(saveCfg); err != nil {
 				m.appendOutput(fmt.Sprintf("Model tier: %s (failed to save: %v)", parts[1], err))
 			} else {
 				m.appendOutput(fmt.Sprintf("Model tier: %s (saved)", parts[1]))

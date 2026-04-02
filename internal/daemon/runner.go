@@ -410,6 +410,10 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 	if err := cwdctx.ValidateCWD(effectiveCWD); err != nil {
 		return nil, fmt.Errorf("invalid cwd: %w", err)
 	}
+	runCfg, err := config.RuntimeConfigForCWD(cfg, effectiveCWD)
+	if err != nil {
+		return nil, fmt.Errorf("runtime config: %w", err)
+	}
 	sess.CWD = effectiveCWD
 	ctx = cwdctx.WithSessionCWD(ctx, effectiveCWD)
 
@@ -479,7 +483,7 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 	}
 
 	// Clone and apply per-agent tool filter
-	reg := baseReg.Clone()
+	reg := tools.CloneWithRuntimeConfig(baseReg, runCfg)
 	if agentOverride != nil {
 		reg = tools.ApplyToolFilter(reg, agentOverride)
 	}
@@ -501,15 +505,15 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 	// Use the per-agent manager so searches are scoped to that agent's sessions.
 	tools.RegisterSessionSearch(reg, sessMgr)
 
-	loop := agent.NewAgentLoop(deps.GW, reg, cfg.ModelTier, deps.ShannonDir,
-		cfg.Agent.MaxIterations, cfg.Tools.ResultTruncation, cfg.Tools.ArgsTruncation,
-		&cfg.Permissions, deps.Auditor, deps.HookRunner)
-	loop.SetMaxTokens(cfg.Agent.MaxTokens)
-	loop.SetTemperature(cfg.Agent.Temperature)
-	loop.SetContextWindow(cfg.Agent.ContextWindow)
+	loop := agent.NewAgentLoop(deps.GW, reg, runCfg.ModelTier, deps.ShannonDir,
+		runCfg.Agent.MaxIterations, runCfg.Tools.ResultTruncation, runCfg.Tools.ArgsTruncation,
+		&runCfg.Permissions, deps.Auditor, deps.HookRunner)
+	loop.SetMaxTokens(runCfg.Agent.MaxTokens)
+	loop.SetTemperature(runCfg.Agent.Temperature)
+	loop.SetContextWindow(runCfg.Agent.ContextWindow)
 	loop.SetEnableStreaming(false)
 	if agentOverride != nil {
-		scopedMCPCtx := tools.ResolveMCPContext(cfg, agentOverride)
+		scopedMCPCtx := tools.ResolveMCPContext(runCfg, agentOverride)
 		agentDir := filepath.Join(deps.ShannonDir, "agents", agentName)
 		loop.SwitchAgent(agentOverride.Prompt, agentDir, nil, scopedMCPCtx, loadedSkills)
 	} else {
@@ -517,23 +521,23 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		if loadedSkills != nil {
 			loop.SetSkills(loadedSkills)
 		}
-		scopedMCPCtx := tools.ResolveMCPContext(cfg)
+		scopedMCPCtx := tools.ResolveMCPContext(runCfg)
 		if scopedMCPCtx != "" {
 			loop.SetMCPContext(scopedMCPCtx)
 		}
 	}
-	if cfg.Agent.Model != "" {
-		loop.SetSpecificModel(cfg.Agent.Model)
+	if runCfg.Agent.Model != "" {
+		loop.SetSpecificModel(runCfg.Agent.Model)
 	}
-	if cfg.Agent.Thinking {
-		if cfg.Agent.ThinkingMode == "enabled" {
-			loop.SetThinking(&client.ThinkingConfig{Type: "enabled", BudgetTokens: cfg.Agent.ThinkingBudget})
+	if runCfg.Agent.Thinking {
+		if runCfg.Agent.ThinkingMode == "enabled" {
+			loop.SetThinking(&client.ThinkingConfig{Type: "enabled", BudgetTokens: runCfg.Agent.ThinkingBudget})
 		} else {
 			loop.SetThinking(&client.ThinkingConfig{Type: "adaptive"})
 		}
 	}
-	if cfg.Agent.ReasoningEffort != "" {
-		loop.SetReasoningEffort(cfg.Agent.ReasoningEffort)
+	if runCfg.Agent.ReasoningEffort != "" {
+		loop.SetReasoningEffort(runCfg.Agent.ReasoningEffort)
 	}
 	// Per-agent model config overrides
 	if agentOverride != nil && agentOverride.Config != nil && agentOverride.Config.Agent != nil {

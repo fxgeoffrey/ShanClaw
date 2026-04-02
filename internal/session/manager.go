@@ -7,6 +7,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/Kocoro-lab/ShanClaw/internal/agent"
 )
 
 // Manager provides session lifecycle operations. It is safe for concurrent use
@@ -17,11 +19,17 @@ type Manager struct {
 	current         *Session
 	onCloseFns      []func()          // manager-wide cleanup callbacks invoked on Close
 	sessionCloseFns map[string]func() // per-session cleanup invoked on session switch/Close
+	runtime         map[string]*sessionRuntime
+}
+
+type sessionRuntime struct {
+	workingSet *agent.WorkingSet
 }
 
 func NewManager(sessionsDir string) *Manager {
 	return &Manager{
-		store: NewStore(sessionsDir),
+		store:   NewStore(sessionsDir),
+		runtime: make(map[string]*sessionRuntime),
 	}
 }
 
@@ -38,6 +46,7 @@ func (m *Manager) NewSession() *Session {
 		Title:     "New session",
 		CWD:       getCWD(),
 	}
+	m.ensureRuntimeLocked(id)
 	sess := m.current
 	callbacks := m.takeSessionCloseLocked(prevID)
 	m.mu.Unlock()
@@ -63,6 +72,7 @@ func (m *Manager) Resume(id string) (*Session, error) {
 		return nil, err
 	}
 	m.current = sess
+	m.ensureRuntimeLocked(sess.ID)
 	callbacks := []func(){}
 	if prevID != "" && prevID != sess.ID {
 		callbacks = m.takeSessionCloseLocked(prevID)
@@ -86,6 +96,9 @@ func (m *Manager) List() ([]SessionSummary, error) {
 }
 
 func (m *Manager) Delete(id string) error {
+	m.mu.Lock()
+	delete(m.runtime, id)
+	m.mu.Unlock()
 	return m.store.Delete(id)
 }
 
@@ -116,6 +129,27 @@ func (m *Manager) OnSessionClose(sessionID string, fn func()) {
 	m.sessionCloseFns[sessionID] = fn
 }
 
+// WorkingSet returns the in-memory deferred-tool working set for a session.
+// The working set is session-scoped runtime state and is never persisted.
+func (m *Manager) WorkingSet(sessionID string) *agent.WorkingSet {
+	if sessionID == "" {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.ensureRuntimeLocked(sessionID).workingSet
+}
+
+// CurrentWorkingSet returns the working set for the current session.
+func (m *Manager) CurrentWorkingSet() *agent.WorkingSet {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.current == nil {
+		return nil
+	}
+	return m.ensureRuntimeLocked(m.current.ID).workingSet
+}
+
 func (m *Manager) Close() error {
 	m.mu.Lock()
 	fns := append([]func(){}, m.onCloseFns...)
@@ -126,6 +160,7 @@ func (m *Manager) Close() error {
 		}
 	}
 	m.sessionCloseFns = nil
+	m.runtime = make(map[string]*sessionRuntime)
 	m.mu.Unlock()
 	runCallbacks(fns)
 	return m.store.Close()
@@ -147,6 +182,24 @@ func runCallbacks(fns []func()) {
 	for _, fn := range fns {
 		fn()
 	}
+}
+
+func (m *Manager) ensureRuntimeLocked(sessionID string) *sessionRuntime {
+	if sessionID == "" {
+		panic("session runtime requires non-empty session ID")
+	}
+	if m.runtime == nil {
+		m.runtime = make(map[string]*sessionRuntime)
+	}
+	rt, ok := m.runtime[sessionID]
+	if !ok || rt == nil {
+		rt = &sessionRuntime{workingSet: agent.NewWorkingSet()}
+		m.runtime[sessionID] = rt
+	}
+	if rt.workingSet == nil {
+		rt.workingSet = agent.NewWorkingSet()
+	}
+	return rt
 }
 
 func (m *Manager) RebuildIndex() error {

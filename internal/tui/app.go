@@ -1008,9 +1008,15 @@ func (m *Model) runAgentLoop(query string, history []client.Message) tea.Cmd {
 
 		if sess := m.sessions.Current(); sess != nil {
 			m.agentLoop.SetSessionID(sess.ID)
-			m.sessions.OnSessionClose(sess.ID, m.agentLoop.SpillCleanupFunc())
+			m.agentLoop.SetWorkingSet(m.sessions.WorkingSet(sess.ID))
+			cleanupSpills := m.agentLoop.SpillCleanupFunc()
+			m.sessions.OnSessionClose(sess.ID, func() {
+				cleanupSpills()
+				m.agentLoop.SetWorkingSet(nil)
+			})
 		} else {
 			m.agentLoop.SetSessionID("")
+			m.agentLoop.SetWorkingSet(nil)
 		}
 		result, usage, err := m.agentLoop.Run(ctx, query, history)
 		if result != "" && (err == nil || errors.Is(err, agent.ErrMaxIterReached)) {

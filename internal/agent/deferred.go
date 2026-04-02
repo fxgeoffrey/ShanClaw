@@ -138,6 +138,18 @@ func rebuildSchemas(reg *ToolRegistry, baseSchemas []client.Tool, loaded map[str
 	return result
 }
 
+// liveToolNames returns tool names in the same order as the live schema list.
+func liveToolNames(schemas []client.Tool) []string {
+	names := make([]string, 0, len(schemas))
+	for _, schema := range schemas {
+		name := schemaToolName(schema)
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
 // schemaToolName extracts the tool name from a client.Tool.
 func schemaToolName(t client.Tool) string {
 	if t.Function.Name != "" {
@@ -172,11 +184,45 @@ func deferredToolNames(reg *ToolRegistry) map[string]bool {
 	return names
 }
 
-// deferredToolSummaries returns sorted summaries for non-local tools.
-func deferredToolSummaries(reg *ToolRegistry) []ToolSummary {
-	_, mcp, gw := reg.partitionBySource()
-	all := append(mcp, gw...)
+// preseedDeferredSchemas filters the session working set down to schemas that
+// are still deferred in the current effective registry.
+func preseedDeferredSchemas(ws *WorkingSet, deferred map[string]bool) map[string]client.Tool {
+	loaded := make(map[string]client.Tool)
+	if ws == nil || len(deferred) == 0 {
+		return loaded
+	}
+	for name, schema := range ws.Schemas() {
+		if deferred[name] {
+			loaded[name] = schema
+		}
+	}
+	return loaded
+}
+
+// remainingDeferredNames removes already-warmed schemas from the deferred set.
+func remainingDeferredNames(deferred map[string]bool, loaded map[string]client.Tool) map[string]bool {
+	remaining := make(map[string]bool, len(deferred))
+	for name := range deferred {
+		if _, ok := loaded[name]; ok {
+			continue
+		}
+		remaining[name] = true
+	}
+	return remaining
+}
+
+// deferredToolSummariesForNames returns sorted summaries for the named deferred tools.
+func deferredToolSummariesForNames(reg *ToolRegistry, names map[string]bool) []ToolSummary {
+	if len(names) == 0 {
+		return nil
+	}
+
+	all := make([]string, 0, len(names))
+	for name := range names {
+		all = append(all, name)
+	}
 	sort.Strings(all)
+
 	summaries := make([]ToolSummary, 0, len(all))
 	for _, name := range all {
 		if t, ok := reg.Get(name); ok {

@@ -139,3 +139,42 @@ func TestManager_OnSessionClose_ReplacesCallbackForSameSession(t *testing.T) {
 		t.Fatalf("expected replacement callback to fire once, got total %d", total)
 	}
 }
+
+func TestManager_WorkingSet_IsScopedPerSession(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManager(dir)
+	defer m.Close()
+
+	s1 := m.NewSession()
+	if err := m.Save(); err != nil {
+		t.Fatalf("save first session: %v", err)
+	}
+	ws1 := m.WorkingSet(s1.ID)
+	if ws1 == nil {
+		t.Fatal("expected working set for first session")
+	}
+	ws1.Add("browser_click", client.Tool{Type: "function", Function: client.FunctionDef{Name: "browser_click"}})
+
+	s2 := m.NewSession()
+	if err := m.Save(); err != nil {
+		t.Fatalf("save second session: %v", err)
+	}
+	ws2 := m.WorkingSet(s2.ID)
+	if ws2 == nil {
+		t.Fatal("expected working set for second session")
+	}
+	if ws2.Contains("browser_click") {
+		t.Fatal("second session should not inherit first session's warmed tools")
+	}
+
+	if _, err := m.Resume(s1.ID); err != nil {
+		t.Fatalf("resume first session: %v", err)
+	}
+	ws1Again := m.CurrentWorkingSet()
+	if ws1Again == nil {
+		t.Fatal("expected working set after resuming first session")
+	}
+	if !ws1Again.Contains("browser_click") {
+		t.Fatal("resumed first session should retain its working set")
+	}
+}

@@ -184,3 +184,95 @@ func TestToolSearchTool_RequiresApproval(t *testing.T) {
 		t.Error("tool_search should not require approval")
 	}
 }
+
+func TestPreseedDeferredSchemas_FiltersToCurrentDeferredSet(t *testing.T) {
+	ws := NewWorkingSet()
+	ws.Add("mcp_a", client.Tool{Type: "function", Function: client.FunctionDef{Name: "mcp_a"}})
+	ws.Add("mcp_b", client.Tool{Type: "function", Function: client.FunctionDef{Name: "mcp_b"}})
+
+	loaded := preseedDeferredSchemas(ws, map[string]bool{
+		"mcp_a": true,
+	})
+
+	if len(loaded) != 1 {
+		t.Fatalf("expected 1 pre-seeded schema, got %d", len(loaded))
+	}
+	if _, ok := loaded["mcp_a"]; !ok {
+		t.Fatal("expected mcp_a to be pre-seeded")
+	}
+	if _, ok := loaded["mcp_b"]; ok {
+		t.Fatal("mcp_b should not be pre-seeded when no longer deferred")
+	}
+}
+
+func TestRemainingDeferredNames_RemovesWarmedTools(t *testing.T) {
+	remaining := remainingDeferredNames(
+		map[string]bool{"mcp_a": true, "mcp_b": true},
+		map[string]client.Tool{"mcp_a": {Type: "function", Function: client.FunctionDef{Name: "mcp_a"}}},
+	)
+
+	if remaining["mcp_a"] {
+		t.Fatal("mcp_a should have been removed from deferred list once warmed")
+	}
+	if !remaining["mcp_b"] {
+		t.Fatal("mcp_b should remain deferred")
+	}
+}
+
+func TestDeferredToolSummariesForNames_Sorted(t *testing.T) {
+	reg := NewToolRegistry()
+	reg.Register(&mockMCPTool{name: "mcp_b"})
+	reg.Register(&mockMCPTool{name: "mcp_a"})
+
+	summaries := deferredToolSummariesForNames(reg, map[string]bool{
+		"mcp_b": true,
+		"mcp_a": true,
+	})
+
+	if len(summaries) != 2 {
+		t.Fatalf("expected 2 summaries, got %d", len(summaries))
+	}
+	if summaries[0].Name != "mcp_a" || summaries[1].Name != "mcp_b" {
+		t.Fatalf("expected sorted summaries, got %+v", summaries)
+	}
+}
+
+func TestDeferredPromptSync_WarmedToolsBecomeLive(t *testing.T) {
+	reg := NewToolRegistry()
+	reg.Register(&mockTool{name: "bash"})
+	reg.Register(&mockMCPTool{name: "mcp_a"})
+	reg.Register(&mockMCPTool{name: "mcp_b"})
+
+	loaded := map[string]client.Tool{
+		"mcp_a": buildToolSchema(&mockMCPTool{name: "mcp_a"}),
+	}
+	remaining := remainingDeferredNames(deferredToolNames(reg), loaded)
+
+	effTools := reg.Clone()
+	effTools.Register(newToolSearchTool(reg, remaining))
+
+	baseSchemas := buildLocalOnlySchemas(effTools)
+	liveSchemas := rebuildSchemas(effTools, baseSchemas, loaded)
+	liveNames := liveToolNames(liveSchemas)
+
+	if !containsString(liveNames, "mcp_a") {
+		t.Fatal("warmed tool should be promoted into live tool names")
+	}
+	if !containsString(liveNames, "tool_search") {
+		t.Fatal("tool_search should remain available while cold deferred tools remain")
+	}
+
+	summaries := deferredToolSummariesForNames(reg, remaining)
+	if len(summaries) != 1 || summaries[0].Name != "mcp_b" {
+		t.Fatalf("expected only cold deferred tool in summaries, got %+v", summaries)
+	}
+}
+
+func containsString(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}

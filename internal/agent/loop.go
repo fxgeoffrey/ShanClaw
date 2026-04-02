@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -250,23 +249,24 @@ type AgentLoop struct {
 	hookRunner        *hooks.HookRunner
 	mcpContext        string
 	bypassPermissions bool
-	enableStreaming    bool
+	enableStreaming   bool
 	thinking          *client.ThinkingConfig
 	reasoningEffort   string
 	temperature       float64
-	specificModel   string
-	agentBasePrompt string
-	agentSkills     []*skills.Skill
-	contextWindow   int
-	memoryDir        string // directory containing MEMORY.md; re-read each Run(), write-before-compact target
-	stickyContext    string // session-scoped facts injected verbatim into system prompt; never truncated
-	outputFormat     string // "markdown" (default) or "plain" — controls formatting guidance in volatile context
-	sessionID        string        // session ID for audit log correlation
-	injectCh         chan string   // receives user messages injected mid-run
-	injectedMessages []string     // messages injected during the last Run(); cleared on each Run() call
-	runMessages      []client.Message // conversation messages accumulated during the last Run() (excludes system+history)
-	runMsgInjected   []bool           // parallel to runMessages: true = system-injected guardrail/nudge
-	runMsgTimestamps []time.Time      // parallel to runMessages: when each message was created
+	specificModel     string
+	agentBasePrompt   string
+	agentSkills       []*skills.Skill
+	contextWindow     int
+	memoryDir         string           // directory containing MEMORY.md; re-read each Run(), write-before-compact target
+	stickyContext     string           // session-scoped facts injected verbatim into system prompt; never truncated
+	outputFormat      string           // "markdown" (default) or "plain" — controls formatting guidance in volatile context
+	workingSet        *WorkingSet      // session-scoped deferred schema cache injected by the caller
+	sessionID         string           // session ID for audit log correlation
+	injectCh          chan string      // receives user messages injected mid-run
+	injectedMessages  []string         // messages injected during the last Run(); cleared on each Run() call
+	runMessages       []client.Message // conversation messages accumulated during the last Run() (excludes system+history)
+	runMsgInjected    []bool           // parallel to runMessages: true = system-injected guardrail/nudge
+	runMsgTimestamps  []time.Time      // parallel to runMessages: when each message was created
 }
 
 func NewAgentLoop(gw *client.GatewayClient, tools *ToolRegistry, modelTier string, shannonDir string, maxIter int, resultTrunc int, argsTrunc int, perms *permissions.PermissionsConfig, auditor *audit.AuditLogger, hookRunner *hooks.HookRunner) *AgentLoop {
@@ -290,6 +290,7 @@ func NewAgentLoop(gw *client.GatewayClient, tools *ToolRegistry, modelTier strin
 		permissions: perms,
 		auditor:     auditor,
 		hookRunner:  hookRunner,
+		workingSet:  NewWorkingSet(),
 	}
 }
 
@@ -350,6 +351,23 @@ func (a *AgentLoop) SetMemoryDir(dir string) {
 // Typically populated with session source/channel/task metadata in daemon mode.
 func (a *AgentLoop) SetStickyContext(ctx string) {
 	a.stickyContext = ctx
+}
+
+// SetWorkingSet injects the session-scoped deferred schema cache for this loop.
+// Passing nil clears any prior session binding and falls back to an empty cache.
+func (a *AgentLoop) SetWorkingSet(ws *WorkingSet) {
+	if ws == nil {
+		a.workingSet = NewWorkingSet()
+		return
+	}
+	a.workingSet = ws
+}
+
+// InvalidateWorkingSet clears the currently attached deferred schema cache.
+func (a *AgentLoop) InvalidateWorkingSet() {
+	if a.workingSet != nil {
+		a.workingSet.Invalidate()
+	}
 }
 
 // SetInjectCh sets the channel for mid-run message injection.
@@ -490,15 +508,61 @@ func assembleUserMessage(parts prompt.PromptParts, userMessage string) string {
 	return sb.String()
 }
 
-func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []client.Message) (string, *TurnUsage, error) {
-	a.injectedMessages = nil   // reset for this run
-	a.runMessages = nil        // reset for this run
-	a.runMsgInjected = nil     // reset for this run
-	a.runMsgTimestamps = nil   // reset for this run
+func cloneMessages(messages []client.Message) []client.Message {
+	out := make([]client.Message, len(messages))
+	copy(out, messages)
+	return out
+}
 
-	// Deferred mode: only activate if there are actual deferred (non-local) tools.
+// reactiveSummaryInput injects the previous compaction summary ahead of the
+// current tail when reactive compaction needs to re-summarize shaped history.
+// The shaped history invariant is [system, first user, ...tail], so the
+// synthetic summary message is inserted at index 2 to preserve that layout.
+func reactiveSummaryInput(messages []client.Message, priorSummary string) []client.Message {
+	priorSummary = strings.TrimSpace(priorSummary)
+	if priorSummary == "" {
+		return messages
+	}
+
+	summaryText := "Previous context summary: " + priorSummary
+	for _, msg := range messages {
+		if msg.Role == "user" && !msg.Content.HasBlocks() && msg.Content.Text() == summaryText {
+			return messages
+		}
+	}
+
+	summaryMsg := client.Message{Role: "user", Content: client.NewTextContent(summaryText)}
+	switch len(messages) {
+	case 0:
+		return []client.Message{summaryMsg}
+	case 1:
+		return append(cloneMessages(messages), summaryMsg)
+	default:
+		out := make([]client.Message, 0, len(messages)+1)
+		out = append(out, messages[0], messages[1], summaryMsg)
+		out = append(out, messages[2:]...)
+		return out
+	}
+}
+
+func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []client.Message) (string, *TurnUsage, error) {
+	a.injectedMessages = nil // reset for this run
+	a.runMessages = nil      // reset for this run
+	a.runMsgInjected = nil   // reset for this run
+	a.runMsgTimestamps = nil // reset for this run
+
+	if a.workingSet == nil {
+		a.workingSet = NewWorkingSet()
+	}
+	a.workingSet.SyncToolset(a.tools)
+
+	// Deferred mode: pre-seed session-warmed deferred schemas, then only keep
+	// the remaining cold deferred tools behind tool_search when the full toolset
+	// exceeds the schema token budget.
 	deferred := deferredToolNames(a.tools)
-	deferredMode := a.tools.Len() > 30 && len(deferred) > 0
+	loadedDeferred := preseedDeferredSchemas(a.workingSet, deferred)
+	coldDeferred := remainingDeferredNames(deferred, loadedDeferred)
+	deferredMode := len(coldDeferred) > 0 && shouldDefer(a.tools, a.tools.SortedNames(), schemaTokenBudget)
 
 	cwd, _ := os.Getwd()
 	instrText, _ := instructions.LoadInstructions(a.shannonDir, ".", 4000)
@@ -533,19 +597,23 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 	var effTools *ToolRegistry
 	var deferredSummaries []prompt.DeferredToolSummary
 	var toolNames []string
+	var toolSchemas []client.Tool
+	var baseSchemas []client.Tool
 
 	if deferredMode {
-		tsSearch := newToolSearchTool(a.tools, deferred)
+		tsSearch := newToolSearchTool(a.tools, coldDeferred)
 		effTools = a.tools.Clone()
 		effTools.Register(tsSearch)
 
-		// ToolNames = local tools + tool_search
-		local, _, _ := effTools.partitionBySource()
-		sort.Strings(local)
-		toolNames = local
+		baseSchemas = buildLocalOnlySchemas(effTools)
+		toolSchemas = baseSchemas
+		if len(loadedDeferred) > 0 {
+			toolSchemas = rebuildSchemas(effTools, baseSchemas, loadedDeferred)
+		}
+		toolNames = liveToolNames(toolSchemas)
 
 		// Deferred summaries for prompt
-		for _, s := range deferredToolSummaries(effTools) {
+		for _, s := range deferredToolSummariesForNames(a.tools, coldDeferred) {
 			deferredSummaries = append(deferredSummaries, prompt.DeferredToolSummary{
 				Name:        s.Name,
 				Description: s.Description,
@@ -553,7 +621,8 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		}
 	} else {
 		effTools = a.tools
-		toolNames = a.tools.SortedNames()
+		toolSchemas = effTools.SortedSchemas()
+		toolNames = liveToolNames(toolSchemas)
 	}
 
 	// Model identity: prefer specificModel, fall back to modelTier.
@@ -572,10 +641,10 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		CWD:           cwd,
 		Skills:        a.agentSkills,
 		MemoryDir:     a.memoryDir,
-		StickyContext:  a.stickyContext,
-		ModelID:        modelID,
-		ContextWindow:  a.contextWindow,
-		OutputFormat:   a.outputFormat,
+		StickyContext: a.stickyContext,
+		ModelID:       modelID,
+		ContextWindow: a.contextWindow,
+		OutputFormat:  a.outputFormat,
 	})
 
 	// Append cloud delegation guidance to the static system prompt
@@ -641,18 +710,6 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 	// stampMessage records the creation time for the message at the current end
 	// of the messages slice. Call immediately after appending any message.
 	stampMessage := func() { msgTimestamps[len(messages)-1] = time.Now() }
-
-	var toolSchemas []client.Tool
-	var baseSchemas []client.Tool
-	var loadedDeferred map[string]client.Tool
-
-	if deferredMode {
-		baseSchemas = buildLocalOnlySchemas(effTools)
-		loadedDeferred = make(map[string]client.Tool)
-		toolSchemas = baseSchemas
-	} else {
-		toolSchemas = effTools.SortedSchemas()
-	}
 	usage := &TurnUsage{}
 
 	// Read tracker: enforces read-before-edit for file_edit/file_write
@@ -692,9 +749,9 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		lastInputTokens      int    // actual input tokens from last LLM response
 		lastOutputTokens     int    // actual output tokens from last LLM response
 		compactionSummary    string // cached summary from compaction
-		compactionApplied    bool // true once messages have been shaped
-		reactiveCompacted    bool // true once reactive compaction fired (never resets)
-		summaryFailures      int  // consecutive summary failures; backs off after 3
+		compactionApplied    bool   // true once messages have been shaped
+		reactiveCompacted    bool   // true once reactive compaction fired (never resets)
+		summaryFailures      int    // consecutive summary failures; backs off after 3
 		toolSearchFired      bool
 		latestUserText       = userMessage // most recent real user request (not tool results or injected nudges)
 		cloudNudgeFired      bool
@@ -893,8 +950,9 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				return "", usage, fmt.Errorf("LLM call cancelled: %w", ctx.Err())
 			}
 			// Reactive compaction: if the error is a context-length overflow,
-			// aggressively compact and retry once. Single retry only —
-			// reactiveCompacted flag (never resets) prevents infinite loops.
+			// try the normal compaction profile first so summary quality stays
+			// close to proactive compaction. Escalate to the emergency profile
+			// only if the shaped history is still estimated to be over budget.
 			if isContextLengthError(err) && !reactiveCompacted {
 				fmt.Fprintf(os.Stderr, "[agent] context length exceeded, attempting reactive compaction\n")
 
@@ -905,17 +963,44 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 					}
 				}
 
-				compressOldToolResults(ctx, messages, 1, 100, nil) // aggressive: no LLM, just truncate
-				summary, sumErr := ctxwin.GenerateSummary(ctx, a.client, messages)
-				compactionSummary := ""
+				before := len(messages)
+				nextSummary := strings.TrimSpace(compactionSummary)
+
+				softMessages := cloneMessages(messages)
+				compressOldToolResults(ctx, softMessages, compressAfter, maxResultChars, a.client)
+				summary, sumErr := ctxwin.GenerateSummary(ctx, a.client, reactiveSummaryInput(softMessages, nextSummary))
 				if sumErr != nil {
-					fmt.Fprintf(os.Stderr, "[context] reactive summary failed, shaping without summary: %v\n", sumErr)
-				} else {
-					compactionSummary = summary
+					if nextSummary != "" {
+						fmt.Fprintf(os.Stderr, "[context] reactive summary failed, reusing prior summary: %v\n", sumErr)
+					} else {
+						fmt.Fprintf(os.Stderr, "[context] reactive summary failed, shaping without summary: %v\n", sumErr)
+					}
+				} else if trimmed := strings.TrimSpace(summary); trimmed != "" {
+					nextSummary = trimmed
 				}
 
-				before := len(messages)
-				messages = ctxwin.ShapeHistory(messages, compactionSummary, a.contextWindow)
+				shaped := ctxwin.ShapeHistory(softMessages, nextSummary, a.contextWindow)
+				if a.contextWindow > 0 && ctxwin.EstimateTokens(shaped) >= a.contextWindow {
+					fmt.Fprintf(os.Stderr, "[context] reactive soft path still over budget, using emergency fallback\n")
+					emergencyMessages := cloneMessages(messages)
+					compressOldToolResults(ctx, emergencyMessages, 1, 100, nil)
+
+					summary, sumErr = ctxwin.GenerateSummary(ctx, a.client, reactiveSummaryInput(emergencyMessages, nextSummary))
+					if sumErr != nil {
+						if nextSummary != "" {
+							fmt.Fprintf(os.Stderr, "[context] emergency reactive summary failed, keeping prior summary: %v\n", sumErr)
+						} else {
+							fmt.Fprintf(os.Stderr, "[context] emergency reactive summary failed, shaping without summary: %v\n", sumErr)
+						}
+					} else if trimmed := strings.TrimSpace(summary); trimmed != "" {
+						nextSummary = trimmed
+					}
+
+					shaped = ctxwin.ShapeHistory(emergencyMessages, nextSummary, a.contextWindow)
+				}
+
+				messages = shaped
+				compactionSummary = nextSummary
 				compactionApplied = true
 				reactiveCompacted = true // never reset — prevents infinite reactive loops
 
@@ -1343,6 +1428,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 								schemas := effTools.FullSchemas([]string{name})
 								if len(schemas) > 0 {
 									loadedDeferred[name] = schemas[0]
+									a.workingSet.Add(name, schemas[0])
 								}
 							}
 						}
@@ -2060,7 +2146,6 @@ var toolResultPattern = regexp.MustCompile(`(?s)<tool_exec tool="(\w+)" call_id=
 // legacyToolResultPattern matches old "I called" format for backward-compat compression.
 var legacyToolResultPattern = regexp.MustCompile(`(?s)I called (\w+)\(([^)]*)\)\.\s*\n\n(?:Result|Error):\s*\n(.+?)(?:\n\nI called |\z)`)
 
-
 // toolCallInfo stores name and args for a tool_use block, used by tier-1 metadata.
 type toolCallInfo struct {
 	Name string
@@ -2469,7 +2554,6 @@ func isMaxTokensTruncation(reason string) bool {
 	}
 	return false
 }
-
 
 // extractPathArg extracts the "path" field from a tool's JSON arguments.
 func extractPathArg(argsJSON string) string {

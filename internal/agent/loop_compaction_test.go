@@ -809,3 +809,111 @@ func TestAgentLoop_ReactiveCompactionNoDoubleRetry(t *testing.T) {
 		t.Errorf("expected at most 2 context-length errors (original + retry), got %d — infinite loop guard may be broken", contextErrors)
 	}
 }
+
+func TestReactiveSummaryInput_InsertsPriorSummaryOnce(t *testing.T) {
+	messages := []client.Message{
+		{Role: "system", Content: client.NewTextContent("system")},
+		{Role: "user", Content: client.NewTextContent("first user")},
+		{Role: "assistant", Content: client.NewTextContent("recent reply")},
+	}
+
+	withSummary := reactiveSummaryInput(messages, "Earlier work happened")
+	if len(withSummary) != len(messages)+1 {
+		t.Fatalf("expected injected summary message, got %d messages", len(withSummary))
+	}
+	if got := withSummary[2].Content.Text(); got != "Previous context summary: Earlier work happened" {
+		t.Fatalf("unexpected injected summary message: %q", got)
+	}
+
+	again := reactiveSummaryInput(withSummary, "Earlier work happened")
+	if len(again) != len(withSummary) {
+		t.Fatal("summary should not be injected twice")
+	}
+}
+
+func TestAgentLoop_ReactiveCompaction_UsesEmergencyFallbackWhenSoftStillOverBudget(t *testing.T) {
+	var mu sync.Mutex
+	var calls []string
+	mainCalls := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := readBody(r.Body)
+		defer r.Body.Close()
+
+		var req struct {
+			ModelTier string `json:"model_tier"`
+			Messages  []struct {
+				Role    string          `json:"role"`
+				Content json.RawMessage `json:"content"`
+			} `json:"messages"`
+		}
+		json.Unmarshal(raw, &req)
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		if req.ModelTier == "small" {
+			calls = append(calls, "summary")
+			json.NewEncoder(w).Encode(nativeResponse(
+				"condensed summary",
+				"end_turn", nil, 50, 30))
+			return
+		}
+
+		mainCalls++
+		if mainCalls == 1 {
+			calls = append(calls, "context_error")
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":{"type":"invalid_request_error","message":"prompt is too long"}}`))
+			return
+		}
+
+		calls = append(calls, "retry_success")
+		json.NewEncoder(w).Encode(nativeResponse(
+			"Recovered after emergency fallback.",
+			"end_turn", nil, 500, 100))
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&thinkTool{})
+
+	loop := NewAgentLoop(gw, reg, "medium", "", 10, 2000, 200, nil, nil, nil)
+	loop.SetContextWindow(100000)
+
+	huge := strings.Repeat("x", 450000)
+	history := []client.Message{
+		{Role: "user", Content: client.NewTextContent(huge)},
+		{Role: "assistant", Content: client.NewTextContent("ack")},
+		{Role: "user", Content: client.NewTextContent("second turn")},
+		{Role: "assistant", Content: client.NewTextContent("second reply")},
+		{Role: "user", Content: client.NewTextContent("third turn")},
+		{Role: "assistant", Content: client.NewTextContent("third reply")},
+	}
+
+	result, _, err := loop.Run(context.Background(), "trigger reactive overflow", history)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "Recovered after emergency fallback." {
+		t.Fatalf("unexpected result: %q", result)
+	}
+
+	mu.Lock()
+	gotCalls := append([]string(nil), calls...)
+	mu.Unlock()
+
+	summaryCalls := 0
+	for _, call := range gotCalls {
+		if call == "summary" {
+			summaryCalls++
+		}
+	}
+	if summaryCalls != 2 {
+		t.Fatalf("expected soft + emergency summary calls, got %d (%v)", summaryCalls, gotCalls)
+	}
+	if len(gotCalls) != 4 || gotCalls[0] != "context_error" || gotCalls[1] != "summary" || gotCalls[2] != "summary" || gotCalls[3] != "retry_success" {
+		t.Fatalf("unexpected call order: %v", gotCalls)
+	}
+}

@@ -74,3 +74,15 @@ func (t *GlobTool) IsSafeArgs(argsJSON string) bool {
 	}
 	return isPathUnderCWD(path)
 }
+
+func (t *GlobTool) IsSafeArgsWithContext(ctx context.Context, argsJSON string) bool {
+	var args globArgs
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return false
+	}
+	path := args.Path
+	if path == "" {
+		path = "."
+	}
+	return isPathUnderSessionCWD(ctx, path)
+}

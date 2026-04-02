@@ -80,3 +80,15 @@ func (t *DirectoryListTool) IsSafeArgs(argsJSON string) bool {
 	}
 	return isPathUnderCWD(path)
 }
+
+func (t *DirectoryListTool) IsSafeArgsWithContext(ctx context.Context, argsJSON string) bool {
+	var args dirListArgs
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return false
+	}
+	path := args.Path
+	if path == "" {
+		path = "."
+	}
+	return isPathUnderSessionCWD(ctx, path)
+}

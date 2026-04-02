@@ -81,3 +81,11 @@ func (t *FileReadTool) IsSafeArgs(argsJSON string) bool {
 	}
 	return isPathUnderCWD(args.Path)
 }
+
+func (t *FileReadTool) IsSafeArgsWithContext(ctx context.Context, argsJSON string) bool {
+	var args fileReadArgs
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return false
+	}
+	return isPathUnderSessionCWD(ctx, args.Path)
+}

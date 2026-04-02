@@ -108,3 +108,15 @@ func (t *GrepTool) IsSafeArgs(argsJSON string) bool {
 	}
 	return isPathUnderCWD(path)
 }
+
+func (t *GrepTool) IsSafeArgsWithContext(ctx context.Context, argsJSON string) bool {
+	var args grepArgs
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return false
+	}
+	path := args.Path
+	if path == "" {
+		path = "."
+	}
+	return isPathUnderSessionCWD(ctx, path)
+}

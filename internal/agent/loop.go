@@ -1360,7 +1360,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			}
 
 			// Permission check
-			decision, wasApproved := a.checkPermissionAndApproval(fc.Name, argsStr, tool, resp.OutputText, approvalCache)
+			decision, wasApproved := a.checkPermissionAndApproval(ctx, fc.Name, argsStr, tool, resp.OutputText, approvalCache)
 			callMeta[idx].decision = decision
 			callMeta[idx].wasApproved = wasApproved
 			if decision == "deny" {
@@ -1852,7 +1852,7 @@ func classifyLLMError(err error) string {
 // wasApproved is true if the tool call should proceed.
 // The approvalCache tracks previously approved tool+args combinations within
 // the current turn so the user is not asked twice for the same call.
-func (a *AgentLoop) checkPermissionAndApproval(toolName, argsStr string, tool Tool, outputText string, cache *ApprovalCache) (string, bool) {
+func (a *AgentLoop) checkPermissionAndApproval(ctx context.Context, toolName, argsStr string, tool Tool, outputText string, cache *ApprovalCache) (string, bool) {
 	// Bypass mode: skip all permission checks including hard-blocks
 	if a.bypassPermissions {
 		return "allow", true
@@ -1875,7 +1875,9 @@ func (a *AgentLoop) checkPermissionAndApproval(toolName, argsStr string, tool To
 	// Existing RequiresApproval + SafeChecker logic
 	needsApproval := tool.RequiresApproval()
 	if needsApproval {
-		if checker, ok := tool.(SafeChecker); ok && checker.IsSafeArgs(argsStr) {
+		if checker, ok := tool.(SafeCheckerWithContext); ok && checker.IsSafeArgsWithContext(ctx, argsStr) {
+			needsApproval = false
+		} else if checker, ok := tool.(SafeChecker); ok && checker.IsSafeArgs(argsStr) {
 			needsApproval = false
 		}
 	}

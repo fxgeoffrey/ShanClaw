@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -70,6 +71,26 @@ func TestGrep_ResolvesRelativePathFromSessionCWD(t *testing.T) {
 	}
 	if result.IsError {
 		t.Fatalf("unexpected error: %s", result.Content)
+	}
+}
+
+func TestFileRead_IsSafeArgsWithContext_UsesSessionCWD(t *testing.T) {
+	dir := t.TempDir()
+	ctx := cwdctx.WithSessionCWD(context.Background(), dir)
+
+	tool := &FileReadTool{}
+	// File under session CWD — should be safe
+	args := fmt.Sprintf(`{"path":"%s/test.txt"}`, dir)
+	if !tool.IsSafeArgsWithContext(ctx, args) {
+		t.Error("file under session CWD should be safe")
+	}
+	// File outside session CWD — should NOT be safe
+	if tool.IsSafeArgsWithContext(ctx, `{"path":"/etc/passwd"}`) {
+		t.Error("file outside session CWD should not be safe")
+	}
+	// Relative path under session CWD — should be safe
+	if !tool.IsSafeArgsWithContext(ctx, `{"path":"subdir/file.txt"}`) {
+		t.Error("relative path under session CWD should be safe")
 	}
 }
 

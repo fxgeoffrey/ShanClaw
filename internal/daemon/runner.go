@@ -361,10 +361,14 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 	case strings.HasPrefix(req.RouteKey, "agent:"):
 		// Named-agent cold start (first run or after daemon restart).
 		// route.sessionID is empty — resume latest from disk, or start fresh if none.
-		if _, err := sessMgr.ResumeLatest(); err != nil || sessMgr.Current() == nil {
+		if latest, err := sessMgr.ResumeLatest(); err != nil || latest == nil {
 			sessMgr.NewSession()
 		} else {
-			resumed = true
+			// Only treat as "resumed" if the session has actual conversation history.
+			// A session from ResumeLatest with no messages may have been freshly
+			// created (e.g., prior run crashed before writing), in which case its
+			// CWD is just the process stamp and should NOT outrank agent config CWD.
+			resumed = len(latest.Messages) > 0
 		}
 	default:
 		sessMgr.NewSession()

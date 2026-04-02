@@ -21,8 +21,8 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/config"
 	"github.com/Kocoro-lab/ShanClaw/internal/daemon"
 	"github.com/Kocoro-lab/ShanClaw/internal/heartbeat"
-	"github.com/Kocoro-lab/ShanClaw/internal/mcp"
 	"github.com/Kocoro-lab/ShanClaw/internal/hooks"
+	"github.com/Kocoro-lab/ShanClaw/internal/mcp"
 	"github.com/Kocoro-lab/ShanClaw/internal/permissions"
 	"github.com/Kocoro-lab/ShanClaw/internal/schedule"
 	"github.com/Kocoro-lab/ShanClaw/internal/tools"
@@ -219,11 +219,14 @@ var daemonStartCmd = &cobra.Command{
 			if req.Text == "" {
 				req.Text = msg.Text
 			}
+			if err := req.Validate(); err != nil {
+				return daemon.FriendlyAgentError(err)
+			}
 			req.EnsureRouteKey()
 
 			// Try injecting into an active run on the same route.
 			if req.RouteKey != "" {
-				switch deps.SessionCache.InjectMessage(req.RouteKey, req.Text) {
+				switch deps.SessionCache.InjectMessage(req.RouteKey, agent.InjectedMessage{Text: req.Text, CWD: req.CWD}) {
 				case daemon.InjectOK:
 					// Message injected — running loop will incorporate it.
 					return "[message received, processing...]"
@@ -231,6 +234,10 @@ var daemonStartCmd = &cobra.Command{
 					// Active run exists but queue saturated — don't start a new run.
 					log.Printf("daemon: inject queue full for route %q, message dropped", req.RouteKey)
 					return ""
+				case daemon.InjectBusy:
+					return "[message rejected: the active run is still initializing; retry when it reaches the next turn]"
+				case daemon.InjectCWDConflict:
+					return "[message rejected: the active run is using a different project; wait for it to finish or cancel it before switching cwd]"
 				case daemon.InjectNoActiveRun:
 					// Fall through to start a new RunAgent
 				}
@@ -551,7 +558,7 @@ type daemonEventHandler struct {
 	autoApprove bool
 	shannonDir  string
 	deps        *daemon.ServerDeps
-	sessionID   string // set by RunAgent after session resolution (EventBus spans sessions)
+	sessionID   string         // set by RunAgent after session resolution (EventBus spans sessions)
 	wsClient    *daemon.Client // for event forwarding to Cloud
 	messageID   string         // scoped to current message
 }
@@ -659,13 +666,13 @@ func (h *autoApproveHandler) OnToolCall(name string, args string) {}
 func (h *autoApproveHandler) OnToolResult(name string, args string, result agent.ToolResult, elapsed time.Duration) {
 	log.Printf("daemon: tool %s completed (%.1fs)", name, elapsed.Seconds())
 }
-func (h *autoApproveHandler) OnText(text string)            {}
-func (h *autoApproveHandler) OnStreamDelta(delta string)    {}
-func (h *autoApproveHandler) OnUsage(usage agent.TurnUsage) {}
-func (h *autoApproveHandler) OnCloudAgent(agentID, status, message string) {}
-func (h *autoApproveHandler) OnCloudProgress(completed, total int)         {}
+func (h *autoApproveHandler) OnText(text string)                                     {}
+func (h *autoApproveHandler) OnStreamDelta(delta string)                             {}
+func (h *autoApproveHandler) OnUsage(usage agent.TurnUsage)                          {}
+func (h *autoApproveHandler) OnCloudAgent(agentID, status, message string)           {}
+func (h *autoApproveHandler) OnCloudProgress(completed, total int)                   {}
 func (h *autoApproveHandler) OnCloudPlan(planType, content string, needsReview bool) {}
-func (h *autoApproveHandler) OnApprovalNeeded(tool string, args string) bool { return true }
+func (h *autoApproveHandler) OnApprovalNeeded(tool string, args string) bool         { return true }
 
 func containsString(slice []string, s string) bool {
 	for _, v := range slice {

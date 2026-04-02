@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Kocoro-lab/ShanClaw/internal/agent"
 	"github.com/Kocoro-lab/ShanClaw/internal/session"
 )
 
@@ -97,7 +98,7 @@ func TestE2E_InjectMessage_FullFlow(t *testing.T) {
 	routeKey := "default:slack:%23general"
 
 	// Simulate an active route with injectCh (as RunAgent sets up)
-	injectCh := make(chan string, 10)
+	injectCh := make(chan agent.InjectedMessage, 10)
 	sc.mu.Lock()
 	sc.routes[routeKey] = &routeEntry{
 		injectCh: injectCh,
@@ -106,15 +107,15 @@ func TestE2E_InjectMessage_FullFlow(t *testing.T) {
 	sc.mu.Unlock()
 
 	// Inject from "another goroutine" (simulating a second Slack message)
-	result := sc.InjectMessage(routeKey, "also check stocks")
+	result := sc.InjectMessage(routeKey, agent.InjectedMessage{Text: "also check stocks"})
 	if result != InjectOK {
 		t.Fatalf("expected InjectOK, got %d", result)
 	}
 
 	select {
 	case msg := <-injectCh:
-		if msg != "also check stocks" {
-			t.Errorf("expected 'also check stocks', got %q", msg)
+		if msg.Text != "also check stocks" {
+			t.Errorf("expected 'also check stocks', got %q", msg.Text)
 		}
 	default:
 		t.Fatal("expected message in inject channel")
@@ -193,7 +194,7 @@ func TestE2E_InjectEndpoint_HTTP(t *testing.T) {
 	dir := t.TempDir()
 	sc := NewSessionCache(dir)
 
-	injectCh := make(chan string, 5)
+	injectCh := make(chan agent.InjectedMessage, 5)
 	sc.mu.Lock()
 	sc.routes["session:sess-123"] = &routeEntry{
 		injectCh: injectCh,
@@ -232,8 +233,8 @@ func TestE2E_InjectEndpoint_HTTP(t *testing.T) {
 
 	select {
 	case msg := <-injectCh:
-		if msg != "follow up question" {
-			t.Errorf("expected 'follow up question', got %q", msg)
+		if msg.Text != "follow up question" {
+			t.Errorf("expected 'follow up question', got %q", msg.Text)
 		}
 	default:
 		t.Fatal("expected message in inject channel")
@@ -245,14 +246,14 @@ func TestE2E_InjectEndpoint_QueueFull_Returns429(t *testing.T) {
 	dir := t.TempDir()
 	sc := NewSessionCache(dir)
 
-	injectCh := make(chan string, 1)
+	injectCh := make(chan agent.InjectedMessage, 1)
 	sc.mu.Lock()
 	sc.routes["session:sess-456"] = &routeEntry{
 		injectCh: injectCh,
 		done:     make(chan struct{}),
 	}
 	sc.mu.Unlock()
-	injectCh <- "first" // fill the channel
+	injectCh <- agent.InjectedMessage{Text: "first"} // fill the channel
 
 	deps := &ServerDeps{
 		SessionCache: sc,
@@ -281,6 +282,58 @@ func TestE2E_InjectEndpoint_QueueFull_Returns429(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&result)
 	if result["status"] != "rejected" || result["reason"] != "queue_full" {
 		t.Errorf("expected rejected/queue_full, got %v", result)
+	}
+}
+
+func TestE2E_InjectEndpoint_CWDConflict_Returns409(t *testing.T) {
+	dir := t.TempDir()
+	sc := NewSessionCache(dir)
+
+	injectCh := make(chan agent.InjectedMessage, 1)
+	projectA := t.TempDir()
+	projectB := t.TempDir()
+	sc.mu.Lock()
+	sc.routes["session:sess-789"] = &routeEntry{
+		injectCh:  injectCh,
+		done:      make(chan struct{}),
+		activeCWD: projectA,
+	}
+	sc.mu.Unlock()
+
+	deps := &ServerDeps{
+		SessionCache: sc,
+		ShannonDir:   dir,
+		AgentsDir:    dir,
+	}
+	c := NewClient("ws://localhost:1/x", "", func(msg MessagePayload) string { return "" }, nil)
+	srv := NewServer(0, c, deps, "test")
+	srvCtx, srvCancel := context.WithCancel(context.Background())
+	defer srvCancel()
+	go srv.Start(srvCtx)
+	time.Sleep(100 * time.Millisecond)
+
+	body := strings.NewReader(fmt.Sprintf(`{"text":"switch project","session_id":"sess-789","source":"shanclaw","cwd":%q}`, projectB))
+	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/message", srv.Port()), "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", resp.StatusCode)
+	}
+
+	var result map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if result["status"] != "rejected" || result["reason"] != "cwd_conflict" {
+		t.Errorf("expected rejected/cwd_conflict, got %v", result)
+	}
+	select {
+	case <-injectCh:
+		t.Fatal("did not expect conflicting message to be injected")
+	default:
 	}
 }
 

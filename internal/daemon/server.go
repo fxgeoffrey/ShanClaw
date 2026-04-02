@@ -528,7 +528,7 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 
 	// Try injecting into an in-flight run on the same route.
 	if req.RouteKey != "" {
-		switch s.deps.SessionCache.InjectMessage(req.RouteKey, req.Text) {
+		switch s.deps.SessionCache.InjectMessage(req.RouteKey, agent.InjectedMessage{Text: req.Text, CWD: req.CWD}) {
 		case InjectOK:
 			if strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
 				w.Header().Set("Content-Type", "text/event-stream")
@@ -552,6 +552,24 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 			json.NewEncoder(w).Encode(map[string]string{
 				"status": "rejected",
 				"reason": "queue_full",
+				"route":  req.RouteKey,
+			})
+			return
+		case InjectBusy:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]string{
+				"status": "rejected",
+				"reason": "active_run_not_ready",
+				"route":  req.RouteKey,
+			})
+			return
+		case InjectCWDConflict:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]string{
+				"status": "rejected",
+				"reason": "cwd_conflict",
 				"route":  req.RouteKey,
 			})
 			return

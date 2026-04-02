@@ -57,6 +57,11 @@ func (r *RunAgentRequest) Validate() error {
 			return err
 		}
 	}
+	if r.CWD != "" {
+		if err := cwdctx.ValidateCWD(r.CWD); err != nil {
+			return fmt.Errorf("invalid cwd: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -312,27 +317,24 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 	var sessMgr *session.Manager
 
 	var route *routeEntry
+	var routeDone chan struct{}
+	var routeInjectCh chan agent.InjectedMessage
 	// Empty route key = no cache entry for routing, always start a fresh local session.
 	if req.RouteKey != "" {
 		route = deps.SessionCache.LockRouteWithManager(req.RouteKey, sessionsDir)
 		sessMgr = route.manager
 		reqCtx, cancel := context.WithCancel(ctx)
-		route.done = make(chan struct{})
-		route.injectCh = make(chan string, 10) // buffered for async sends
+		routeDone = make(chan struct{})
+		routeInjectCh = make(chan agent.InjectedMessage, 10)
+		deps.SessionCache.SetRouteRunState(req.RouteKey, routeDone, nil, "")
 		ctx = reqCtx
 		// Register cancel under sc.mu so CancelRoute sees it immediately.
 		// Also fires cancel right away if CancelRoute already set cancelPending.
 		deps.SessionCache.SetRouteCancel(req.RouteKey, cancel)
 		defer func() {
-			// route.mu is already held from LockRouteWithManager — do NOT
-			// re-acquire it (sync.Mutex is not reentrant; that deadlocks).
-			// Clean up under the existing lock, then release via UnlockRoute.
-			if route.done != nil {
-				closeRouteDone(route.done)
-			}
-			route.done = nil
+			deps.SessionCache.ClearRouteRunState(req.RouteKey)
+			closeRouteDone(routeDone)
 			route.cancel = nil
-			route.injectCh = nil
 			// Set sessionID directly — do NOT call SetRouteSessionID which
 			// would try to acquire route.mu again (same deadlock).
 			if current := sessMgr.Current(); current != nil {
@@ -409,6 +411,9 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 	effectiveCWD := cwdctx.ResolveEffectiveCWD(req.CWD, sessionCWD, agentCWD)
 	if err := cwdctx.ValidateCWD(effectiveCWD); err != nil {
 		return nil, fmt.Errorf("invalid cwd: %w", err)
+	}
+	if req.RouteKey != "" {
+		deps.SessionCache.SetRouteRunState(req.RouteKey, routeDone, routeInjectCh, effectiveCWD)
 	}
 	runCfg, err := config.RuntimeConfigForCWD(cfg, effectiveCWD)
 	if err != nil {
@@ -585,8 +590,9 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 
 	loop.SetHandler(handler)
 
-	// Wire handler and agent context to cloud_delegate tool.
-	if ct, ok := baseReg.Get("cloud_delegate"); ok {
+	// Wire handler and agent context to the per-run cloud_delegate copy.
+	// Must use reg (cloned), not baseReg (shared), to avoid race across routes.
+	if ct, ok := reg.Get("cloud_delegate"); ok {
 		if cdt, ok := ct.(*tools.CloudDelegateTool); ok {
 			cdt.SetHandler(handler)
 			if agentOverride != nil {
@@ -597,8 +603,8 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		}
 	}
 
-	if route != nil && route.injectCh != nil {
-		loop.SetInjectCh(route.injectCh)
+	if routeInjectCh != nil {
+		loop.SetInjectCh(routeInjectCh)
 	}
 	loop.SetSessionID(sess.ID)
 	loop.SetSessionCWD(effectiveCWD)

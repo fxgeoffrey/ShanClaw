@@ -214,6 +214,23 @@ func (d *ServerDeps) RebuildLayers() (*agent.ToolRegistry, []agent.Tool, []agent
 	return bl, gw, po, mgr
 }
 
+// resumeNamedAgentColdStart resumes the latest persisted named-agent session.
+// Returns true only when a session was actually loaded from disk; a fresh
+// in-memory session pre-created by the route manager does not count as resumed.
+func resumeNamedAgentColdStart(sessMgr *session.Manager) (bool, error) {
+	latest, err := sessMgr.ResumeLatest()
+	if err != nil {
+		return false, err
+	}
+	if latest != nil {
+		return true, nil
+	}
+	if sessMgr.Current() == nil {
+		sessMgr.NewSession()
+	}
+	return false, nil
+}
+
 // RunAgent executes a single agent turn using the shared dependencies.
 // The caller provides an EventHandler to control streaming, approval, and
 // event reporting (WS uses daemonEventHandler, HTTP uses httpEventHandler).
@@ -361,14 +378,13 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 	case strings.HasPrefix(req.RouteKey, "agent:"):
 		// Named-agent cold start (first run or after daemon restart).
 		// route.sessionID is empty — resume latest from disk, or start fresh if none.
-		if latest, err := sessMgr.ResumeLatest(); err != nil || latest == nil {
-			sessMgr.NewSession()
+		if resumedLatest, err := resumeNamedAgentColdStart(sessMgr); err != nil {
+			log.Printf("daemon: failed to resume latest named-agent session for %q: %v", req.RouteKey, err)
+			if sessMgr.Current() == nil {
+				sessMgr.NewSession()
+			}
 		} else {
-			// Only treat as "resumed" if the session has actual conversation history.
-			// A session from ResumeLatest with no messages may have been freshly
-			// created (e.g., prior run crashed before writing), in which case its
-			// CWD is just the process stamp and should NOT outrank agent config CWD.
-			resumed = len(latest.Messages) > 0
+			resumed = resumedLatest
 		}
 	default:
 		sessMgr.NewSession()

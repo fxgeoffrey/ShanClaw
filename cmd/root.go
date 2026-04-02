@@ -239,12 +239,10 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 	sess := sessMgr.NewSession()
 	sess.Title = sessionTitleFromQuery(query)
 	loop.SetSessionID(sess.ID)
-	// Resolve effective CWD for one-shot. No request CWD, no resumed session.
-	var agentCWD string
-	if agentOverride != nil && agentOverride.Config != nil {
-		agentCWD = agentOverride.Config.CWD
+	effectiveCWD, err := resolveOneShotCWD(agentOverride)
+	if err != nil {
+		return err
 	}
-	effectiveCWD := cwdctx.ResolveEffectiveCWD("", "", agentCWD)
 	sess.CWD = effectiveCWD
 	loop.SetSessionCWD(effectiveCWD)
 	sessMgr.OnSessionClose(sess.ID, loop.SpillCleanupFunc())
@@ -274,6 +272,18 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 	}
 	fmt.Println(usageLine + "]")
 	return nil
+}
+
+func resolveOneShotCWD(agentOverride *agents.Agent) (string, error) {
+	var agentCWD string
+	if agentOverride != nil && agentOverride.Config != nil {
+		agentCWD = agentOverride.Config.CWD
+	}
+	effectiveCWD := cwdctx.ResolveEffectiveCWD("", "", agentCWD)
+	if err := cwdctx.ValidateCWD(effectiveCWD); err != nil {
+		return "", fmt.Errorf("invalid cwd: %w", err)
+	}
+	return effectiveCWD, nil
 }
 
 // cliEventHandler prompts for approval on stdout/stdin in one-shot mode

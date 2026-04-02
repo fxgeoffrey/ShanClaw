@@ -300,9 +300,42 @@ func TestSessionCache_CancelRoute_Nonexistent(t *testing.T) {
 
 func TestResolveLatestSession_NoRoute(t *testing.T) {
 	sc := NewSessionCache(t.TempDir())
-	_, _, err := sc.ResolveLatestSession("agent:nonexistent", "")
+	_, err := sc.ResolveLatestSession("agent:nonexistent", "")
 	if err == nil {
 		t.Error("expected error for non-existent route")
+	}
+}
+
+func TestResolveLatestSession_ReturnsStoredCWD(t *testing.T) {
+	dir := t.TempDir()
+	sessionsDir := dir + "/agents/test/sessions"
+	storedCWD := t.TempDir()
+
+	store := session.NewStore(sessionsDir)
+	if err := store.Save(&session.Session{
+		ID:    "real-session-id",
+		Title: "test session",
+		CWD:   storedCWD,
+		Messages: []client.Message{
+			{Role: "user", Content: client.NewTextContent("hello")},
+		},
+	}); err != nil {
+		t.Fatalf("save session: %v", err)
+	}
+
+	sc := NewSessionCache(dir)
+	snapshot, err := sc.ResolveLatestSession("agent:test", sessionsDir)
+	if err != nil {
+		t.Fatalf("ResolveLatestSession error: %v", err)
+	}
+	if snapshot == nil {
+		t.Fatal("expected snapshot")
+	}
+	if snapshot.CWD != storedCWD {
+		t.Fatalf("expected stored CWD %q, got %q", storedCWD, snapshot.CWD)
+	}
+	if snapshot.ID != "real-session-id" {
+		t.Fatalf("expected session ID %q, got %q", "real-session-id", snapshot.ID)
 	}
 }
 

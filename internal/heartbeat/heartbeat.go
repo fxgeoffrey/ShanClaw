@@ -203,7 +203,7 @@ func (m *Manager) tickGoalDriven(ctx context.Context, ah *agentHeartbeat, goals 
 	routeKey := "agent:" + ah.name
 	sessionsDir := filepath.Join(ah.agentDir, "sessions")
 
-	sessionID, history, err := m.deps.SessionCache.ResolveLatestSession(routeKey, sessionsDir)
+	snapshot, err := m.deps.SessionCache.ResolveLatestSession(routeKey, sessionsDir)
 	if err != nil {
 		if errors.Is(err, daemon.ErrRouteActive) {
 			log.Printf("heartbeat: skip %q (run in progress)", ah.name)
@@ -212,6 +212,7 @@ func (m *Manager) tickGoalDriven(ctx context.Context, ah *agentHeartbeat, goals 
 		}
 		return
 	}
+	sessionID := snapshot.ID
 
 	prompt := FormatGoalPrompt(goals)
 	collector := &TranscriptCollector{}
@@ -223,7 +224,8 @@ func (m *Manager) tickGoalDriven(ctx context.Context, ah *agentHeartbeat, goals 
 		Ephemeral:      true,
 		BypassRouting:  true,
 		ModelOverride:  ah.model,
-		SessionHistory: history,
+		CWD:            snapshot.CWD,
+		SessionHistory: snapshot.Messages,
 	}
 
 	result, err := daemon.RunAgent(ctx, m.deps, req, collector)
@@ -317,9 +319,9 @@ func (tc *TranscriptCollector) OnToolResult(name string, args string, result age
 func (tc *TranscriptCollector) OnText(text string) {
 	tc.Messages = append(tc.Messages, client.Message{Role: "assistant", Content: client.NewTextContent(text)})
 }
-func (tc *TranscriptCollector) OnStreamDelta(delta string)                            {}
-func (tc *TranscriptCollector) OnUsage(usage agent.TurnUsage)                         {}
-func (tc *TranscriptCollector) OnCloudAgent(agentID, status, message string)          {}
-func (tc *TranscriptCollector) OnCloudProgress(completed, total int)                  {}
+func (tc *TranscriptCollector) OnStreamDelta(delta string)                             {}
+func (tc *TranscriptCollector) OnUsage(usage agent.TurnUsage)                          {}
+func (tc *TranscriptCollector) OnCloudAgent(agentID, status, message string)           {}
+func (tc *TranscriptCollector) OnCloudProgress(completed, total int)                   {}
 func (tc *TranscriptCollector) OnCloudPlan(planType, content string, needsReview bool) {}
-func (tc *TranscriptCollector) OnApprovalNeeded(tool string, args string) bool { return true }
+func (tc *TranscriptCollector) OnApprovalNeeded(tool string, args string) bool         { return true }

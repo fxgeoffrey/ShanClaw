@@ -11,6 +11,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/Kocoro-lab/ShanClaw/internal/cwdctx"
 	"github.com/Kocoro-lab/ShanClaw/internal/skills"
 )
 
@@ -74,6 +75,7 @@ func (h *HeartbeatConfig) IsIsolatedSession() bool {
 
 // AgentConfig is the per-agent config overlay loaded from config.yaml.
 type AgentConfig struct {
+	CWD         string            `yaml:"cwd"`
 	MCPServers  *AgentMCPConfig   `yaml:"-"` // parsed manually for _inherit
 	Tools       *AgentToolsFilter `yaml:"tools"`
 	Agent       *AgentModelConfig `yaml:"agent"`
@@ -129,6 +131,11 @@ func LoadAgent(agentsDir, name string) (*Agent, error) {
 		agCfg, err := parseAgentConfig(cfgData)
 		if err != nil {
 			return nil, fmt.Errorf("agent %q: bad config.yaml: %w", name, err)
+		}
+		if agCfg.CWD != "" {
+			if err := cwdctx.ValidateCWD(agCfg.CWD); err != nil {
+				return nil, fmt.Errorf("agent %s: %w", name, err)
+			}
 		}
 		ag.Config = agCfg
 	}

@@ -94,6 +94,7 @@ type MessagePayload struct {
 	MessageID string `json:"-"` // set locally from envelope, not from JSON
 	Timestamp string `json:"timestamp"`
 	Source    string `json:"source,omitempty"` // populated by Cloud; "slack", "line", "webhook"
+	CWD       string `json:"cwd,omitempty"`    // project path override from Cloud/Desktop
 }
 
 // ReplyPayload is sent back after agent completes.

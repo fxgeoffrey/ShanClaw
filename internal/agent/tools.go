@@ -114,6 +114,12 @@ type SafeChecker interface {
 	IsSafeArgs(argsJSON string) bool
 }
 
+// SafeCheckerWithContext is like SafeChecker but receives the call context,
+// allowing tools to use session-scoped CWD for path-based safety checks.
+type SafeCheckerWithContext interface {
+	IsSafeArgsWithContext(ctx context.Context, argsJSON string) bool
+}
+
 // ReadOnlyChecker is an optional interface for tools that can classify
 // individual calls as read-only based on arguments.
 // If args parsing fails, implementations MUST return false (fail-closed).

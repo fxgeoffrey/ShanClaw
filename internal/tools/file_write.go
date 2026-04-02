@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/agent"
+	"github.com/Kocoro-lab/ShanClaw/internal/cwdctx"
 )
 
 type FileWriteTool struct{}
@@ -37,7 +38,7 @@ func (t *FileWriteTool) Run(ctx context.Context, argsJSON string) (agent.ToolRes
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return agent.ToolResult{Content: fmt.Sprintf("invalid arguments: %v", err), IsError: true}, nil
 	}
-	args.Path = ExpandHome(args.Path)
+	args.Path = cwdctx.ResolvePath(ctx, args.Path)
 
 	// Block file_write on the agent's MEMORY.md — always use memory_append.
 	// Check unconditionally (not just for existing files) so first-write

@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/Kocoro-lab/ShanClaw/internal/cwdctx"
 )
 
 // readTrackerKey is the context key for ReadTracker.
@@ -35,7 +37,9 @@ func IsMemoryFile(ctx context.Context, path string) bool {
 	if !ok || dir == "" {
 		return false
 	}
-	return strings.EqualFold(normalizePath(path), normalizePath(filepath.Join(dir, "MEMORY.md")))
+	resolvedPath := cwdctx.ResolvePath(ctx, path)
+	memPath := filepath.Clean(filepath.Join(dir, "MEMORY.md"))
+	return strings.EqualFold(resolvedPath, memPath)
 }
 
 // ReadTrackerKey returns the context key used to store a ReadTracker.
@@ -47,6 +51,7 @@ func ReadTrackerKey() any { return readTrackerKey{} }
 // must be preceded by a file_read of that file.
 type ReadTracker struct {
 	read map[string]bool
+	cwd  string
 }
 
 // NewReadTracker creates a new ReadTracker.
@@ -54,9 +59,14 @@ func NewReadTracker() *ReadTracker {
 	return &ReadTracker{read: make(map[string]bool)}
 }
 
+// SetCWD sets the session CWD used for relative path resolution.
+func (rt *ReadTracker) SetCWD(cwd string) {
+	rt.cwd = cwd
+}
+
 // MarkRead records that a file has been read.
 func (rt *ReadTracker) MarkRead(path string) {
-	norm := normalizePath(path)
+	norm := normalizePathWithCWD(path, rt.cwd)
 	if norm != "" {
 		rt.read[norm] = true
 	}
@@ -64,7 +74,7 @@ func (rt *ReadTracker) MarkRead(path string) {
 
 // HasRead returns true if the file has been read in this turn.
 func (rt *ReadTracker) HasRead(path string) bool {
-	norm := normalizePath(path)
+	norm := normalizePathWithCWD(path, rt.cwd)
 	if norm == "" {
 		return false
 	}
@@ -85,17 +95,22 @@ func CheckReadBeforeWrite(ctx context.Context, path string) error {
 	return nil
 }
 
-// normalizePath resolves a path to an absolute, clean, symlink-resolved form.
-func normalizePath(path string) string {
+// normalizePathWithCWD resolves a path to an absolute, clean, symlink-resolved form
+// using the given cwd for relative path resolution.
+func normalizePathWithCWD(path, cwd string) string {
 	if path == "" {
 		return ""
 	}
 	if !filepath.IsAbs(path) {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return filepath.Clean(path)
+		if cwd != "" {
+			path = filepath.Join(cwd, path)
+		} else {
+			wd, err := os.Getwd()
+			if err != nil {
+				return filepath.Clean(path)
+			}
+			path = filepath.Join(wd, path)
 		}
-		path = filepath.Join(cwd, path)
 	}
 	path = filepath.Clean(path)
 	// Try to resolve symlinks; if it fails (file doesn't exist yet), use the clean path.
@@ -103,4 +118,9 @@ func normalizePath(path string) string {
 		path = resolved
 	}
 	return path
+}
+
+// normalizePath resolves a path using process CWD (backward compatibility).
+func normalizePath(path string) string {
+	return normalizePathWithCWD(path, "")
 }

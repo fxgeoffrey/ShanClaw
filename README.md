@@ -347,7 +347,7 @@ Tool call from LLM
 ```
 
 - **Hard-blocked**: `rm -rf /`, `mkfs`, `dd if=`, `curl|sh`, etc. — always denied, cannot be overridden
-- **CWD auto-approve**: Read-only tools (`file_read`, `glob`, `grep`, `directory_list`) auto-approve paths under the current working directory
+- **CWD auto-approve**: Read-only tools (`file_read`, `glob`, `grep`, `directory_list`) auto-approve paths under the session working directory (agent config `cwd`, or process CWD as fallback)
 - **Auto-approve**: Safe bash commands (`ls`, `git status`, `go test`, `make`, etc.), `process list/ports`, localhost HTTP
 - **Prompt**: Destructive tools show `[y/n]` in TUI or one-shot mode
 - **Denied-call blocking**: If you deny a tool call, the same tool+args won't be re-prompted for the rest of the turn
@@ -806,6 +806,12 @@ Agents without `config.yaml` inherit all tools, global MCP servers, and default 
 Create `config.yaml` to scope an agent's capabilities:
 
 ```yaml
+# Project directory — all relative paths resolve from here
+# Must be an absolute path. Drives: prompt context, instructions,
+# file tools, bash, auto-approval scope, read-before-edit tracking.
+# Without this, daemon agents use the daemon's launch directory.
+cwd: /Users/you/Code/myproject
+
 # Tool allow list — agent can ONLY use these tools
 tools:
   allow:

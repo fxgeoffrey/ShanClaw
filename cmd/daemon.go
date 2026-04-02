@@ -208,6 +208,7 @@ var daemonStartCmd = &cobra.Command{
 				Channel:  msg.Channel,
 				ThreadID: msg.ThreadID,
 				Sender:   msg.Sender,
+				CWD:      msg.CWD,
 			}
 			// Fall back to @mention parsing if cloud didn't set agent name.
 			if req.Agent == "" {

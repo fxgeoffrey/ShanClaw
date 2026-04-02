@@ -1,9 +1,12 @@
 package agent
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/Kocoro-lab/ShanClaw/internal/cwdctx"
 )
 
 func TestReadTracker_MarkAndHasRead(t *testing.T) {
@@ -79,5 +82,33 @@ func TestReadTracker_NonexistentFile(t *testing.T) {
 	rt.MarkRead(path)
 	if !rt.HasRead(path) {
 		t.Error("expected HasRead to work for nonexistent files")
+	}
+}
+
+func TestReadTracker_NormalizesWithSessionCWD(t *testing.T) {
+	rt := NewReadTracker()
+	rt.SetCWD("/projects/foo")
+
+	rt.MarkRead("src/main.go")
+	if !rt.HasRead("src/main.go") {
+		t.Error("should find relative path after MarkRead")
+	}
+	if !rt.HasRead("/projects/foo/src/main.go") {
+		t.Error("should find absolute path equivalent")
+	}
+	if rt.HasRead("/other/src/main.go") {
+		t.Error("should not match different absolute path")
+	}
+}
+
+func TestIsMemoryFile_UsesSessionCWD(t *testing.T) {
+	memDir := t.TempDir()
+	ctx := context.Background()
+	ctx = WithMemoryDir(ctx, memDir)
+	ctx = cwdctx.WithSessionCWD(ctx, "/projects/foo")
+
+	// Absolute path to memory file
+	if !IsMemoryFile(ctx, filepath.Join(memDir, "MEMORY.md")) {
+		t.Error("absolute path to MEMORY.md should match")
 	}
 }

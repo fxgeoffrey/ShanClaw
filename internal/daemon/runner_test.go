@@ -3,6 +3,8 @@ package daemon
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/Kocoro-lab/ShanClaw/internal/session"
 )
 
 func TestRunAgentRequest_Validate_EmptyText(t *testing.T) {
@@ -112,8 +114,8 @@ func TestOutputFormatForSource(t *testing.T) {
 		{"feishu", "plain"},
 		{"lark", "plain"},
 		{"telegram", "plain"},
-		{"Slack", "plain"},  // case-insensitive
-		{"LINE", "plain"},   // case-insensitive
+		{"Slack", "plain"}, // case-insensitive
+		{"LINE", "plain"},  // case-insensitive
 		// Everything else → markdown (local, cron, schedule, web, unknown)
 		{"shanclaw", "markdown"},
 		{"desktop", "markdown"},
@@ -144,5 +146,47 @@ func TestRunAgentRequestSource(t *testing.T) {
 	json.Unmarshal(data, &decoded)
 	if decoded.Source != "slack" {
 		t.Fatalf("expected source 'slack', got %q", decoded.Source)
+	}
+}
+
+func TestResumeNamedAgentColdStart_ResumesPersistedEmptySession(t *testing.T) {
+	sessionsDir := t.TempDir()
+	storedCWD := t.TempDir()
+	store := session.NewStore(sessionsDir)
+	if err := store.Save(&session.Session{
+		ID:    "persisted-empty",
+		Title: "Persisted empty session",
+		CWD:   storedCWD,
+	}); err != nil {
+		t.Fatalf("save session: %v", err)
+	}
+
+	mgr := session.NewManager(sessionsDir)
+	resumed, err := resumeNamedAgentColdStart(mgr)
+	if err != nil {
+		t.Fatalf("resumeNamedAgentColdStart error: %v", err)
+	}
+	if !resumed {
+		t.Fatal("expected persisted empty session to count as resumed")
+	}
+	if got := mgr.Current(); got == nil || got.CWD != storedCWD {
+		t.Fatalf("expected stored CWD %q, got %#v", storedCWD, got)
+	}
+}
+
+func TestResumeNamedAgentColdStart_NoPersistedSessionKeepsFreshCurrent(t *testing.T) {
+	sessionsDir := t.TempDir()
+	mgr := session.NewManager(sessionsDir)
+	fresh := mgr.NewSession()
+
+	resumed, err := resumeNamedAgentColdStart(mgr)
+	if err != nil {
+		t.Fatalf("resumeNamedAgentColdStart error: %v", err)
+	}
+	if resumed {
+		t.Fatal("expected no persisted session to remain fresh")
+	}
+	if got := mgr.Current(); got == nil || got.ID != fresh.ID {
+		t.Fatalf("expected fresh current session %q to be preserved, got %#v", fresh.ID, got)
 	}
 }

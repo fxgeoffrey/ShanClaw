@@ -20,13 +20,24 @@ var ErrRouteActive = errors.New("route has an active run")
 type routeEntry struct {
 	mu            sync.Mutex
 	cancel        context.CancelFunc
-	cancelPending bool       // set under sc.mu when CancelRoute fires before cancel is assigned
+	cancelPending bool // set under sc.mu when CancelRoute fires before cancel is assigned
 	done          chan struct{}
 	sessionID     string
 	lastAccess    time.Time
 	injectCh      chan string // buffered channel for mid-run message injection
 	evicting      bool
 	manager       *session.Manager
+}
+
+func cloneSessionSnapshot(sess *session.Session) *session.Session {
+	if sess == nil {
+		return nil
+	}
+	clone := *sess
+	clone.Messages = append([]client.Message(nil), sess.Messages...)
+	clone.MessageMeta = append([]session.MessageMeta(nil), sess.MessageMeta...)
+	clone.RemoteTasks = append([]string(nil), sess.RemoteTasks...)
+	return &clone
 }
 
 // SessionCache separates route-level locking from session storage.
@@ -400,10 +411,10 @@ func (sc *SessionCache) CloseAll() {
 	sc.managers = make(map[string]*session.Manager)
 }
 
-// ResolveLatestSession returns the latest session ID and messages for a route.
+// ResolveLatestSession returns a snapshot of the latest session for a route.
 // Uses TryLock on entry.mu — returns ErrRouteActive if a run is in progress
 // to avoid reading session state while it's being mutated.
-func (sc *SessionCache) ResolveLatestSession(routeKey string, sessionsDir string) (string, []client.Message, error) {
+func (sc *SessionCache) ResolveLatestSession(routeKey string, sessionsDir string) (*session.Session, error) {
 	if sessionsDir != "" {
 		resolved, err := filepath.EvalSymlinks(filepath.Dir(sessionsDir))
 		if err == nil {
@@ -414,7 +425,7 @@ func (sc *SessionCache) ResolveLatestSession(routeKey string, sessionsDir string
 			root = filepath.Clean(sc.shannonDir)
 		}
 		if !strings.HasPrefix(filepath.Clean(sessionsDir), root+string(filepath.Separator)) {
-			return "", nil, fmt.Errorf("sessions dir %q is outside shannon root %q", sessionsDir, root)
+			return nil, fmt.Errorf("sessions dir %q is outside shannon root %q", sessionsDir, root)
 		}
 	}
 	sc.mu.Lock()
@@ -428,21 +439,19 @@ func (sc *SessionCache) ResolveLatestSession(routeKey string, sessionsDir string
 	}
 	sc.mu.Unlock()
 	if entry.manager == nil {
-		return "", nil, fmt.Errorf("no route entry for %q", routeKey)
+		return nil, fmt.Errorf("no route entry for %q", routeKey)
 	}
 
 	if !entry.mu.TryLock() {
-		return "", nil, ErrRouteActive
+		return nil, ErrRouteActive
 	}
 	defer entry.mu.Unlock()
 
 	sess, err := entry.manager.ResumeLatest()
 	if err != nil || sess == nil {
-		return "", nil, fmt.Errorf("no session for route %q", routeKey)
+		return nil, fmt.Errorf("no session for route %q", routeKey)
 	}
-	msgs := make([]client.Message, len(sess.Messages))
-	copy(msgs, sess.Messages)
-	return sess.ID, msgs, nil
+	return cloneSessionSnapshot(sess), nil
 }
 
 // AppendToSession appends messages to the latest session for a route without

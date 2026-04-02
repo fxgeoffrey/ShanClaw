@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -188,5 +189,39 @@ heartbeat:
 	}
 	if !cfg.Heartbeat.IsIsolatedSession() {
 		t.Error("expected default isolated_session to be true (nil pointer)")
+	}
+}
+
+func TestAgentConfig_CWD(t *testing.T) {
+	dir := t.TempDir()
+	agentDir := filepath.Join(dir, "test-agent")
+	os.MkdirAll(agentDir, 0755)
+
+	projectDir := t.TempDir()
+	configYAML := fmt.Sprintf("cwd: %s\nagent:\n  model: medium\n", projectDir)
+	os.WriteFile(filepath.Join(agentDir, "config.yaml"), []byte(configYAML), 0644)
+	os.WriteFile(filepath.Join(agentDir, "AGENT.md"), []byte("test agent"), 0644)
+
+	agent, err := LoadAgent(dir, "test-agent")
+	if err != nil {
+		t.Fatalf("LoadAgent failed: %v", err)
+	}
+	if agent.Config.CWD != projectDir {
+		t.Fatalf("expected CWD %q, got %q", projectDir, agent.Config.CWD)
+	}
+}
+
+func TestAgentConfig_CWD_RejectsRelativePath(t *testing.T) {
+	dir := t.TempDir()
+	agentDir := filepath.Join(dir, "test-agent")
+	os.MkdirAll(agentDir, 0755)
+
+	configYAML := "cwd: relative/path\nagent:\n  model: medium\n"
+	os.WriteFile(filepath.Join(agentDir, "config.yaml"), []byte(configYAML), 0644)
+	os.WriteFile(filepath.Join(agentDir, "AGENT.md"), []byte("test agent"), 0644)
+
+	_, err := LoadAgent(dir, "test-agent")
+	if err == nil {
+		t.Fatal("expected error for relative cwd path")
 	}
 }

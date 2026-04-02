@@ -21,6 +21,7 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/audit"
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
 	"github.com/Kocoro-lab/ShanClaw/internal/config"
+	"github.com/Kocoro-lab/ShanClaw/internal/cwdctx"
 	"github.com/Kocoro-lab/ShanClaw/internal/hooks"
 	mcppkg "github.com/Kocoro-lab/ShanClaw/internal/mcp"
 	"github.com/Kocoro-lab/ShanClaw/internal/session"
@@ -238,6 +239,12 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 	sess := sessMgr.NewSession()
 	sess.Title = sessionTitleFromQuery(query)
 	loop.SetSessionID(sess.ID)
+	effectiveCWD, err := resolveOneShotCWD(agentOverride)
+	if err != nil {
+		return err
+	}
+	sess.CWD = effectiveCWD
+	loop.SetSessionCWD(effectiveCWD)
 	sessMgr.OnSessionClose(sess.ID, loop.SpillCleanupFunc())
 
 	result, usage, err := loop.Run(context.Background(), query, nil)
@@ -265,6 +272,18 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 	}
 	fmt.Println(usageLine + "]")
 	return nil
+}
+
+func resolveOneShotCWD(agentOverride *agents.Agent) (string, error) {
+	var agentCWD string
+	if agentOverride != nil && agentOverride.Config != nil {
+		agentCWD = agentOverride.Config.CWD
+	}
+	effectiveCWD := cwdctx.ResolveEffectiveCWD("", "", agentCWD)
+	if err := cwdctx.ValidateCWD(effectiveCWD); err != nil {
+		return "", fmt.Errorf("invalid cwd: %w", err)
+	}
+	return effectiveCWD, nil
 }
 
 // cliEventHandler prompts for approval on stdout/stdin in one-shot mode

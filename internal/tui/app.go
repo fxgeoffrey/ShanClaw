@@ -27,6 +27,7 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/audit"
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
 	"github.com/Kocoro-lab/ShanClaw/internal/config"
+	"github.com/Kocoro-lab/ShanClaw/internal/cwdctx"
 	"github.com/Kocoro-lab/ShanClaw/internal/hooks"
 	"github.com/Kocoro-lab/ShanClaw/internal/instructions"
 	"github.com/Kocoro-lab/ShanClaw/internal/session"
@@ -147,6 +148,7 @@ type Model struct {
 	remoteCleanup       func()             // cleanup for MCP connections from async load
 	cancelRun           context.CancelFunc // cancels the running agent loop
 	injectCh            chan string        // injection channel for mid-run messages
+	resumedSession      bool              // true when the current session was resumed (not newly created)
 	// Tool result display
 	pendingToolName string
 	pendingToolArgs string
@@ -604,6 +606,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if err != nil {
 						m.appendOutput(fmt.Sprintf("Error: %v", err))
 					} else {
+						m.resumedSession = true
 						m.loadSessionHistory(sess)
 					}
 				}
@@ -1009,6 +1012,20 @@ func (m *Model) runAgentLoop(query string, history []client.Message) tea.Cmd {
 		if sess := m.sessions.Current(); sess != nil {
 			m.agentLoop.SetSessionID(sess.ID)
 			m.agentLoop.SetWorkingSet(m.sessions.WorkingSet(sess.ID))
+
+			// Resolve effective CWD using the same cascade as daemon.
+			var sessionCWD string
+			if m.resumedSession {
+				sessionCWD = sess.CWD
+			}
+			var agentCWD string
+			if m.agentOverride != nil && m.agentOverride.Config != nil {
+				agentCWD = m.agentOverride.Config.CWD
+			}
+			effectiveCWD := cwdctx.ResolveEffectiveCWD("", sessionCWD, agentCWD)
+			sess.CWD = effectiveCWD
+			m.agentLoop.SetSessionCWD(effectiveCWD)
+
 			cleanupSpills := m.agentLoop.SpillCleanupFunc()
 			m.sessions.OnSessionClose(sess.ID, func() {
 				cleanupSpills()
@@ -1272,6 +1289,7 @@ func (m *Model) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 			switch parts[1] {
 			case "new":
 				m.sessions.NewSession()
+				m.resumedSession = false
 				m.appendOutput("Started new session")
 			case "resume":
 				if len(parts) < 3 {
@@ -1286,6 +1304,7 @@ func (m *Model) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 					if err != nil {
 						m.appendOutput(fmt.Sprintf("Error: %v", err))
 					} else {
+						m.resumedSession = true
 						m.loadSessionHistory(sess)
 					}
 				}

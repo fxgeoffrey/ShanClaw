@@ -20,6 +20,7 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/audit"
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
 	"github.com/Kocoro-lab/ShanClaw/internal/config"
+	"github.com/Kocoro-lab/ShanClaw/internal/cwdctx"
 	"github.com/Kocoro-lab/ShanClaw/internal/hooks"
 	"github.com/Kocoro-lab/ShanClaw/internal/mcp"
 	"github.com/Kocoro-lab/ShanClaw/internal/schedule"
@@ -38,6 +39,7 @@ type RunAgentRequest struct {
 	Sender         string           `json:"sender,omitempty"`    // user identifier from channel
 	Channel        string           `json:"channel,omitempty"`   // channel/thread source context
 	ThreadID       string           `json:"thread_id,omitempty"` // thread context for messaging platforms
+	CWD            string           `json:"cwd,omitempty"`       // absolute project path override
 	RouteKey       string           `json:"-"`                   // internal routing key
 	Ephemeral      bool             `json:"-"`                   // caller owns persistence + events
 	ModelOverride  string           `json:"-"`                   // overrides agent model tier
@@ -339,24 +341,30 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		}()
 	}
 
+	resumed := false
 	switch {
 	case req.SessionID != "":
 		// Resume a specific session by ID (reuses cached manager to avoid DB handle leak).
 		if _, err := sessMgr.Resume(req.SessionID); err != nil {
 			return nil, fmt.Errorf("session not found: %s", req.SessionID)
 		}
+		resumed = true
 	case req.NewSession || req.RouteKey == "":
 		sessMgr.NewSession()
 	case route != nil && route.sessionID != "":
 		if _, err := sessMgr.Resume(route.sessionID); err != nil {
 			log.Printf("daemon: failed to resume routed session %q for %q: %v", route.sessionID, req.RouteKey, err)
 			sessMgr.NewSession()
+		} else {
+			resumed = true
 		}
 	case strings.HasPrefix(req.RouteKey, "agent:"):
 		// Named-agent cold start (first run or after daemon restart).
 		// route.sessionID is empty — resume latest from disk, or start fresh if none.
 		if _, err := sessMgr.ResumeLatest(); err != nil || sessMgr.Current() == nil {
 			sessMgr.NewSession()
+		} else {
+			resumed = true
 		}
 	default:
 		sessMgr.NewSession()
@@ -368,6 +376,22 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 	if len(req.SessionHistory) > 0 {
 		sess.Messages = req.SessionHistory
 	}
+
+	// Resolve effective CWD: request > resumed session > agent config > process cwd.
+	var sessionCWD string
+	if resumed {
+		sessionCWD = sess.CWD
+	}
+	var agentCWD string
+	if agentOverride != nil && agentOverride.Config != nil {
+		agentCWD = agentOverride.Config.CWD
+	}
+	effectiveCWD := cwdctx.ResolveEffectiveCWD(req.CWD, sessionCWD, agentCWD)
+	if err := cwdctx.ValidateCWD(effectiveCWD); err != nil {
+		return nil, fmt.Errorf("invalid cwd: %w", err)
+	}
+	sess.CWD = effectiveCWD
+	ctx = cwdctx.WithSessionCWD(ctx, effectiveCWD)
 
 	// Notify handler of resolved session ID so it can include it in EventBus payloads.
 	if setter, ok := handler.(interface{ SetSessionID(string) }); ok {

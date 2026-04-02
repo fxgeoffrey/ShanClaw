@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/agent"
+	"github.com/Kocoro-lab/ShanClaw/internal/cwdctx"
 )
 
 type FileReadTool struct{}
@@ -39,7 +40,7 @@ func (t *FileReadTool) Run(ctx context.Context, argsJSON string) (agent.ToolResu
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return agent.ToolResult{Content: fmt.Sprintf("invalid arguments: %v", err), IsError: true}, nil
 	}
-	args.Path = ExpandHome(args.Path)
+	args.Path = cwdctx.ResolvePath(ctx, args.Path)
 
 	data, err := os.ReadFile(args.Path)
 	if err != nil {

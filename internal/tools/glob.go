@@ -10,6 +10,7 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/agent"
+	"github.com/Kocoro-lab/ShanClaw/internal/cwdctx"
 )
 
 type GlobTool struct{}
@@ -40,10 +41,11 @@ func (t *GlobTool) Run(ctx context.Context, argsJSON string) (agent.ToolResult, 
 		return agent.ToolResult{Content: fmt.Sprintf("invalid arguments: %v", err), IsError: true}, nil
 	}
 
-	root := "."
-	if args.Path != "" {
-		root = ExpandHome(args.Path)
+	root := args.Path
+	if root == "" {
+		root = "."
 	}
+	root = cwdctx.ResolvePath(ctx, root)
 
 	matches, err := doublestar.Glob(os.DirFS(root), args.Pattern)
 	if err != nil {

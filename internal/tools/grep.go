@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/agent"
+	"github.com/Kocoro-lab/ShanClaw/internal/cwdctx"
 )
 
 type GrepTool struct{}
@@ -42,10 +43,11 @@ func (t *GrepTool) Run(ctx context.Context, argsJSON string) (agent.ToolResult, 
 		return agent.ToolResult{Content: fmt.Sprintf("invalid arguments: %v", err), IsError: true}, nil
 	}
 
-	path := ExpandHome(args.Path)
+	path := args.Path
 	if path == "" {
 		path = "."
 	}
+	path = cwdctx.ResolvePath(ctx, path)
 	maxResults := args.MaxResults
 	if maxResults == 0 {
 		maxResults = 100

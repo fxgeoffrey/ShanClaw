@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/agent"
+	"github.com/Kocoro-lab/ShanClaw/internal/cwdctx"
 )
 
 type DirectoryListTool struct{}
@@ -36,10 +37,11 @@ func (t *DirectoryListTool) Run(ctx context.Context, argsJSON string) (agent.Too
 		return agent.ToolResult{Content: fmt.Sprintf("invalid arguments: %v", err), IsError: true}, nil
 	}
 
-	path := ExpandHome(args.Path)
+	path := args.Path
 	if path == "" {
 		path = "."
 	}
+	path = cwdctx.ResolvePath(ctx, path)
 
 	entries, err := os.ReadDir(path)
 	if err != nil {

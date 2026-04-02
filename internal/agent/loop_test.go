@@ -1551,6 +1551,62 @@ func TestAgentLoop_ParallelToolExecution_MixedDeniedAndApproved(t *testing.T) {
 	}
 }
 
+// trackingHandler extends mockHandler with OnToolCall tracking.
+type trackingHandler struct {
+	mockHandler
+	toolCallNames []string // names passed to OnToolCall
+}
+
+func (h *trackingHandler) OnToolCall(name string, args string) {
+	h.toolCallNames = append(h.toolCallNames, name)
+}
+
+// TestOnToolCall_NotFiredForDeniedOrUnknown verifies that OnToolCall only fires
+// for tools that actually execute, not for denied, unknown, or short-circuited calls.
+func TestOnToolCall_NotFiredForDeniedOrUnknown(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount == 1 {
+			// Known tool (will execute) + unknown tool + denied tool
+			json.NewEncoder(w).Encode(multiToolResponse("", []client.FunctionCall{
+				{ID: "id_ok", Name: "mock_tool", Arguments: json.RawMessage(`{}`)},
+				{ID: "id_unknown", Name: "nonexistent_tool", Arguments: json.RawMessage(`{}`)},
+				{ID: "id_denied", Name: "guarded_tool", Arguments: json.RawMessage(`{"cmd":"rm -rf /"}`)},
+			}, 10, 5))
+		} else {
+			json.NewEncoder(w).Encode(nativeResponse("done", "end_turn", nil, 10, 5))
+		}
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&mockTool{name: "mock_tool"})
+	reg.Register(&mockApprovalTool{
+		name:     "guarded_tool",
+		safeArgs: func(args string) bool { return false },
+	})
+
+	handler := &trackingHandler{mockHandler: mockHandler{approveResult: false}}
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+	loop.SetHandler(handler)
+
+	_, _, err := loop.Run(context.Background(), "mixed tools", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// OnToolCall should fire ONLY for mock_tool (the one that actually executes).
+	// It must NOT fire for nonexistent_tool (unknown) or guarded_tool (denied).
+	if len(handler.toolCallNames) != 1 {
+		t.Fatalf("expected OnToolCall for 1 tool, got %d: %v", len(handler.toolCallNames), handler.toolCallNames)
+	}
+	if handler.toolCallNames[0] != "mock_tool" {
+		t.Errorf("expected OnToolCall for 'mock_tool', got %q", handler.toolCallNames[0])
+	}
+}
+
 func TestToolExecResult_Struct(t *testing.T) {
 	// Verify the toolExecResult struct can hold results correctly
 	results := make([]toolExecResult, 3)

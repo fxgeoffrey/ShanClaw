@@ -1177,7 +1177,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		var worstAction LoopAction
 		var worstMsg string
 
-		// ---- Phase 1 (serial): permission checks, pre-hooks, OnToolCall events ----
+		// ---- Phase 1 (serial): permission checks, pre-hooks, short-circuit resolution ----
 		// Builds list of approved tool calls. Denied/unknown results are stored
 		// in execResults at their original index so Phase 3 can emit everything in order.
 		type perCallMeta struct {
@@ -1208,7 +1208,6 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 					result: ToolResult{Content: "duplicate tool call skipped (identical to earlier call in this response)", IsError: true},
 				}
 				if a.handler != nil {
-					a.handler.OnToolCall(fc.Name, argsStr)
 					a.handler.OnToolResult(fc.Name, argsStr, execResults[idx].result, 0)
 				}
 				continue
@@ -1222,7 +1221,6 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 					result: ToolResult{Content: "tool call blocked: previously denied this turn. Use a different approach.", IsError: true},
 				}
 				if a.handler != nil {
-					a.handler.OnToolCall(fc.Name, argsStr)
 					a.handler.OnToolResult(fc.Name, argsStr, execResults[idx].result, 0)
 				}
 				continue
@@ -1239,7 +1237,6 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 					},
 				}
 				if a.handler != nil {
-					a.handler.OnToolCall(fc.Name, argsStr)
 					a.handler.OnToolResult(fc.Name, argsStr, execResults[idx].result, 0)
 				}
 				continue
@@ -1255,7 +1252,6 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 						result: ToolResult{Content: "cloud_delegate already called this turn. Use the previous result — do not re-delegate.", IsError: true},
 					}
 					if a.handler != nil {
-						a.handler.OnToolCall(fc.Name, argsStr)
 						a.handler.OnToolResult(fc.Name, argsStr, execResults[idx].result, 0)
 					}
 					continue
@@ -1273,7 +1269,6 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 					result: ToolResult{Content: "unknown tool: " + fc.Name, IsError: true},
 				}
 				if a.handler != nil {
-					a.handler.OnToolCall(fc.Name, argsStr)
 					a.handler.OnToolResult(fc.Name, argsStr, execResults[idx].result, 0)
 				}
 				continue
@@ -1290,7 +1285,6 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 					result: ToolResult{Content: "tool call denied by permission policy", IsError: true},
 				}
 				if a.handler != nil {
-					a.handler.OnToolCall(fc.Name, argsStr)
 					a.handler.OnToolResult(fc.Name, argsStr, ToolResult{Content: "denied by policy", IsError: true}, 0)
 				}
 				continue
@@ -1303,7 +1297,6 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				}
 				deniedCalls[dedupKey] = true
 				if a.handler != nil {
-					a.handler.OnToolCall(fc.Name, argsStr)
 					a.handler.OnToolResult(fc.Name, argsStr, ToolResult{Content: "denied by user", IsError: true}, 0)
 				}
 				continue
@@ -1322,7 +1315,6 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 						result: ToolResult{Content: "tool call denied by hook: " + hookReason, IsError: true},
 					}
 					if a.handler != nil {
-						a.handler.OnToolCall(fc.Name, argsStr)
 						a.handler.OnToolResult(fc.Name, argsStr, execResults[idx].result, 0)
 					}
 					continue

@@ -1008,11 +1008,10 @@ func (m *Model) runAgentLoop(query string, history []client.Message) tea.Cmd {
 
 		if sess := m.sessions.Current(); sess != nil {
 			m.agentLoop.SetSessionID(sess.ID)
+			m.sessions.OnSessionClose(sess.ID, m.agentLoop.SpillCleanupFunc())
 		} else {
 			m.agentLoop.SetSessionID("")
 		}
-		spillCleanup := m.agentLoop.SpillCleanupFunc()
-		defer spillCleanup()
 		result, usage, err := m.agentLoop.Run(ctx, query, history)
 		if result != "" && (err == nil || errors.Is(err, agent.ErrMaxIterReached)) {
 			sess := m.sessions.Current()

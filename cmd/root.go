@@ -238,7 +238,7 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 	sess := sessMgr.NewSession()
 	sess.Title = sessionTitleFromQuery(query)
 	loop.SetSessionID(sess.ID)
-	sessMgr.OnClose(loop.SpillCleanupFunc())
+	sessMgr.OnSessionClose(sess.ID, loop.SpillCleanupFunc())
 
 	result, usage, err := loop.Run(context.Background(), query, nil)
 	if err != nil && !errors.Is(err, agent.ErrMaxIterReached) {

@@ -12,10 +12,11 @@ import (
 // Manager provides session lifecycle operations. It is safe for concurrent use
 // across multiple route entries that share the same sessions directory.
 type Manager struct {
-	mu         sync.Mutex
-	store      *Store
-	current    *Session
-	onCloseFns []func() // cleanup callbacks invoked on Close
+	mu              sync.Mutex
+	store           *Store
+	current         *Session
+	onCloseFns      []func()          // manager-wide cleanup callbacks invoked on Close
+	sessionCloseFns map[string]func() // per-session cleanup invoked on session switch/Close
 }
 
 func NewManager(sessionsDir string) *Manager {
@@ -26,7 +27,10 @@ func NewManager(sessionsDir string) *Manager {
 
 func (m *Manager) NewSession() *Session {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	prevID := ""
+	if m.current != nil {
+		prevID = m.current.ID
+	}
 	id := generateID()
 	m.current = &Session{
 		ID:        id,
@@ -34,7 +38,11 @@ func (m *Manager) NewSession() *Session {
 		Title:     "New session",
 		CWD:       getCWD(),
 	}
-	return m.current
+	sess := m.current
+	callbacks := m.takeSessionCloseLocked(prevID)
+	m.mu.Unlock()
+	runCallbacks(callbacks)
+	return sess
 }
 
 func (m *Manager) Current() *Session {
@@ -45,12 +53,22 @@ func (m *Manager) Current() *Session {
 
 func (m *Manager) Resume(id string) (*Session, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	prevID := ""
+	if m.current != nil {
+		prevID = m.current.ID
+	}
 	sess, err := m.store.Load(id)
 	if err != nil {
+		m.mu.Unlock()
 		return nil, err
 	}
 	m.current = sess
+	callbacks := []func(){}
+	if prevID != "" && prevID != sess.ID {
+		callbacks = m.takeSessionCloseLocked(prevID)
+	}
+	m.mu.Unlock()
+	runCallbacks(callbacks)
 	return sess, nil
 }
 
@@ -76,22 +94,59 @@ func (m *Manager) Search(query string, limit int) ([]SearchResult, error) {
 }
 
 // OnClose registers a function to be called when the manager is closed.
-// Used by the agent loop to clean up spill files for the session.
+// Used for manager-wide cleanup that is not tied to a specific session.
 func (m *Manager) OnClose(fn func()) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.onCloseFns = append(m.onCloseFns, fn)
 }
 
+// OnSessionClose registers cleanup for a specific session ID.
+// Registering again for the same session replaces the previous callback.
+// The callback fires when the manager switches away from that session or closes.
+func (m *Manager) OnSessionClose(sessionID string, fn func()) {
+	if sessionID == "" || fn == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.sessionCloseFns == nil {
+		m.sessionCloseFns = make(map[string]func())
+	}
+	m.sessionCloseFns[sessionID] = fn
+}
+
 func (m *Manager) Close() error {
 	m.mu.Lock()
-	fns := m.onCloseFns
+	fns := append([]func(){}, m.onCloseFns...)
 	m.onCloseFns = nil
+	for _, fn := range m.sessionCloseFns {
+		if fn != nil {
+			fns = append(fns, fn)
+		}
+	}
+	m.sessionCloseFns = nil
 	m.mu.Unlock()
+	runCallbacks(fns)
+	return m.store.Close()
+}
+
+func (m *Manager) takeSessionCloseLocked(sessionID string) []func() {
+	if sessionID == "" || m.sessionCloseFns == nil {
+		return nil
+	}
+	fn, ok := m.sessionCloseFns[sessionID]
+	if !ok || fn == nil {
+		return nil
+	}
+	delete(m.sessionCloseFns, sessionID)
+	return []func(){fn}
+}
+
+func runCallbacks(fns []func()) {
 	for _, fn := range fns {
 		fn()
 	}
-	return m.store.Close()
 }
 
 func (m *Manager) RebuildIndex() error {

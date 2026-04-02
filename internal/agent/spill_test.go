@@ -94,6 +94,50 @@ func TestCleanupSpills(t *testing.T) {
 	}
 }
 
+// TestSpillFiles_SurviveBetweenRuns verifies that spill files created in one
+// run are still readable before cleanup (session close). This is the regression
+// test for the bug where SpillCleanupFunc was deferred per-Run, deleting files
+// that subsequent turns could still reference.
+func TestSpillFiles_SurviveBetweenRuns(t *testing.T) {
+	dir := t.TempDir()
+
+	// Turn 1: spill a large result
+	_, err := spillToDisk(dir, "sess1", "call1", strings.Repeat("x", 60000))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Between turns: file must still exist
+	path1 := filepath.Join(dir, "tmp", "tool_result_sess1_call1.txt")
+	if _, err := os.Stat(path1); err != nil {
+		t.Fatalf("spill file should survive between turns: %v", err)
+	}
+
+	// Turn 2: spill another result
+	_, err = spillToDisk(dir, "sess1", "call2", strings.Repeat("y", 60000))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Both files should exist (cleanup hasn't run yet)
+	path2 := filepath.Join(dir, "tmp", "tool_result_sess1_call2.txt")
+	for _, p := range []string{path1, path2} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("spill file should exist before session close: %v", err)
+		}
+	}
+
+	// Session close: cleanup
+	cleanupSpills(dir, "sess1")
+
+	// Now both should be gone
+	for _, p := range []string{path1, path2} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("spill file should be gone after session close: %s", p)
+		}
+	}
+}
+
 func TestSpillThresholdIntegration(t *testing.T) {
 	// Verify that content under spillThreshold would not trigger spill
 	// (the check is in loop.go, but we verify the constant here).

@@ -104,3 +104,38 @@ func TestManager_ResumeLatest_SingleSession(t *testing.T) {
 		t.Errorf("expected 'only-one', got %q", sess.ID)
 	}
 }
+
+func TestManager_OnSessionClose_FiresOnSessionSwitch(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManager(dir)
+	defer m.Close()
+
+	s1 := m.NewSession()
+	calls := 0
+	m.OnSessionClose(s1.ID, func() { calls++ })
+
+	s2 := m.NewSession()
+	if s2 == nil {
+		t.Fatal("expected second session")
+	}
+	if calls != 1 {
+		t.Fatalf("expected callback to fire once when switching sessions, got %d", calls)
+	}
+}
+
+func TestManager_OnSessionClose_ReplacesCallbackForSameSession(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManager(dir)
+
+	sess := m.NewSession()
+	total := 0
+	m.OnSessionClose(sess.ID, func() { total += 1 })
+	m.OnSessionClose(sess.ID, func() { total += 10 })
+
+	if err := m.Close(); err != nil {
+		t.Fatalf("close failed: %v", err)
+	}
+	if total != 10 {
+		t.Fatalf("expected replacement callback to fire once, got total %d", total)
+	}
+}

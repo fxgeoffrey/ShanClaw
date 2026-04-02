@@ -13,12 +13,12 @@ import (
 
 // AgentAPI is the JSON representation of an agent for the HTTP API.
 type AgentAPI struct {
-	Name     string            `json:"name"`
-	Prompt   string            `json:"prompt"`
-	Memory   *string           `json:"memory"`   // null if no MEMORY.md
-	Config   *AgentConfigAPI   `json:"config"`    // null if no config.yaml
-	Commands map[string]string `json:"commands"`  // null if no commands
-	Skills   []skills.SkillMeta `json:"skills"`    // null if no skills
+	Name     string             `json:"name"`
+	Prompt   string             `json:"prompt"`
+	Memory   *string            `json:"memory"`   // null if no MEMORY.md
+	Config   *AgentConfigAPI    `json:"config"`   // null if no config.yaml
+	Commands map[string]string  `json:"commands"` // null if no commands
+	Skills   []skills.SkillMeta `json:"skills"`   // null if no skills
 }
 
 // AgentConfigAPI is the JSON representation of agent config.
@@ -32,8 +32,8 @@ type AgentConfigAPI struct {
 
 // AgentMCPConfigAPI is the JSON-friendly MCP config.
 type AgentMCPConfigAPI struct {
-	Inherit bool                          `json:"inherit"`
-	Servers map[string]AgentMCPServerRef  `json:"servers,omitempty"`
+	Inherit bool                         `json:"inherit"`
+	Servers map[string]AgentMCPServerRef `json:"servers,omitempty"`
 }
 
 // ToAPI converts a loaded Agent to the API response shape.
@@ -254,9 +254,6 @@ func (r *AgentCreateRequest) Validate() error {
 		if err := skills.ValidateSkillName(s.Name); err != nil {
 			return err
 		}
-		if s.Description == "" {
-			return fmt.Errorf("skill %q requires a description", s.Name)
-		}
 	}
 	return nil
 }
@@ -264,8 +261,8 @@ func (r *AgentCreateRequest) Validate() error {
 // AgentUpdateRequest is a partial update — only non-nil fields are applied.
 type AgentUpdateRequest struct {
 	Prompt   *string           `json:"prompt,omitempty"`
-	Memory   json.RawMessage   `json:"memory,omitempty"`   // string or null
-	Config   json.RawMessage   `json:"config,omitempty"`   // object or null
+	Memory   json.RawMessage   `json:"memory,omitempty"` // string or null
+	Config   json.RawMessage   `json:"config,omitempty"` // object or null
 	Commands map[string]string `json:"commands,omitempty"`
 	Skills   []*skills.Skill   `json:"skills,omitempty"`
 }

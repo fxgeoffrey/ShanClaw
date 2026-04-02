@@ -176,6 +176,27 @@ func loadAttachedSkills(path string) ([]string, bool) {
 	return names, true
 }
 
+// ReadAttachedSkills reads an agent's attached-skill manifest.
+// Returns (nil, nil) when the manifest does not exist.
+func ReadAttachedSkills(agentsDir, agentName string) ([]string, error) {
+	if err := ValidateAgentName(agentName); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(agentsDir, agentName, "_attached.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var names []string
+	if err := yaml.Unmarshal(data, &names); err != nil {
+		return nil, err
+	}
+	return names, nil
+}
+
 // WriteAttachedSkills writes the _attached.yaml manifest for an agent.
 func WriteAttachedSkills(agentsDir, agentName string, names []string) error {
 	dir := filepath.Join(agentsDir, agentName)
@@ -196,6 +217,50 @@ func DeleteAttachedSkills(agentsDir, agentName string) error {
 		return err
 	}
 	return nil
+}
+
+// SetAttachedSkills replaces an agent's attached-skill manifest with a normalized set.
+// Names are deduplicated and sorted; an empty set removes the manifest.
+func SetAttachedSkills(agentsDir, agentName string, names []string) error {
+	seen := make(map[string]bool, len(names))
+	normalized := make([]string, 0, len(names))
+	for _, name := range names {
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		normalized = append(normalized, name)
+	}
+	sort.Strings(normalized)
+	if len(normalized) == 0 {
+		return DeleteAttachedSkills(agentsDir, agentName)
+	}
+	return WriteAttachedSkills(agentsDir, agentName, normalized)
+}
+
+// AttachSkill adds a skill name to an agent's attached-skill manifest.
+func AttachSkill(agentsDir, agentName, skillName string) error {
+	names, err := ReadAttachedSkills(agentsDir, agentName)
+	if err != nil {
+		return err
+	}
+	names = append(names, skillName)
+	return SetAttachedSkills(agentsDir, agentName, names)
+}
+
+// DetachSkill removes a skill name from an agent's attached-skill manifest.
+func DetachSkill(agentsDir, agentName, skillName string) error {
+	names, err := ReadAttachedSkills(agentsDir, agentName)
+	if err != nil {
+		return err
+	}
+	filtered := make([]string, 0, len(names))
+	for _, name := range names {
+		if name != skillName {
+			filtered = append(filtered, name)
+		}
+	}
+	return SetAttachedSkills(agentsDir, agentName, filtered)
 }
 
 // parseAgentConfig parses the per-agent config.yaml, handling the special

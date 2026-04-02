@@ -15,10 +15,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Kocoro-lab/ShanClaw/internal/agents"
 	"github.com/Kocoro-lab/ShanClaw/internal/config"
 	"github.com/Kocoro-lab/ShanClaw/internal/mcp"
+	"github.com/Kocoro-lab/ShanClaw/internal/skills"
 	"gopkg.in/yaml.v3"
 )
+
+func writeTestGlobalSkill(t *testing.T, shannonDir, name string) {
+	t.Helper()
+	if err := skills.WriteGlobalSkill(shannonDir, &skills.Skill{
+		Name:        name,
+		Description: name + " description",
+		Prompt:      "prompt for " + name,
+	}); err != nil {
+		t.Fatalf("write global skill %s: %v", name, err)
+	}
+}
 
 func TestServer_Health(t *testing.T) {
 	c := NewClient("ws://localhost:1/x", "", func(msg MessagePayload) string { return "" }, nil)
@@ -474,6 +487,205 @@ func TestServer_CreateAgent_DoesNotCreateSessionManager(t *testing.T) {
 	}
 	if route.manager != nil {
 		t.Fatalf("expected create path to avoid creating a route manager")
+	}
+}
+
+func TestServer_CreateAgent_AttachesInstalledSkills(t *testing.T) {
+	shannonDir := t.TempDir()
+	agentsDir := filepath.Join(shannonDir, "agents")
+	if err := os.MkdirAll(agentsDir, 0700); err != nil {
+		t.Fatalf("mkdir agents dir: %v", err)
+	}
+	sessDir := t.TempDir()
+	writeTestGlobalSkill(t, shannonDir, "check")
+	deps := &ServerDeps{
+		AgentsDir:    agentsDir,
+		ShannonDir:   shannonDir,
+		SessionCache: NewSessionCache(sessDir),
+	}
+	c := NewClient("ws://localhost:1/x", "", func(msg MessagePayload) string { return "" }, nil)
+	srv := NewServer(0, c, deps, "test")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Start(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	body := `{"name":"attach-bot","prompt":"hello world","skills":[{"name":"check"}]}`
+	resp, err := http.Post(
+		fmt.Sprintf("http://127.0.0.1:%d/agents", srv.Port()),
+		"application/json",
+		strings.NewReader(body),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", resp.StatusCode)
+	}
+
+	loaded, err := agents.LoadAgent(agentsDir, "attach-bot")
+	if err != nil {
+		t.Fatalf("load agent: %v", err)
+	}
+	if len(loaded.Skills) != 1 || loaded.Skills[0].Name != "check" {
+		t.Fatalf("expected attached global skill 'check', got %+v", loaded.Skills)
+	}
+
+	attached, err := agents.ReadAttachedSkills(agentsDir, "attach-bot")
+	if err != nil {
+		t.Fatalf("read attached skills: %v", err)
+	}
+	if len(attached) != 1 || attached[0] != "check" {
+		t.Fatalf("expected manifest to contain check, got %v", attached)
+	}
+
+	if _, err := os.Stat(filepath.Join(agentsDir, "attach-bot", "skills")); !os.IsNotExist(err) {
+		t.Fatalf("expected no agent-local skill directory, got err=%v", err)
+	}
+}
+
+func TestServer_PutSkill_AttachesInstalledGlobalSkill(t *testing.T) {
+	shannonDir := t.TempDir()
+	agentsDir := filepath.Join(shannonDir, "agents")
+	if err := os.MkdirAll(agentsDir, 0700); err != nil {
+		t.Fatalf("mkdir agents dir: %v", err)
+	}
+	sessDir := t.TempDir()
+	writeTestGlobalSkill(t, shannonDir, "check")
+	deps := &ServerDeps{
+		AgentsDir:    agentsDir,
+		ShannonDir:   shannonDir,
+		SessionCache: NewSessionCache(sessDir),
+	}
+	c := NewClient("ws://localhost:1/x", "", func(msg MessagePayload) string { return "" }, nil)
+	srv := NewServer(0, c, deps, "test")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Start(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	createBody := `{"name":"skill-bot","prompt":"hello world"}`
+	resp, err := http.Post(
+		fmt.Sprintf("http://127.0.0.1:%d/agents", srv.Port()),
+		"application/json",
+		strings.NewReader(createBody),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d", resp.StatusCode)
+	}
+
+	req, err := http.NewRequest(
+		http.MethodPut,
+		fmt.Sprintf("http://127.0.0.1:%d/agents/skill-bot/skills/check", srv.Port()),
+		strings.NewReader(`{}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("attach: expected 200, got %d", resp.StatusCode)
+	}
+
+	loaded, err := agents.LoadAgent(agentsDir, "skill-bot")
+	if err != nil {
+		t.Fatalf("load agent: %v", err)
+	}
+	if len(loaded.Skills) != 1 || loaded.Skills[0].Name != "check" {
+		t.Fatalf("expected attached global skill 'check', got %+v", loaded.Skills)
+	}
+}
+
+func TestServer_DeleteSkill_DetachesManifestAndCleansLegacySkillDir(t *testing.T) {
+	shannonDir := t.TempDir()
+	agentsDir := filepath.Join(shannonDir, "agents")
+	if err := os.MkdirAll(agentsDir, 0700); err != nil {
+		t.Fatalf("mkdir agents dir: %v", err)
+	}
+	sessDir := t.TempDir()
+	writeTestGlobalSkill(t, shannonDir, "check")
+	deps := &ServerDeps{
+		AgentsDir:    agentsDir,
+		ShannonDir:   shannonDir,
+		SessionCache: NewSessionCache(sessDir),
+	}
+	c := NewClient("ws://localhost:1/x", "", func(msg MessagePayload) string { return "" }, nil)
+	srv := NewServer(0, c, deps, "test")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Start(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	createBody := `{"name":"detach-bot","prompt":"hello world","skills":[{"name":"check"}]}`
+	resp, err := http.Post(
+		fmt.Sprintf("http://127.0.0.1:%d/agents", srv.Port()),
+		"application/json",
+		strings.NewReader(createBody),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d", resp.StatusCode)
+	}
+
+	if err := agents.WriteAgentSkill(agentsDir, "detach-bot", &skills.Skill{
+		Name:        "check",
+		Description: "legacy local copy",
+		Prompt:      "legacy prompt",
+	}); err != nil {
+		t.Fatalf("write legacy agent-local skill: %v", err)
+	}
+
+	req, err := http.NewRequest(
+		http.MethodDelete,
+		fmt.Sprintf("http://127.0.0.1:%d/agents/detach-bot/skills/check", srv.Port()),
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("delete: expected 200, got %d", resp.StatusCode)
+	}
+
+	attached, err := agents.ReadAttachedSkills(agentsDir, "detach-bot")
+	if err != nil {
+		t.Fatalf("read attached skills: %v", err)
+	}
+	if len(attached) != 0 {
+		t.Fatalf("expected empty attached skills after delete, got %v", attached)
+	}
+
+	loaded, err := agents.LoadAgent(agentsDir, "detach-bot")
+	if err != nil {
+		t.Fatalf("load agent: %v", err)
+	}
+	if len(loaded.Skills) != 0 {
+		t.Fatalf("expected no loaded skills after detach, got %+v", loaded.Skills)
+	}
+
+	if _, err := os.Stat(filepath.Join(agentsDir, "detach-bot", "skills", "check")); !os.IsNotExist(err) {
+		t.Fatalf("expected legacy agent-local skill dir to be removed, got err=%v", err)
 	}
 }
 

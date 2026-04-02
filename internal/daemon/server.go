@@ -823,6 +823,28 @@ func decodeBody(w http.ResponseWriter, r *http.Request, v interface{}) bool {
 	return true
 }
 
+func decodeOptionalBody(w http.ResponseWriter, r *http.Request, v interface{}) (ok bool, provided bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+		} else {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+		}
+		return false, false
+	}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return true, false
+	}
+	if err := json.Unmarshal(data, v); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return false, false
+	}
+	return true, true
+}
+
 func (s *Server) skillSources() ([]skills.SkillSource, error) {
 	if s.deps == nil {
 		return nil, fmt.Errorf("daemon deps not configured")
@@ -834,6 +856,52 @@ func (s *Server) skillSources() ([]skills.SkillSource, error) {
 		Source: skills.SourceGlobal,
 	}
 	return []skills.SkillSource{global}, nil
+}
+
+func skillNamesFromRequest(entries []*skills.Skill) []string {
+	names := make([]string, 0, len(entries))
+	for _, skill := range entries {
+		if skill != nil && skill.Name != "" {
+			names = append(names, skill.Name)
+		}
+	}
+	return names
+}
+
+func (s *Server) validateInstalledSkills(names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	if s.deps == nil {
+		return fmt.Errorf("daemon deps not configured")
+	}
+	list, err := agents.LoadGlobalSkills(s.deps.ShannonDir)
+	if err != nil {
+		return fmt.Errorf("load installed skills: %w", err)
+	}
+	installed := make(map[string]bool, len(list))
+	for _, skill := range list {
+		installed[skill.Name] = true
+	}
+	var missing []string
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		if !installed[name] {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	sort.Strings(missing)
+	if len(missing) == 1 {
+		return fmt.Errorf("skill %q is not installed", missing[0])
+	}
+	return fmt.Errorf("skills not installed: %s", strings.Join(missing, ", "))
 }
 
 func (s *Server) resolveSkillDir(name string) (string, string, bool, error) {
@@ -1020,6 +1088,10 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if err := s.validateInstalledSkills(skillNamesFromRequest(req.Skills)); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	// Serialize creates for the same agent name to prevent concurrent rollback races.
 	routeKey := "agent:" + req.Name
 	s.deps.SessionCache.LockRoute(routeKey)
@@ -1058,15 +1130,10 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	for _, skill := range req.Skills {
-		if skill == nil {
+	if len(req.Skills) > 0 {
+		if err := agents.SetAttachedSkills(s.deps.AgentsDir, req.Name, skillNamesFromRequest(req.Skills)); err != nil {
 			rollback()
-			writeError(w, http.StatusBadRequest, "skill entry cannot be null")
-			return
-		}
-		if err := agents.WriteAgentSkill(s.deps.AgentsDir, req.Name, skill); err != nil {
-			rollback()
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("write skill %s: %v", skill.Name, err))
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("write skill manifest: %v", err))
 			return
 		}
 	}
@@ -1139,8 +1206,10 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		// Description is optional for name-only skill attachment (toggle model).
-		// Skills with prompt content still work as before (agent-scoped overrides).
+	}
+	if err := s.validateInstalledSkills(skillNamesFromRequest(req.Skills)); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	// --- Apply mutations (all inputs validated) ---
@@ -1184,13 +1253,7 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Skills != nil {
 		// Write attached skills manifest — agent loader resolves content from global/bundled.
-		skillNames := make([]string, 0, len(req.Skills))
-		for _, skill := range req.Skills {
-			if skill != nil {
-				skillNames = append(skillNames, skill.Name)
-			}
-		}
-		if err := agents.WriteAttachedSkills(s.deps.AgentsDir, name, skillNames); err != nil {
+		if err := agents.SetAttachedSkills(s.deps.AgentsDir, name, skillNamesFromRequest(req.Skills)); err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("write skill manifest: %v", err))
 			return
 		}
@@ -1349,20 +1412,28 @@ func (s *Server) handlePutSkill(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	var skill skills.Skill
-	if !decodeBody(w, r, &skill) {
+	var body struct {
+		Name string `json:"name"`
+	}
+	if ok, provided := decodeOptionalBody(w, r, &body); !ok {
+		return
+	} else if provided && body.Name != "" && body.Name != skillName {
+		writeError(w, http.StatusBadRequest, "skill name in body must match URL")
 		return
 	}
-	skill.Name = skillName // URL takes precedence
-	if skill.Description == "" {
-		writeError(w, http.StatusBadRequest, "description is required")
+	if err := s.validateInstalledSkills([]string{skillName}); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := agents.WriteAgentSkill(s.deps.AgentsDir, agentName, &skill); err != nil {
+	if err := agents.AttachSkill(s.deps.AgentsDir, agentName, skillName); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+	if err := agents.DeleteAgentSkill(s.deps.AgentsDir, agentName, skillName); err != nil && !os.IsNotExist(err) {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "attached"})
 }
 
 func (s *Server) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {
@@ -1377,6 +1448,10 @@ func (s *Server) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := skills.ValidateSkillName(skillName); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := agents.DetachSkill(s.deps.AgentsDir, agentName, skillName); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if err := agents.DeleteAgentSkill(s.deps.AgentsDir, agentName, skillName); err != nil && !os.IsNotExist(err) {

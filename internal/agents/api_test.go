@@ -49,22 +49,36 @@ func TestAgentToAPI_Full(t *testing.T) {
 }
 
 func TestWriteAndLoadAgent(t *testing.T) {
-	dir := t.TempDir()
+	// Layout: shannonDir/agents/<name>/ + shannonDir/skills/<skill>/
+	// LoadAgent derives shannonDir from filepath.Dir(agentsDir) and loads
+	// skills from shannonDir/skills/, filtered by _attached.yaml manifest.
+	shannonDir := t.TempDir()
+	agentsDir := filepath.Join(shannonDir, "agents")
 	name := "test-agent"
 
-	if err := WriteAgentPrompt(dir, name, "You are test."); err != nil {
+	if err := WriteAgentPrompt(agentsDir, name, "You are test."); err != nil {
 		t.Fatalf("WriteAgentPrompt: %v", err)
 	}
-	if err := WriteAgentCommand(dir, name, "greet", "Say hello"); err != nil {
+	if err := WriteAgentCommand(agentsDir, name, "greet", "Say hello"); err != nil {
 		t.Fatalf("WriteAgentCommand: %v", err)
 	}
-	if err := WriteAgentSkill(dir, name, &skills.Skill{
-		Name: "check", Description: "check things", Prompt: "check things",
-	}); err != nil {
-		t.Fatalf("WriteAgentSkill: %v", err)
+
+	// Write skill to global skills dir (where LoadAgent looks)
+	globalSkillDir := filepath.Join(shannonDir, "skills", "check")
+	if err := os.MkdirAll(globalSkillDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	skillContent := "---\nname: check\ndescription: check things\n---\ncheck things\n"
+	if err := os.WriteFile(filepath.Join(globalSkillDir, "SKILL.md"), []byte(skillContent), 0600); err != nil {
+		t.Fatal(err)
 	}
 
-	a, err := LoadAgent(dir, name)
+	// Attach the skill via manifest
+	if err := WriteAttachedSkills(agentsDir, name, []string{"check"}); err != nil {
+		t.Fatalf("WriteAttachedSkills: %v", err)
+	}
+
+	a, err := LoadAgent(agentsDir, name)
 	if err != nil {
 		t.Fatalf("LoadAgent: %v", err)
 	}
@@ -74,7 +88,6 @@ func TestWriteAndLoadAgent(t *testing.T) {
 	if a.Commands["greet"] != "Say hello" {
 		t.Errorf("command = %q", a.Commands["greet"])
 	}
-	// Agent skill "check" should be present (bundled skills also loaded).
 	found := false
 	for _, s := range a.Skills {
 		if s.Name == "check" {

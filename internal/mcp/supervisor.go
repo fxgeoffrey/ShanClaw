@@ -418,25 +418,12 @@ func (s *Supervisor) attemptReconnect(ctx context.Context, name string, entry *s
 	s.recordTransportOK(ctx, name, entry)
 }
 
-// runTransportProbe probes transport health and attempts reconnect on failure.
+// runTransportProbe probes transport health and updates state on failure.
+// Does NOT auto-relaunch Chrome or reconnect — that happens on-demand when a
+// tool is actually invoked (via attemptReconnect / EnsureChromeDebugPort).
 // When transport recovers and the server has a capability probe, runs it
-// immediately before declaring healthy — prevents registering Playwright tools
-// while Chrome/Bridge is still unavailable.
+// immediately before declaring healthy.
 func (s *Supervisor) runTransportProbe(ctx context.Context, name string, entry *serverEntry) {
-	// CDP mode: proactively check if the CDP Chrome is still alive.
-	// Only relaunch when keepAlive is true (eager mode). When keepAlive is false,
-	// Chrome launches on-demand at first tool invocation — the supervisor should
-	// not auto-relaunch it between uses.
-	if name == "playwright" && IsPlaywrightCDPMode(entry.config) && entry.config.KeepAlive {
-		port := PlaywrightCDPPort(entry.config)
-		if !IsChromeCDPReachable(port) {
-			log.Printf("[mcp-supervisor] CDP Chrome unreachable — relaunching minimized")
-			if err := LaunchCDPChrome(port); err != nil {
-				log.Printf("[mcp-supervisor] CDP Chrome relaunch failed: %v", err)
-			}
-		}
-	}
-
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 

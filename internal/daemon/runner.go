@@ -45,6 +45,7 @@ type RunAgentRequest struct {
 	ModelOverride  string           `json:"-"`                   // overrides agent model tier
 	BypassRouting  bool             `json:"-"`                   // skip route lock (heartbeat runs)
 	SessionHistory []client.Message `json:"-"`                   // pre-loaded history for LLM context (BypassRouting runs)
+	StickyContext  string           `json:"-"`                   // 额外的 sticky context，注入系统提示（对用户不可见）
 }
 
 // Validate checks that the request has the minimum required fields.
@@ -568,7 +569,7 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		loop.SetModelTier(req.ModelOverride)
 	}
 	// Inject session metadata as sticky context so it survives compaction.
-	if req.Source != "" || req.Channel != "" || req.Sender != "" {
+	{
 		var parts []string
 		if req.Source != "" {
 			parts = append(parts, "Source: "+req.Source)
@@ -582,7 +583,12 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		if agentName != "" {
 			parts = append(parts, "Agent: "+agentName)
 		}
-		loop.SetStickyContext(strings.Join(parts, "\n"))
+		if req.StickyContext != "" {
+			parts = append(parts, req.StickyContext)
+		}
+		if len(parts) > 0 {
+			loop.SetStickyContext(strings.Join(parts, "\n"))
+		}
 	}
 
 	// Output format: cloud-distributed channels use "plain" (Shannon Cloud

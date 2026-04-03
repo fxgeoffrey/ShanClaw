@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Kocoro-lab/ShanClaw/internal/client"
 	"github.com/Kocoro-lab/ShanClaw/internal/cwdctx"
 )
 
@@ -15,6 +16,24 @@ type readTrackerKey struct{}
 
 // memoryDirKey is the context key for the agent's memory directory path.
 type memoryDirKey struct{}
+
+// conversationSnapshotKey 是获取当前对话快照的 context key。
+type conversationSnapshotKey struct{}
+
+// ConversationSnapshotFunc 返回当前对话消息的快照副本。
+type ConversationSnapshotFunc func() []client.Message
+
+// WithConversationSnapshot 注入对话快照提供函数到 context。
+func WithConversationSnapshot(ctx context.Context, fn ConversationSnapshotFunc) context.Context {
+	return context.WithValue(ctx, conversationSnapshotKey{}, fn)
+}
+
+// ConversationSnapshotFromContext 从 context 获取对话快照提供函数。
+// 调用返回的函数可获取当前对话消息的副本。无 provider 时返回 nil。
+func ConversationSnapshotFromContext(ctx context.Context) ConversationSnapshotFunc {
+	fn, _ := ctx.Value(conversationSnapshotKey{}).(ConversationSnapshotFunc)
+	return fn
+}
 
 // WithMemoryDir returns a new context with the memory directory set.
 func WithMemoryDir(ctx context.Context, dir string) context.Context {

@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -140,10 +142,28 @@ func (s *Scheduler) runSchedule(ctx context.Context, sched schedule.Schedule) {
 		// Default agent (no name) gets a fresh session per run.
 		NewSession: sched.Agent == "",
 	}
+
+	// 加载关联的对话上下文，注入到 sticky context（系统提示），对用户不可见
+	if ctxMsgs, err := s.manager.LoadContext(sched.ID); err == nil && len(ctxMsgs) > 0 {
+		req.StickyContext = formatConversationContext(ctxMsgs)
+	}
+
 	_, err := RunAgent(ctx, s.deps, req, &scheduleHandler{})
 	if err != nil {
 		log.Printf("scheduler: agent run failed for schedule %s: %v", sched.ID, err)
 	}
+}
+
+// formatConversationContext 将对话上下文格式化为 sticky context 文本。
+func formatConversationContext(ctxMsgs []schedule.ContextMessage) string {
+	var sb strings.Builder
+	sb.WriteString("<conversation_context>\n")
+	sb.WriteString("以下是创建此定时任务时的对话上下文：\n\n")
+	for _, m := range ctxMsgs {
+		sb.WriteString(fmt.Sprintf("[%s] %s\n", m.Role, m.Content))
+	}
+	sb.WriteString("</conversation_context>")
+	return sb.String()
 }
 
 // scheduleHandler is a silent EventHandler for scheduled agent runs.

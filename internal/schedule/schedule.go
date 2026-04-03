@@ -225,7 +225,7 @@ func (m *Manager) Update(id string, opts *UpdateOpts) error {
 }
 
 func (m *Manager) Remove(id string) error {
-	return m.lockedModify(func(schedules []Schedule) ([]Schedule, error) {
+	err := m.lockedModify(func(schedules []Schedule) ([]Schedule, error) {
 		filtered := make([]Schedule, 0, len(schedules))
 		found := false
 		for _, s := range schedules {
@@ -240,6 +240,11 @@ func (m *Manager) Remove(id string) error {
 		}
 		return filtered, nil
 	})
+	if err == nil {
+		// 清理关联的上下文文件
+		m.RemoveContext(id)
+	}
+	return err
 }
 
 func (m *Manager) SetSyncStatus(id, status string) error {
@@ -250,6 +255,60 @@ func (m *Manager) SetSyncStatus(id, status string) error {
 func (m *Manager) Sync() (int, error) {
 	log.Printf("schedule: Sync is deprecated (no-op)")
 	return 0, nil
+}
+
+// ContextMessage 是对话上下文的精简表示，只保留 role 和纯文本。
+type ContextMessage struct {
+	Role    string `json:"role"`    // "user" 或 "assistant"
+	Content string `json:"content"` // 纯文本内容
+}
+
+// contextDir 返回上下文文件的存储目录。
+func (m *Manager) contextDir() string {
+	return filepath.Join(filepath.Dir(m.indexPath), "schedule_context")
+}
+
+// SaveContext 将对话上下文保存到 sidecar 文件。
+func (m *Manager) SaveContext(id string, messages []ContextMessage) error {
+	if len(messages) == 0 {
+		return nil
+	}
+	dir := m.contextDir()
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create context dir: %w", err)
+	}
+	data, err := json.MarshalIndent(messages, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, id+".json"), data, 0600)
+}
+
+// LoadContext 加载 schedule 的对话上下文。文件不存在时返回 nil, nil。
+func (m *Manager) LoadContext(id string) ([]ContextMessage, error) {
+	data, err := os.ReadFile(filepath.Join(m.contextDir(), id+".json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var msgs []ContextMessage
+	if err := json.Unmarshal(data, &msgs); err != nil {
+		return nil, err
+	}
+	return msgs, nil
+}
+
+// RemoveContext 删除 schedule 的对话上下文文件。
+func (m *Manager) RemoveContext(id string) {
+	os.Remove(filepath.Join(m.contextDir(), id+".json"))
+}
+
+// HasContext 检查 schedule 是否有关联的对话上下文。
+func (m *Manager) HasContext(id string) bool {
+	_, err := os.Stat(filepath.Join(m.contextDir(), id+".json"))
+	return err == nil
 }
 
 func generateScheduleID() string {

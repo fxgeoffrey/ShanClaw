@@ -1104,13 +1104,17 @@ func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	api := a.ToAPI()
 
-	// Add builtin metadata
+	// Add builtin metadata — match ListAgents semantics:
+	// Builtin=true only when loaded from _builtin (no user override).
+	// Overridden=true when a user override exists for a builtin.
 	builtinDir := filepath.Join(s.deps.AgentsDir, "_builtin", name)
 	userDir := filepath.Join(s.deps.AgentsDir, name)
 	_, builtinErr := os.Stat(filepath.Join(builtinDir, "AGENT.md"))
 	_, userErr := os.Stat(filepath.Join(userDir, "AGENT.md"))
-	api.Builtin = builtinErr == nil
-	api.Overridden = builtinErr == nil && userErr == nil
+	hasBuiltin := builtinErr == nil
+	hasUser := userErr == nil
+	api.Builtin = hasBuiltin && !hasUser   // builtin-only, no user override
+	api.Overridden = hasBuiltin && hasUser  // user override of a builtin
 
 	writeJSON(w, http.StatusOK, api)
 }

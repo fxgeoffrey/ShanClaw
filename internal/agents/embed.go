@@ -52,11 +52,19 @@ func EnsureBuiltins(agentsDir, currentVersion string) error {
 		if err != nil {
 			return err
 		}
-		// Write to temp, then rename for atomicity
-		tmp := target + ".tmp"
-		if err := os.WriteFile(tmp, data, 0600); err != nil {
+		// Write to unique temp file, then rename for per-file atomicity.
+		// os.CreateTemp avoids races when multiple processes sync concurrently.
+		f, err := os.CreateTemp(filepath.Dir(target), ".tmp-*")
+		if err != nil {
 			return err
 		}
+		tmp := f.Name()
+		if _, err := f.Write(data); err != nil {
+			f.Close()
+			os.Remove(tmp)
+			return err
+		}
+		f.Close()
 		return os.Rename(tmp, target)
 	})
 	if err != nil {
@@ -64,11 +72,18 @@ func EnsureBuiltins(agentsDir, currentVersion string) error {
 	}
 
 	// Write version file last
-	tmp := versionFile + ".tmp"
-	if err := os.WriteFile(tmp, []byte(currentVersion), 0600); err != nil {
+	vf, err := os.CreateTemp(builtinDir, ".tmp-version-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, versionFile)
+	vtmp := vf.Name()
+	if _, err := vf.Write([]byte(currentVersion)); err != nil {
+		vf.Close()
+		os.Remove(vtmp)
+		return err
+	}
+	vf.Close()
+	return os.Rename(vtmp, versionFile)
 }
 
 // IsBuiltinAgent returns true if the given name matches a bundled agent.

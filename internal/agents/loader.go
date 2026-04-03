@@ -359,8 +359,11 @@ type AgentEntry struct {
 }
 
 func ListAgents(agentsDir string) ([]AgentEntry, error) {
-	userNames := listAgentNames(agentsDir)
-	builtinNames := listAgentNames(filepath.Join(agentsDir, "_builtin"))
+	userNames, err := listAgentNames(agentsDir)
+	if err != nil {
+		return nil, err
+	}
+	builtinNames, _ := listAgentNames(filepath.Join(agentsDir, "_builtin")) // missing _builtin dir is fine
 
 	builtinSet := make(map[string]bool, len(builtinNames))
 	for _, n := range builtinNames {
@@ -401,10 +404,14 @@ func ListAgents(agentsDir string) ([]AgentEntry, error) {
 }
 
 // listAgentNames scans a directory for valid agent subdirectories.
-func listAgentNames(dir string) []string {
+// Returns an error for I/O failures other than "directory does not exist".
+func listAgentNames(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
 	}
 	var names []string
 	for _, e := range entries {
@@ -419,7 +426,7 @@ func listAgentNames(dir string) []string {
 		}
 	}
 	sort.Strings(names)
-	return names
+	return names, nil
 }
 
 func ParseAgentMention(msg string) (string, string) {

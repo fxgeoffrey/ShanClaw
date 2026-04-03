@@ -22,6 +22,8 @@ type Delta struct {
 // DeltaProvider is polled at each loop iteration boundary. Implementations
 // return pending deltas since last call. Only inject a delta when it can
 // change the model's very next decision.
+// Implementations are called from a single goroutine (the agent loop) and
+// do not need to be safe for concurrent use.
 type DeltaProvider interface {
 	Check() []Delta
 }

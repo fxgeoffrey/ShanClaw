@@ -1147,7 +1147,16 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// Write all agent files — rollback on any failure.
-	rollback := func() { agents.DeleteAgentDir(s.deps.AgentsDir, req.Name) }
+	// Only remove files we materialized; preserve MEMORY.md and sessions/
+	// which are runtime state that may exist from prior builtin agent usage.
+	rollback := func() {
+		dir := filepath.Join(s.deps.AgentsDir, req.Name)
+		os.Remove(filepath.Join(dir, "AGENT.md"))
+		os.Remove(filepath.Join(dir, "config.yaml"))
+		os.Remove(filepath.Join(dir, "_attached.yaml"))
+		os.RemoveAll(filepath.Join(dir, "commands"))
+		os.RemoveAll(filepath.Join(dir, "skills"))
+	}
 	if err := agents.WriteAgentPrompt(s.deps.AgentsDir, req.Name, req.Prompt); err != nil {
 		rollback()
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -1414,6 +1423,9 @@ func (s *Server) handleDeleteAgentConfig(w http.ResponseWriter, r *http.Request)
 	if !s.agentExists(w, name) {
 		return
 	}
+	if !s.materializeIfBuiltin(w, name) {
+		return
+	}
 	path := filepath.Join(s.deps.AgentsDir, name, "config.yaml")
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -1464,6 +1476,9 @@ func (s *Server) handleDeleteCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.agentExists(w, agentName) {
+		return
+	}
+	if !s.materializeIfBuiltin(w, agentName) {
 		return
 	}
 	if err := agents.ValidateCommandName(cmdName); err != nil {
@@ -1526,6 +1541,9 @@ func (s *Server) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.agentExists(w, agentName) {
+		return
+	}
+	if !s.materializeIfBuiltin(w, agentName) {
 		return
 	}
 	if err := skills.ValidateSkillName(skillName); err != nil {

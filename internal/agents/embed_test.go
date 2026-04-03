@@ -1,8 +1,10 @@
 package agents
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 )
 
@@ -110,6 +112,34 @@ func TestMaterializeBuiltin(t *testing.T) {
 	data, err = os.ReadFile(filepath.Join(userDir, "config.yaml"))
 	if err != nil || string(data) != "tools:\n  allow: [bash]" {
 		t.Fatalf("config.yaml not materialized correctly")
+	}
+}
+
+func TestBuiltinNames_MatchEmbeddedDirs(t *testing.T) {
+	entries, err := fs.ReadDir(builtinFS, "builtin")
+	if err != nil {
+		t.Fatalf("reading embedded FS: %v", err)
+	}
+	var embedded []string
+	for _, e := range entries {
+		if e.IsDir() {
+			embedded = append(embedded, e.Name())
+		}
+	}
+	sort.Strings(embedded)
+
+	names := make([]string, len(BuiltinNames))
+	copy(names, BuiltinNames)
+	sort.Strings(names)
+
+	if len(embedded) != len(names) {
+		t.Fatalf("BuiltinNames has %d entries but embedded FS has %d dirs: embedded=%v names=%v",
+			len(names), len(embedded), embedded, names)
+	}
+	for i := range embedded {
+		if embedded[i] != names[i] {
+			t.Fatalf("mismatch at index %d: embedded=%q names=%q", i, embedded[i], names[i])
+		}
 	}
 }
 

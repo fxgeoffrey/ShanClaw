@@ -259,6 +259,11 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 
 	gateway := client.NewGatewayClient(cfg.Endpoint, cfg.APIKey)
 	shannonDir := config.ShannonDir()
+	agentsDir := filepath.Join(shannonDir, "agents")
+	if err := agents.EnsureBuiltins(agentsDir, version); err != nil {
+		// Non-fatal: log and continue
+		log.Printf("WARNING: failed to sync builtin agents: %v", err)
+	}
 	sessDir := shannonDir + "/sessions"
 	if agentOverride != nil {
 		sessDir = filepath.Join(shannonDir, "agents", agentOverride.Name, "sessions")

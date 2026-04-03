@@ -53,6 +53,10 @@ var daemonStartCmd = &cobra.Command{
 		agentsDir := filepath.Join(shanDir, "agents")
 		pidPath := filepath.Join(shanDir, "daemon.pid")
 
+		if err := agents.EnsureBuiltins(agentsDir, Version); err != nil {
+			log.Printf("WARNING: failed to sync builtin agents: %v", err)
+		}
+
 		force, _ := cmd.Flags().GetBool("force")
 		if force {
 			stopExistingDaemon(pidPath)

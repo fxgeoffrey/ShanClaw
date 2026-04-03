@@ -551,10 +551,9 @@ func assembleUserMessage(parts prompt.PromptParts, userMessage string) string {
 
 	if parts.StableContext != "" {
 		sb.WriteString(parts.StableContext)
-		sb.WriteString("\n")
+		sb.WriteString("\n<!-- cache_break -->\n")
 	}
 
-	sb.WriteString("<!-- cache_break -->\n")
 	sb.WriteString(parts.VolatileContext)
 	sb.WriteString("\n\n")
 	sb.WriteString(userMessage)

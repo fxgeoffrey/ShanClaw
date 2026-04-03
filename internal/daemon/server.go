@@ -1208,9 +1208,6 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	if !s.agentExists(w, name) {
 		return
 	}
-	if !s.materializeIfBuiltin(w, name) {
-		return
-	}
 	agentDir := filepath.Join(s.deps.AgentsDir, name)
 	var req agents.AgentUpdateRequest
 	if !decodeBody(w, r, &req) {
@@ -1264,6 +1261,11 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.validateInstalledSkills(skillNamesFromRequest(req.Skills)); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Materialize builtin AFTER validation passes — avoids orphaned override dirs on bad input.
+	if !s.materializeIfBuiltin(w, name) {
 		return
 	}
 
@@ -1345,9 +1347,18 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	// Evict handles its own per-route locking — do NOT wrap with Lock/Unlock
 	// (that would self-deadlock since Evict calls evictRoute which acquires entry.mu).
 	s.deps.SessionCache.Evict(name)
-	if err := agents.DeleteAgentDir(s.deps.AgentsDir, name); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+	// Remove only definition files — preserve runtime state (MEMORY.md, sessions/)
+	// so the builtin can resurface with existing history intact.
+	agentDir := filepath.Join(s.deps.AgentsDir, name)
+	for _, f := range []string{"AGENT.md", "config.yaml", "_attached.yaml"} {
+		os.Remove(filepath.Join(agentDir, f))
+	}
+	os.RemoveAll(filepath.Join(agentDir, "commands"))
+	os.RemoveAll(filepath.Join(agentDir, "skills"))
+	// Clean up empty dir if no runtime state remains
+	entries, _ := os.ReadDir(agentDir)
+	if len(entries) == 0 {
+		os.Remove(agentDir)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
@@ -1394,9 +1405,6 @@ func (s *Server) handlePutAgentConfig(w http.ResponseWriter, r *http.Request) {
 	if !s.agentExists(w, name) {
 		return
 	}
-	if !s.materializeIfBuiltin(w, name) {
-		return
-	}
 	var cfg agents.AgentConfigAPI
 	if !decodeBody(w, r, &cfg) {
 		return
@@ -1406,6 +1414,10 @@ func (s *Server) handlePutAgentConfig(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+	}
+	// Materialize builtin AFTER validation passes — avoids orphaned override dirs on bad input.
+	if !s.materializeIfBuiltin(w, name) {
+		return
 	}
 	if err := agents.WriteAgentConfig(s.deps.AgentsDir, name, &cfg); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -1444,9 +1456,6 @@ func (s *Server) handlePutCommand(w http.ResponseWriter, r *http.Request) {
 	if !s.agentExists(w, agentName) {
 		return
 	}
-	if !s.materializeIfBuiltin(w, agentName) {
-		return
-	}
 	if err := agents.ValidateCommandName(cmdName); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -1459,6 +1468,10 @@ func (s *Server) handlePutCommand(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Content == "" {
 		writeError(w, http.StatusBadRequest, "content is required")
+		return
+	}
+	// Materialize builtin AFTER validation passes — avoids orphaned override dirs on bad input.
+	if !s.materializeIfBuiltin(w, agentName) {
 		return
 	}
 	if err := agents.WriteAgentCommand(s.deps.AgentsDir, agentName, cmdName, body.Content); err != nil {
@@ -1502,9 +1515,6 @@ func (s *Server) handlePutSkill(w http.ResponseWriter, r *http.Request) {
 	if !s.agentExists(w, agentName) {
 		return
 	}
-	if !s.materializeIfBuiltin(w, agentName) {
-		return
-	}
 	if err := skills.ValidateSkillName(skillName); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -1520,6 +1530,10 @@ func (s *Server) handlePutSkill(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.validateInstalledSkills([]string{skillName}); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Materialize builtin AFTER validation passes — avoids orphaned override dirs on bad input.
+	if !s.materializeIfBuiltin(w, agentName) {
 		return
 	}
 	if err := agents.AttachSkill(s.deps.AgentsDir, agentName, skillName); err != nil {

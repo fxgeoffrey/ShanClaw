@@ -986,6 +986,15 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 						}
 						injectedIndices = rebased
 
+						rebasedDelta := make(map[int]bool, len(deltaIndices))
+						for idx := range deltaIndices {
+							newIdx := idx - dropped
+							if newIdx >= newMsgOffset {
+								rebasedDelta[newIdx] = true
+							}
+						}
+						deltaIndices = rebasedDelta
+
 						rebasedTS := make(map[int]time.Time, len(msgTimestamps))
 						for idx, ts := range msgTimestamps {
 							newIdx := idx - dropped
@@ -1106,6 +1115,15 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 						}
 					}
 					injectedIndices = rebased
+
+					rebasedDelta := make(map[int]bool, len(deltaIndices))
+					for idx := range deltaIndices {
+						newIdx := idx - dropped
+						if newIdx >= newMsgOffset {
+							rebasedDelta[newIdx] = true
+						}
+					}
+					deltaIndices = rebasedDelta
 
 					rebasedTS := make(map[int]time.Time, len(msgTimestamps))
 					for idx, ts := range msgTimestamps {

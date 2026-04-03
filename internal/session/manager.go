@@ -82,6 +82,11 @@ func (m *Manager) Resume(id string) (*Session, error) {
 	return sess, nil
 }
 
+// Load 从磁盘读取指定 session，不修改 m.current。
+func (m *Manager) Load(id string) (*Session, error) {
+	return m.store.Load(id)
+}
+
 func (m *Manager) Save() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -204,6 +209,30 @@ func (m *Manager) ensureRuntimeLocked(sessionID string) *sessionRuntime {
 
 func (m *Manager) RebuildIndex() error {
 	return m.store.RebuildIndex()
+}
+
+// TruncateMessages 将指定 session 的消息截断为前 index 条，同步截断 MessageMeta。
+// 用于"编辑历史消息后重新发送"场景，截断点之后的所有消息将被丢弃并持久化。
+func (m *Manager) TruncateMessages(id string, index int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	sess, err := m.store.Load(id)
+	if err != nil {
+		return err
+	}
+	if index < 0 || index > len(sess.Messages) {
+		return fmt.Errorf("message_index %d out of range [0, %d]", index, len(sess.Messages))
+	}
+	sess.Messages = sess.Messages[:index]
+	if len(sess.MessageMeta) > index {
+		sess.MessageMeta = sess.MessageMeta[:index]
+	}
+	// 若当前内存中缓存的 session 与截断目标一致，同步更新内存状态
+	if m.current != nil && m.current.ID == id {
+		m.current = sess
+	}
+	return m.store.Save(sess)
 }
 
 // ResumeLatest loads the most recently updated session from disk.

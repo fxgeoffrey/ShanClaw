@@ -13,12 +13,14 @@ import (
 
 // AgentAPI is the JSON representation of an agent for the HTTP API.
 type AgentAPI struct {
-	Name     string             `json:"name"`
-	Prompt   string             `json:"prompt"`
-	Memory   *string            `json:"memory"`   // null if no MEMORY.md
-	Config   *AgentConfigAPI    `json:"config"`   // null if no config.yaml
-	Commands map[string]string  `json:"commands"` // null if no commands
-	Skills   []skills.SkillMeta `json:"skills"`   // null if no skills
+	Name       string             `json:"name"`
+	Prompt     string             `json:"prompt"`
+	Memory     *string            `json:"memory"`     // null if no MEMORY.md
+	Config     *AgentConfigAPI    `json:"config"`     // null if no config.yaml
+	Commands   map[string]string  `json:"commands"`   // null if no commands
+	Skills     []skills.SkillMeta `json:"skills"`     // null if no skills
+	Builtin    bool               `json:"builtin"`    // true if agent is a bundled builtin
+	Overridden bool               `json:"overridden"` // true if builtin has user override
 }
 
 // AgentConfigAPI is the JSON representation of agent config.

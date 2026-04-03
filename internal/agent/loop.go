@@ -721,6 +721,12 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 	}
 	messages = append(messages, client.Message{Role: "user", Content: client.NewTextContent(assembleUserMessage(parts, userMessage))})
 
+	// 注入对话快照 provider，工具可通过 ConversationSnapshotFromContext 获取当前对话。
+	// 闭包捕获局部变量 messages，调用时返回当前消息的副本。
+	ctx = WithConversationSnapshot(ctx, func() []client.Message {
+		return cloneMessages(messages)
+	})
+
 	// Track where new messages start so RunMessages() can return only this run's
 	// conversation (user prompt + tool calls + results + assistant replies),
 	// excluding the system prompt and pre-existing history.

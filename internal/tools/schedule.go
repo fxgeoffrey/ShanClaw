@@ -94,6 +94,12 @@ func (t *ScheduleTool) Run(ctx context.Context, argsJSON string) (agent.ToolResu
 		if err != nil {
 			return agent.ToolResult{Content: err.Error(), IsError: true}, nil
 		}
+		// 默认捕获并保存当前对话上下文，触发时 agent 可理解任务背景
+		if ctxMsgs := extractConversationContext(ctx); len(ctxMsgs) > 0 {
+			if saveErr := t.manager.SaveContext(id, ctxMsgs); saveErr != nil {
+				return agent.ToolResult{Content: fmt.Sprintf("Schedule created: %s (warning: failed to save context: %v)", id, saveErr)}, nil
+			}
+		}
 		return agent.ToolResult{Content: fmt.Sprintf("Schedule created: %s", id)}, nil
 	case "list":
 		list, err := t.manager.List()
@@ -109,8 +115,12 @@ func (t *ScheduleTool) Run(ctx context.Context, argsJSON string) (agent.ToolResu
 			if agentDisplay == "" {
 				agentDisplay = "(default)"
 			}
-			fmt.Fprintf(&sb, "%s | agent=%s | cron=%s | enabled=%v | sync=%s | %s\n",
-				s.ID, agentDisplay, s.Cron, s.Enabled, s.SyncStatus, s.Prompt)
+			ctxTag := ""
+			if t.manager.HasContext(s.ID) {
+				ctxTag = " [ctx]"
+			}
+			fmt.Fprintf(&sb, "%s | agent=%s | cron=%s | enabled=%v | sync=%s | %s%s\n",
+				s.ID, agentDisplay, s.Cron, s.Enabled, s.SyncStatus, s.Prompt, ctxTag)
 		}
 		return agent.ToolResult{Content: sb.String()}, nil
 	case "update":
@@ -154,4 +164,66 @@ func (t *ScheduleTool) RequiresApproval() bool {
 
 func (t *ScheduleTool) IsReadOnlyCall(string) bool {
 	return t.action == "list"
+}
+
+// extractConversationContext 从当前对话快照中提取精简的上下文消息。
+// 只保留 user/assistant 的纯文本内容，跳过 system、tool_use、tool_result。
+// 最多保留最近 20 条消息，总文本不超过 8000 字符。
+func extractConversationContext(ctx context.Context) []schedule.ContextMessage {
+	snapshotFn := agent.ConversationSnapshotFromContext(ctx)
+	if snapshotFn == nil {
+		return nil
+	}
+	messages := snapshotFn()
+	if len(messages) == 0 {
+		return nil
+	}
+
+	// 过滤：只保留 user/assistant 的纯文本消息
+	var filtered []schedule.ContextMessage
+	for _, msg := range messages {
+		if msg.Role != "user" && msg.Role != "assistant" {
+			continue
+		}
+		// 跳过包含 tool_use/tool_result 块但无文本的消息
+		if msg.Content.HasBlocks() {
+			hasText := false
+			for _, b := range msg.Content.Blocks() {
+				if b.Type == "text" && strings.TrimSpace(b.Text) != "" {
+					hasText = true
+					break
+				}
+			}
+			if !hasText {
+				continue
+			}
+		}
+		text := strings.TrimSpace(msg.Content.Text())
+		if text == "" {
+			continue
+		}
+		filtered = append(filtered, schedule.ContextMessage{
+			Role:    msg.Role,
+			Content: text,
+		})
+	}
+
+	// 截取最近 20 条
+	const maxMessages = 20
+	if len(filtered) > maxMessages {
+		filtered = filtered[len(filtered)-maxMessages:]
+	}
+
+	// 截断总文本到 8000 字符（从最早的开始丢弃）
+	const maxChars = 8000
+	totalChars := 0
+	for _, m := range filtered {
+		totalChars += len(m.Content)
+	}
+	for totalChars > maxChars && len(filtered) > 1 {
+		totalChars -= len(filtered[0].Content)
+		filtered = filtered[1:]
+	}
+
+	return filtered
 }

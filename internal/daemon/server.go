@@ -365,7 +365,7 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	names, err := agents.ListAgents(s.deps.AgentsDir)
+	entries, err := agents.ListAgents(s.deps.AgentsDir)
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return
@@ -373,20 +373,30 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 
 	type agentInfo struct {
 		Name         string `json:"name"`
+		Builtin      bool   `json:"builtin"`
+		Override     bool   `json:"override"`
 		HasMemory    bool   `json:"has_memory"`
 		HasConfig    bool   `json:"has_config"`
 		CommandCount int    `json:"command_count"`
 		SkillCount   int    `json:"skill_count"`
 	}
-	result := make([]agentInfo, 0, len(names))
-	for _, name := range names {
-		dir := filepath.Join(s.deps.AgentsDir, name)
-		_, memErr := os.Stat(filepath.Join(dir, "MEMORY.md"))
+	result := make([]agentInfo, 0, len(entries))
+	for _, entry := range entries {
+		// Resolve effective directory for definition files
+		dir := filepath.Join(s.deps.AgentsDir, entry.Name)
+		if entry.Builtin {
+			dir = filepath.Join(s.deps.AgentsDir, "_builtin", entry.Name)
+		}
+		// Memory is always in top-level runtime dir
+		runtimeDir := filepath.Join(s.deps.AgentsDir, entry.Name)
+		_, memErr := os.Stat(filepath.Join(runtimeDir, "MEMORY.md"))
 		_, cfgErr := os.Stat(filepath.Join(dir, "config.yaml"))
 		cmdFiles, _ := filepath.Glob(filepath.Join(dir, "commands", "*.md"))
 		skillFiles, _ := filepath.Glob(filepath.Join(dir, "skills", "*", "SKILL.md"))
 		result = append(result, agentInfo{
-			Name:         name,
+			Name:         entry.Name,
+			Builtin:      entry.Builtin,
+			Override:     entry.Override,
 			HasMemory:    memErr == nil,
 			HasConfig:    cfgErr == nil,
 			CommandCount: len(cmdFiles),
@@ -1199,9 +1209,7 @@ func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	agentDir := filepath.Join(s.deps.AgentsDir, name)
-	if _, err := os.Stat(filepath.Join(agentDir, "AGENT.md")); os.IsNotExist(err) {
-		writeError(w, http.StatusNotFound, fmt.Sprintf("agent not found: %s", name))
+	if !s.agentExists(w, name) {
 		return
 	}
 	a, err := agents.LoadAgent(s.deps.AgentsDir, name)
@@ -1209,7 +1217,21 @@ func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to load agent %s: %v", name, err))
 		return
 	}
-	writeJSON(w, http.StatusOK, a.ToAPI())
+	api := a.ToAPI()
+
+	// Add builtin metadata — match ListAgents semantics:
+	// Builtin=true only when loaded from _builtin (no user override).
+	// Overridden=true when a user override exists for a builtin.
+	builtinDir := filepath.Join(s.deps.AgentsDir, "_builtin", name)
+	userDir := filepath.Join(s.deps.AgentsDir, name)
+	_, builtinErr := os.Stat(filepath.Join(builtinDir, "AGENT.md"))
+	_, userErr := os.Stat(filepath.Join(userDir, "AGENT.md"))
+	hasBuiltin := builtinErr == nil
+	hasUser := userErr == nil
+	api.Builtin = hasBuiltin && !hasUser   // builtin-only, no user override
+	api.Overridden = hasBuiltin && hasUser  // user override of a builtin
+
+	writeJSON(w, http.StatusOK, api)
 }
 
 func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
@@ -1235,8 +1257,25 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, fmt.Sprintf("agent %q already exists", req.Name))
 		return
 	}
+	// If name matches a builtin, materialize user override first so the
+	// subsequent writes land in the user dir and override the builtin.
+	if agents.IsBuiltinAgent(req.Name) {
+		if err := agents.MaterializeBuiltin(s.deps.AgentsDir, req.Name); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to materialize builtin: %s", err))
+			return
+		}
+	}
 	// Write all agent files — rollback on any failure.
-	rollback := func() { agents.DeleteAgentDir(s.deps.AgentsDir, req.Name) }
+	// Only remove files we materialized; preserve MEMORY.md and sessions/
+	// which are runtime state that may exist from prior builtin agent usage.
+	rollback := func() {
+		dir := filepath.Join(s.deps.AgentsDir, req.Name)
+		os.Remove(filepath.Join(dir, "AGENT.md"))
+		os.Remove(filepath.Join(dir, "config.yaml"))
+		os.Remove(filepath.Join(dir, "_attached.yaml"))
+		os.RemoveAll(filepath.Join(dir, "commands"))
+		os.RemoveAll(filepath.Join(dir, "skills"))
+	}
 	if err := agents.WriteAgentPrompt(s.deps.AgentsDir, req.Name, req.Prompt); err != nil {
 		rollback()
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -1285,11 +1324,10 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	agentDir := filepath.Join(s.deps.AgentsDir, name)
-	if _, err := os.Stat(filepath.Join(agentDir, "AGENT.md")); os.IsNotExist(err) {
-		writeError(w, http.StatusNotFound, fmt.Sprintf("agent %q not found", name))
+	if !s.agentExists(w, name) {
 		return
 	}
+	agentDir := filepath.Join(s.deps.AgentsDir, name)
 	var req agents.AgentUpdateRequest
 	if !decodeBody(w, r, &req) {
 		return
@@ -1342,6 +1380,11 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.validateInstalledSkills(skillNamesFromRequest(req.Skills)); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Materialize builtin AFTER validation passes — avoids orphaned override dirs on bad input.
+	if !s.materializeIfBuiltin(w, name) {
 		return
 	}
 
@@ -1408,17 +1451,44 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	agentDir := filepath.Join(s.deps.AgentsDir, name)
-	if _, err := os.Stat(filepath.Join(agentDir, "AGENT.md")); os.IsNotExist(err) {
-		writeError(w, http.StatusNotFound, fmt.Sprintf("agent %q not found", name))
+	if !s.agentExists(w, name) {
+		return
+	}
+	// Cannot delete a builtin-only agent (no user override)
+	userDir := filepath.Join(s.deps.AgentsDir, name)
+	builtinDir := filepath.Join(s.deps.AgentsDir, "_builtin", name)
+	_, userErr := os.Stat(filepath.Join(userDir, "AGENT.md"))
+	_, builtinErr := os.Stat(filepath.Join(builtinDir, "AGENT.md"))
+	if userErr != nil && builtinErr == nil {
+		writeError(w, http.StatusForbidden, "cannot delete system-managed builtin agent")
 		return
 	}
 	// Evict handles its own per-route locking — do NOT wrap with Lock/Unlock
 	// (that would self-deadlock since Evict calls evictRoute which acquires entry.mu).
 	s.deps.SessionCache.Evict(name)
-	if err := agents.DeleteAgentDir(s.deps.AgentsDir, name); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	// Remove only definition files — preserve runtime state (MEMORY.md, sessions/)
+	// so the builtin can resurface with existing history intact.
+	agentDir := filepath.Join(s.deps.AgentsDir, name)
+	var errs []string
+	for _, f := range []string{"AGENT.md", "config.yaml", "_attached.yaml"} {
+		p := filepath.Join(agentDir, f)
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, err.Error())
+		}
+	}
+	for _, d := range []string{"commands", "skills"} {
+		p := filepath.Join(agentDir, d)
+		if err := os.RemoveAll(p); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	if len(errs) > 0 {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("partial delete: %s", strings.Join(errs, "; ")))
 		return
+	}
+	// Clean up empty dir if no runtime state remains
+	if entries, err := os.ReadDir(agentDir); err == nil && len(entries) == 0 {
+		os.Remove(agentDir)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
@@ -1430,8 +1500,28 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 func (s *Server) agentExists(w http.ResponseWriter, name string) bool {
 	agentDir := filepath.Join(s.deps.AgentsDir, name)
 	if _, err := os.Stat(filepath.Join(agentDir, "AGENT.md")); os.IsNotExist(err) {
-		writeError(w, http.StatusNotFound, fmt.Sprintf("agent %q not found", name))
-		return false
+		// Also check _builtin fallback
+		builtinDir := filepath.Join(s.deps.AgentsDir, "_builtin", name)
+		if _, err := os.Stat(filepath.Join(builtinDir, "AGENT.md")); os.IsNotExist(err) {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("agent %q not found", name))
+			return false
+		}
+	}
+	return true
+}
+
+// materializeIfBuiltin checks if the agent exists only as a builtin (no user
+// override) and materializes it to the user dir so writes can proceed. Returns
+// true if the caller should continue, false if an error was already written.
+func (s *Server) materializeIfBuiltin(w http.ResponseWriter, name string) bool {
+	userDir := filepath.Join(s.deps.AgentsDir, name)
+	if _, err := os.Stat(filepath.Join(userDir, "AGENT.md")); err != nil {
+		if agents.IsBuiltinAgent(name) {
+			if err := agents.MaterializeBuiltin(s.deps.AgentsDir, name); err != nil {
+				writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to materialize builtin: %s", err))
+				return false
+			}
+		}
 	}
 	return true
 }
@@ -1455,6 +1545,10 @@ func (s *Server) handlePutAgentConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Materialize builtin AFTER validation passes — avoids orphaned override dirs on bad input.
+	if !s.materializeIfBuiltin(w, name) {
+		return
+	}
 	if err := agents.WriteAgentConfig(s.deps.AgentsDir, name, &cfg); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1469,6 +1563,9 @@ func (s *Server) handleDeleteAgentConfig(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if !s.agentExists(w, name) {
+		return
+	}
+	if !s.materializeIfBuiltin(w, name) {
 		return
 	}
 	path := filepath.Join(s.deps.AgentsDir, name, "config.yaml")
@@ -1503,6 +1600,10 @@ func (s *Server) handlePutCommand(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "content is required")
 		return
 	}
+	// Materialize builtin AFTER validation passes — avoids orphaned override dirs on bad input.
+	if !s.materializeIfBuiltin(w, agentName) {
+		return
+	}
 	if err := agents.WriteAgentCommand(s.deps.AgentsDir, agentName, cmdName, body.Content); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1518,6 +1619,9 @@ func (s *Server) handleDeleteCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.agentExists(w, agentName) {
+		return
+	}
+	if !s.materializeIfBuiltin(w, agentName) {
 		return
 	}
 	if err := agents.ValidateCommandName(cmdName); err != nil {
@@ -1558,6 +1662,10 @@ func (s *Server) handlePutSkill(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Materialize builtin AFTER validation passes — avoids orphaned override dirs on bad input.
+	if !s.materializeIfBuiltin(w, agentName) {
+		return
+	}
 	if err := agents.AttachSkill(s.deps.AgentsDir, agentName, skillName); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1577,6 +1685,9 @@ func (s *Server) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.agentExists(w, agentName) {
+		return
+	}
+	if !s.materializeIfBuiltin(w, agentName) {
 		return
 	}
 	if err := skills.ValidateSkillName(skillName); err != nil {

@@ -53,6 +53,10 @@ var daemonStartCmd = &cobra.Command{
 		agentsDir := filepath.Join(shanDir, "agents")
 		pidPath := filepath.Join(shanDir, "daemon.pid")
 
+		if err := agents.EnsureBuiltins(agentsDir, Version); err != nil {
+			log.Printf("WARNING: failed to sync builtin agents: %v", err)
+		}
+
 		force, _ := cmd.Flags().GetBool("force")
 		if force {
 			stopExistingDaemon(pidPath)
@@ -757,17 +761,17 @@ func truncateReply(s string, n int) string {
 
 func collectAgentWatches(agentsDir string) map[string][]watcher.WatchEntry {
 	result := make(map[string][]watcher.WatchEntry)
-	names, err := agents.ListAgents(agentsDir)
+	entries, err := agents.ListAgents(agentsDir)
 	if err != nil {
 		return result
 	}
-	for _, name := range names {
-		a, err := agents.LoadAgent(agentsDir, name)
+	for _, entry := range entries {
+		a, err := agents.LoadAgent(agentsDir, entry.Name)
 		if err != nil || a.Config == nil || len(a.Config.Watch) == 0 {
 			continue
 		}
 		for _, w := range a.Config.Watch {
-			result[name] = append(result[name], watcher.WatchEntry{
+			result[entry.Name] = append(result[entry.Name], watcher.WatchEntry{
 				Path: w.Path,
 				Glob: w.Glob,
 			})

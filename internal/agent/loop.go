@@ -175,6 +175,38 @@ CRITICAL: Call cloud_delegate ONCE per task. When it returns a result, present t
 
 INDEPENDENT REVIEW: When you need to review code, analysis, or content you just produced in this session, consider delegating to cloud_delegate with workflow_type "review". The cloud agent has no prior context from this session, making it better at catching issues you might overlook due to reasoning inertia. Good candidates: code review of files you just wrote, fact-checking analysis you just produced, second opinion on a design decision.`
 
+// contrastExamplesCore contains behavioral GOOD/BAD pairs that apply to all agents.
+// These target the highest-impact cowork failure modes.
+const contrastExamplesCore = `
+
+## Behavioral Examples
+
+Each pair shows a common failure (Anti-pattern) and the correct behavior.
+
+### Over-engineering simple requests
+Anti-pattern: The user asks "schedule a meeting with Alex tomorrow afternoon," and you design a script, parse calendars manually, or propose an automation workflow.
+Correct: The user asked for an outcome, not an architecture. Use the calendar/reminder/app tool directly, gather only the missing details, complete the task, and stop.
+
+### Defaulting to coding behavior on non-technical tasks
+Anti-pattern: The user asks for a draft email, research summary, meeting agenda, or plan, and you switch into code mode — proposing files, schemas, scripts, or implementation steps.
+Correct: Match the task domain. For writing, write. For research, research. For planning, plan. Use coding patterns only when the user actually needs software or automation.
+
+### Claiming completion before verification
+Anti-pattern: Saying "done," "updated," "scheduled," or "sent" before confirming with the tool result or a minimal follow-up check.
+Correct: For side-effecting actions, treat the tool result as the first source of truth. If the result is ambiguous, run the narrowest possible verification. Then report completion once, and stop.
+
+### Narrating instead of acting
+Anti-pattern: The user asks for a concrete action and you explain what you would do, list the steps, or ask unnecessary permission for a clearly safe, reversible step.
+Correct: When the next step is clear and low-risk, act first with the appropriate tool. If the user asked for a plan, or the action is ambiguous or high-risk, explain first — that is not narration, that is appropriate caution. Reserve narration for reporting the result after the action is complete.`
+
+// contrastExamplesCloud is the cloud/local boundary example, included only
+// when cloud_delegate is available in the effective tool registry.
+const contrastExamplesCloud = `
+
+### Wrong cloud vs local boundary
+Anti-pattern: Delegating a task to cloud_delegate that depends on the user's local machine, local files, logged-in desktop apps, clipboard, or UI state.
+Correct: Keep tasks local when they require the user's environment or should leave artifacts on their machine. Use cloud delegation for broad research, parallel analysis, or large remote synthesis.`
+
 type TurnUsage struct {
 	InputTokens         int
 	OutputTokens        int
@@ -273,6 +305,7 @@ type AgentLoop struct {
 	workingSet        *WorkingSet // session-scoped deferred schema cache injected by the caller
 	sessionID         string      // session ID for audit log correlation
 	sessionCWD        string      // session-scoped working directory; set by runner/TUI before Run()
+	deltaProvider     DeltaProvider
 	injectCh          chan InjectedMessage
 	injectedMessages  []string         // messages injected during the last Run(); cleared on each Run() call
 	runMessages       []client.Message // conversation messages accumulated during the last Run() (excludes system+history)
@@ -387,6 +420,11 @@ func (a *AgentLoop) InvalidateWorkingSet() {
 // so multiple messages are batched.
 func (a *AgentLoop) SetInjectCh(ch chan InjectedMessage) {
 	a.injectCh = ch
+}
+
+// SetDeltaProvider configures a provider for mid-run state change deltas.
+func (a *AgentLoop) SetDeltaProvider(dp DeltaProvider) {
+	a.deltaProvider = dp
 }
 
 // InjectedMessages returns the user messages that were injected during the
@@ -595,7 +633,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 	if a.agentBasePrompt != "" {
 		persona = a.agentBasePrompt
 	}
-	basePrompt := persona + coreOperationalRules
+	basePrompt := persona + coreOperationalRules + contrastExamplesCore
 
 	// Memory consolidation: merge auto-*.md detail files when accumulated.
 	// Runs at most once per 7 days, only when ≥12 detail files exist.
@@ -670,10 +708,11 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		OutputFormat:  a.outputFormat,
 	})
 
-	// Append cloud delegation guidance to the static system prompt
+	// Append cloud delegation guidance and cloud-specific contrast example
 	systemPrompt := parts.System
 	if _, hasCloud := effTools.Get("cloud_delegate"); hasCloud {
 		systemPrompt += cloudDelegationGuidance
+		systemPrompt += contrastExamplesCloud
 	}
 
 	messages := make([]client.Message, 0)
@@ -691,31 +730,42 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 	// a shorter slice, invalidating the original offset).
 	newMsgOffset := len(messages) - 1
 	injectedIndices := make(map[int]bool)    // message indices that are system-injected
+	deltaIndices := make(map[int]bool)       // message indices that are delta injections (excluded from persistence)
 	msgTimestamps := make(map[int]time.Time) // message index → creation time
 	msgTimestamps[newMsgOffset] = time.Now() // timestamp the user message
 	captureRunMessages := func() {
 		if newMsgOffset >= 1 && newMsgOffset < len(messages) {
-			n := len(messages) - newMsgOffset
-			a.runMessages = make([]client.Message, n)
-			copy(a.runMessages, messages[newMsgOffset:])
-			// Strip volatile context framing from the initial user message
-			// so session history stays clean. Volatile context (date/time,
-			// memory, instructions, CWD) is re-injected fresh each Run().
-			if len(a.runMessages) > 0 && a.runMessages[0].Role == "user" {
-				a.runMessages[0] = client.Message{
-					Role:    "user",
-					Content: client.NewTextContent(userMessage),
+			// Count non-delta messages for allocation
+			total := 0
+			for i := newMsgOffset; i < len(messages); i++ {
+				if !deltaIndices[i] {
+					total++
 				}
 			}
-			a.runMsgInjected = make([]bool, n)
-			a.runMsgTimestamps = make([]time.Time, n)
+			a.runMessages = make([]client.Message, 0, total)
+			a.runMsgInjected = make([]bool, 0, total)
+			a.runMsgTimestamps = make([]time.Time, 0, total)
 			now := time.Now()
-			for i := 0; i < n; i++ {
-				a.runMsgInjected[i] = injectedIndices[newMsgOffset+i]
-				if ts, ok := msgTimestamps[newMsgOffset+i]; ok {
-					a.runMsgTimestamps[i] = ts
+			first := true
+			for i := newMsgOffset; i < len(messages); i++ {
+				if deltaIndices[i] {
+					continue // exclude delta messages from persisted output
+				}
+				msg := messages[i]
+				// Strip volatile context framing from the initial user message
+				if first && msg.Role == "user" {
+					msg = client.Message{
+						Role:    "user",
+						Content: client.NewTextContent(userMessage),
+					}
+				}
+				first = false
+				a.runMessages = append(a.runMessages, msg)
+				a.runMsgInjected = append(a.runMsgInjected, injectedIndices[i])
+				if ts, ok := msgTimestamps[i]; ok {
+					a.runMsgTimestamps = append(a.runMsgTimestamps, ts)
 				} else {
-					a.runMsgTimestamps[i] = now // fallback for unstamped messages
+					a.runMsgTimestamps = append(a.runMsgTimestamps, now)
 				}
 			}
 		}
@@ -838,6 +888,18 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			}
 		}
 
+		// Poll for mid-run state change deltas (e.g., date rollover).
+		if a.deltaProvider != nil {
+			for _, d := range a.deltaProvider.Check() {
+				messages = append(messages, client.Message{
+					Role:    "user",
+					Content: client.NewTextContent("[system] " + d.Message),
+				})
+				deltaIndices[len(messages)-1] = true
+				markInjected()
+			}
+		}
+
 		// Filter old screenshots to stay within context budget
 		filterOldImages(messages, maxRecentImages)
 
@@ -923,6 +985,15 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 							}
 						}
 						injectedIndices = rebased
+
+						rebasedDelta := make(map[int]bool, len(deltaIndices))
+						for idx := range deltaIndices {
+							newIdx := idx - dropped
+							if newIdx >= newMsgOffset {
+								rebasedDelta[newIdx] = true
+							}
+						}
+						deltaIndices = rebasedDelta
 
 						rebasedTS := make(map[int]time.Time, len(msgTimestamps))
 						for idx, ts := range msgTimestamps {
@@ -1044,6 +1115,15 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 						}
 					}
 					injectedIndices = rebased
+
+					rebasedDelta := make(map[int]bool, len(deltaIndices))
+					for idx := range deltaIndices {
+						newIdx := idx - dropped
+						if newIdx >= newMsgOffset {
+							rebasedDelta[newIdx] = true
+						}
+					}
+					deltaIndices = rebasedDelta
 
 					rebasedTS := make(map[int]time.Time, len(msgTimestamps))
 					for idx, ts := range msgTimestamps {

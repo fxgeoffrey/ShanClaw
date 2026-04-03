@@ -1,0 +1,10 @@
+tools:
+  allow:
+    - file_read
+    - glob
+    - grep
+    - directory_list
+    - bash
+    - think
+    - system_info
+    - session_search

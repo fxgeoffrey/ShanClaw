@@ -66,6 +66,10 @@ var rootCmd = &cobra.Command{
 			return nil
 		}
 
+		if err := agents.EnsureBuiltins(filepath.Join(config.ShannonDir(), "agents"), Version); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to sync builtin agents: %v\n", err)
+		}
+
 		var agentOverride *agents.Agent
 		if agentName != "" {
 			agentOverride, err = agents.LoadAgent(filepath.Join(config.ShannonDir(), "agents"), agentName)
@@ -208,6 +212,7 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 	}
 	loop.SetHandler(&cliEventHandler{autoApprove: autoApprove})
 	loop.SetBypassPermissions(dangerouslySkipPermissions)
+	loop.SetDeltaProvider(agent.NewTemporalDelta())
 
 	// Load skills (agent-scoped or global) and wire to loop + use_skill tool
 	var loadedSkills []*skills.Skill

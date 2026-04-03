@@ -273,6 +273,7 @@ type AgentLoop struct {
 	workingSet        *WorkingSet // session-scoped deferred schema cache injected by the caller
 	sessionID         string      // session ID for audit log correlation
 	sessionCWD        string      // session-scoped working directory; set by runner/TUI before Run()
+	deltaProvider     DeltaProvider
 	injectCh          chan InjectedMessage
 	injectedMessages  []string         // messages injected during the last Run(); cleared on each Run() call
 	runMessages       []client.Message // conversation messages accumulated during the last Run() (excludes system+history)
@@ -387,6 +388,11 @@ func (a *AgentLoop) InvalidateWorkingSet() {
 // so multiple messages are batched.
 func (a *AgentLoop) SetInjectCh(ch chan InjectedMessage) {
 	a.injectCh = ch
+}
+
+// SetDeltaProvider configures a provider for mid-run state change deltas.
+func (a *AgentLoop) SetDeltaProvider(dp DeltaProvider) {
+	a.deltaProvider = dp
 }
 
 // InjectedMessages returns the user messages that were injected during the
@@ -691,31 +697,42 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 	// a shorter slice, invalidating the original offset).
 	newMsgOffset := len(messages) - 1
 	injectedIndices := make(map[int]bool)    // message indices that are system-injected
+	deltaIndices := make(map[int]bool)       // message indices that are delta injections (excluded from persistence)
 	msgTimestamps := make(map[int]time.Time) // message index → creation time
 	msgTimestamps[newMsgOffset] = time.Now() // timestamp the user message
 	captureRunMessages := func() {
 		if newMsgOffset >= 1 && newMsgOffset < len(messages) {
-			n := len(messages) - newMsgOffset
-			a.runMessages = make([]client.Message, n)
-			copy(a.runMessages, messages[newMsgOffset:])
-			// Strip volatile context framing from the initial user message
-			// so session history stays clean. Volatile context (date/time,
-			// memory, instructions, CWD) is re-injected fresh each Run().
-			if len(a.runMessages) > 0 && a.runMessages[0].Role == "user" {
-				a.runMessages[0] = client.Message{
-					Role:    "user",
-					Content: client.NewTextContent(userMessage),
+			// Count non-delta messages for allocation
+			total := 0
+			for i := newMsgOffset; i < len(messages); i++ {
+				if !deltaIndices[i] {
+					total++
 				}
 			}
-			a.runMsgInjected = make([]bool, n)
-			a.runMsgTimestamps = make([]time.Time, n)
+			a.runMessages = make([]client.Message, 0, total)
+			a.runMsgInjected = make([]bool, 0, total)
+			a.runMsgTimestamps = make([]time.Time, 0, total)
 			now := time.Now()
-			for i := 0; i < n; i++ {
-				a.runMsgInjected[i] = injectedIndices[newMsgOffset+i]
-				if ts, ok := msgTimestamps[newMsgOffset+i]; ok {
-					a.runMsgTimestamps[i] = ts
+			first := true
+			for i := newMsgOffset; i < len(messages); i++ {
+				if deltaIndices[i] {
+					continue // exclude delta messages from persisted output
+				}
+				msg := messages[i]
+				// Strip volatile context framing from the initial user message
+				if first && msg.Role == "user" {
+					msg = client.Message{
+						Role:    "user",
+						Content: client.NewTextContent(userMessage),
+					}
+				}
+				first = false
+				a.runMessages = append(a.runMessages, msg)
+				a.runMsgInjected = append(a.runMsgInjected, injectedIndices[i])
+				if ts, ok := msgTimestamps[i]; ok {
+					a.runMsgTimestamps = append(a.runMsgTimestamps, ts)
 				} else {
-					a.runMsgTimestamps[i] = now // fallback for unstamped messages
+					a.runMsgTimestamps = append(a.runMsgTimestamps, now)
 				}
 			}
 		}
@@ -835,6 +852,18 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				if a.handler != nil {
 					a.handler.OnText("")
 				}
+			}
+		}
+
+		// Poll for mid-run state change deltas (e.g., date rollover).
+		if a.deltaProvider != nil {
+			for _, d := range a.deltaProvider.Check() {
+				messages = append(messages, client.Message{
+					Role:    "user",
+					Content: client.NewTextContent("[system] " + d.Message),
+				})
+				deltaIndices[len(messages)-1] = true
+				markInjected()
 			}
 		}
 

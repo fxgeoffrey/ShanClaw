@@ -96,16 +96,16 @@ type Manager struct {
 // New creates a heartbeat Manager by scanning agents for heartbeat config.
 // Returns an empty (but valid) Manager if no agents have heartbeat configured.
 func New(agentsDir string, deps *daemon.ServerDeps) (*Manager, error) {
-	names, err := agents.ListAgents(agentsDir)
+	agentEntries, err := agents.ListAgents(agentsDir)
 	if err != nil {
 		return nil, fmt.Errorf("heartbeat: list agents: %w", err)
 	}
 
 	var entries []*agentHeartbeat
-	for _, name := range names {
-		ag, err := agents.LoadAgent(agentsDir, name)
+	for _, ae := range agentEntries {
+		ag, err := agents.LoadAgent(agentsDir, ae.Name)
 		if err != nil {
-			log.Printf("heartbeat: skip agent %q: %v", name, err)
+			log.Printf("heartbeat: skip agent %q: %v", ae.Name, err)
 			continue
 		}
 		if ag.Config == nil || ag.Config.Heartbeat == nil || ag.Config.Heartbeat.Every == "" {
@@ -115,20 +115,20 @@ func New(agentsDir string, deps *daemon.ServerDeps) (*Manager, error) {
 
 		interval, err := time.ParseDuration(hb.Every)
 		if err != nil {
-			log.Printf("heartbeat: skip agent %q: invalid interval %q: %v", name, hb.Every, err)
+			log.Printf("heartbeat: skip agent %q: invalid interval %q: %v", ae.Name, hb.Every, err)
 			continue
 		}
 		if interval < 1*time.Minute {
-			log.Printf("heartbeat: skip agent %q: interval %s too short (min 1m)", name, interval)
+			log.Printf("heartbeat: skip agent %q: interval %s too short (min 1m)", ae.Name, interval)
 			continue
 		}
 
 		entries = append(entries, &agentHeartbeat{
-			name:        name,
+			name:        ae.Name,
 			interval:    interval,
 			activeHours: hb.ActiveHours,
 			model:       hb.Model,
-			agentDir:    filepath.Join(agentsDir, name),
+			agentDir:    filepath.Join(agentsDir, ae.Name),
 		})
 	}
 

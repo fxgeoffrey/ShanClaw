@@ -757,17 +757,17 @@ func truncateReply(s string, n int) string {
 
 func collectAgentWatches(agentsDir string) map[string][]watcher.WatchEntry {
 	result := make(map[string][]watcher.WatchEntry)
-	names, err := agents.ListAgents(agentsDir)
+	entries, err := agents.ListAgents(agentsDir)
 	if err != nil {
 		return result
 	}
-	for _, name := range names {
-		a, err := agents.LoadAgent(agentsDir, name)
+	for _, entry := range entries {
+		a, err := agents.LoadAgent(agentsDir, entry.Name)
 		if err != nil || a.Config == nil || len(a.Config.Watch) == 0 {
 			continue
 		}
 		for _, w := range a.Config.Watch {
-			result[name] = append(result[name], watcher.WatchEntry{
+			result[entry.Name] = append(result[entry.Name], watcher.WatchEntry{
 				Path: w.Path,
 				Glob: w.Glob,
 			})

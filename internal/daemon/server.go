@@ -363,7 +363,7 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	names, err := agents.ListAgents(s.deps.AgentsDir)
+	entries, err := agents.ListAgents(s.deps.AgentsDir)
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return
@@ -371,20 +371,30 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 
 	type agentInfo struct {
 		Name         string `json:"name"`
+		Builtin      bool   `json:"builtin"`
+		Override     bool   `json:"override"`
 		HasMemory    bool   `json:"has_memory"`
 		HasConfig    bool   `json:"has_config"`
 		CommandCount int    `json:"command_count"`
 		SkillCount   int    `json:"skill_count"`
 	}
-	result := make([]agentInfo, 0, len(names))
-	for _, name := range names {
-		dir := filepath.Join(s.deps.AgentsDir, name)
-		_, memErr := os.Stat(filepath.Join(dir, "MEMORY.md"))
+	result := make([]agentInfo, 0, len(entries))
+	for _, entry := range entries {
+		// Resolve effective directory for definition files
+		dir := filepath.Join(s.deps.AgentsDir, entry.Name)
+		if entry.Builtin {
+			dir = filepath.Join(s.deps.AgentsDir, "_builtin", entry.Name)
+		}
+		// Memory is always in top-level runtime dir
+		runtimeDir := filepath.Join(s.deps.AgentsDir, entry.Name)
+		_, memErr := os.Stat(filepath.Join(runtimeDir, "MEMORY.md"))
 		_, cfgErr := os.Stat(filepath.Join(dir, "config.yaml"))
 		cmdFiles, _ := filepath.Glob(filepath.Join(dir, "commands", "*.md"))
 		skillFiles, _ := filepath.Glob(filepath.Join(dir, "skills", "*", "SKILL.md"))
 		result = append(result, agentInfo{
-			Name:         name,
+			Name:         entry.Name,
+			Builtin:      entry.Builtin,
+			Override:     entry.Override,
 			HasMemory:    memErr == nil,
 			HasConfig:    cfgErr == nil,
 			CommandCount: len(cmdFiles),

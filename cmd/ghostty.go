@@ -26,14 +26,16 @@ var workspaceCmd = &cobra.Command{
 		agentNames := args
 		if len(agentNames) == 0 {
 			agentsDir := filepath.Join(config.ShannonDir(), "agents")
-			names, err := agents.ListAgents(agentsDir)
+			entries, err := agents.ListAgents(agentsDir)
 			if err != nil {
 				return fmt.Errorf("failed to list agents: %w", err)
 			}
-			if len(names) == 0 {
+			if len(entries) == 0 {
 				return fmt.Errorf("no agents found in %s", agentsDir)
 			}
-			agentNames = names
+			for _, entry := range entries {
+				agentNames = append(agentNames, entry.Name)
+			}
 		}
 		shanBin, _ := os.Executable()
 		if shanBin == "" {

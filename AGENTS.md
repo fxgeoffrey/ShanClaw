@@ -40,6 +40,7 @@ internal/
     spill.go           # large tool result spill-to-disk
     deferred.go        # deferred tool loading (tool_search)
     microcompact.go    # Tier 2 semantic compaction for large native tool results
+    delta.go           # DeltaProvider interface, TemporalDelta (date rollover)
     loopdetect.go      # stuck-loop detectors
     readtracker.go     # read-before-edit enforcement
     approval_cache.go  # per-turn approval caching
@@ -48,6 +49,8 @@ internal/
     loader.go          # LoadAgent, ListAgents, ParseAgentMention
     api.go             # daemon-side agent CRUD
     validate.go        # agent validation and builtin commands
+    embed.go           # EnsureBuiltins, MaterializeBuiltin, bundled agents
+    builtin/           # Bundled agent definitions (explorer, reviewer)
   client/
     gateway.go         # GatewayClient: Complete, CompleteStream, ListTools
     sse.go             # SSE event parsing
@@ -55,6 +58,8 @@ internal/
     config.go          # multi-level config loading and merge
     settings.go        # UI settings
     setup.go           # setup wizard
+  cwdctx/
+    cwdctx.go          # session-scoped CWD: context propagation, path resolution
   context/
     window.go          # token estimation, compaction shaping
     summarize.go       # two-phase conversation summary generation
@@ -190,7 +195,7 @@ Schedule tests use temp directories and never write to the real LaunchAgents dir
 - npm package: `@kocoro/shanclaw`
 - Versioning is PATCH-only (`0.0.x`) unless explicitly directed otherwise
 - Release flow: tag → push tag → CI builds and publishes
-- `docs/plans/` is gitignored and should not be committed
+- `docs/` is gitignored — documentation lives locally only
 
 ## Tool Inventory
 

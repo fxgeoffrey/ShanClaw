@@ -347,7 +347,7 @@ Tool call from LLM
 ```
 
 - **Hard-blocked**: `rm -rf /`, `mkfs`, `dd if=`, `curl|sh`, etc. — always denied, cannot be overridden
-- **CWD auto-approve**: Read-only tools (`file_read`, `glob`, `grep`, `directory_list`) auto-approve paths under the session working directory (agent config `cwd`, or process CWD as fallback)
+- **CWD auto-approve**: Read-only tools (`file_read`, `glob`, `grep`, `directory_list`) auto-approve paths under the session working directory (request `cwd` → resumed session → agent config `cwd` → process CWD fallback)
 - **Auto-approve**: Safe bash commands (`ls`, `git status`, `go test`, `make`, etc.), `process list/ports`, localhost HTTP
 - **Prompt**: Destructive tools show `[y/n]` in TUI or one-shot mode
 - **Denied-call blocking**: If you deny a tool call, the same tool+args won't be re-prompted for the rest of the turn
@@ -806,10 +806,10 @@ Agents without `config.yaml` inherit all tools, global MCP servers, and default 
 Create `config.yaml` to scope an agent's capabilities:
 
 ```yaml
-# Project directory — all relative paths resolve from here
+# Default project directory for this agent.
 # Must be an absolute path. Drives: prompt context, instructions,
 # file tools, bash, auto-approval scope, read-before-edit tracking.
-# Without this, daemon agents use the daemon's launch directory.
+# Request-level cwd and resumed sessions can override this default.
 cwd: /Users/you/Code/myproject
 
 # Tool allow list — agent can ONLY use these tools
@@ -870,6 +870,48 @@ tools:
 ```
 
 The filter applies to all tool sources (local, MCP, gateway). If both `allow` and `deny` are set, `allow` takes precedence.
+
+### Project Context and `cwd`
+
+ShanClaw uses a session-scoped working directory (`cwd`) to decide which project a run is operating in.
+
+This affects:
+
+- relative file paths
+- project instructions
+- bash execution
+- safe path checks
+- read-before-edit tracking
+- project-local runtime config
+
+The effective `cwd` is resolved in this order:
+
+1. request `cwd`
+2. stored session `cwd` for resumed sessions
+3. agent config `cwd`
+4. process working directory fallback
+
+This means:
+
+- a request can explicitly target a project
+- resumed sessions return to the same project
+- agents can define a default project
+- older flows still keep working through fallback behavior
+
+Project-local config is still loaded from the active project directory, but only for session-safe runtime fields such as:
+
+- `model_tier`
+- `agent.*`
+- `tools.*`
+- `permissions.*`
+
+Process-global settings remain global and are not overridden by project-local config:
+
+- `endpoint`
+- `api_key`
+- `mcp_servers`
+- `daemon.*`
+- `auto_update_check`
 
 ### Agent Commands
 
@@ -982,6 +1024,8 @@ The daemon exposes a localhost-only HTTP server for native app integration and s
 | `/status` | GET | Connection state, active agent, uptime, version |
 | `/agents` | GET | List named agents from `~/.shannon/agents/` |
 | `/sessions` | GET | List sessions, optional `?agent=` filter |
+| `/sessions/{id}` | GET | Get full session with messages, `?agent=<name>` |
+| `/sessions/{id}/edit` | POST | Truncate history at index, re-run with new content (edit & retry) |
 | `/sessions/search` | GET | Search session history, `?q=<query>&agent=<name>` |
 | `/message` | POST | Send a message to an agent, get reply (supports HITL injection) |
 | `/config/reload` | POST | Reload config, restart watchers and heartbeat managers |

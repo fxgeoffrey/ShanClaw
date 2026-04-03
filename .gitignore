@@ -12,9 +12,7 @@ shannon
 *.key
 *.p12
 *.log
-docs/plans/
-docs/superpowers/
-docs/design/
+docs/
 internal/tools/axserver/.build/
 build/
 .idea/

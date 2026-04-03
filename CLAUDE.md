@@ -27,7 +27,7 @@ cmd/
 
 internal/
   daemon/                # ── PRIMARY PRODUCTION PATH ──
-    server.go          # HTTP API server (agent CRUD, config, instructions, reload)
+    server.go          # HTTP API server (agent CRUD, config, instructions, session edit/retry, reload)
     runner.go          # Agent run orchestration, session routing, output format profiles
     client.go          # WebSocket client with reconnect, bounded concurrency
     router.go          # SessionKey, SessionCache, route locking
@@ -39,6 +39,8 @@ internal/
     partition.go       # partitionToolCalls (read-only batching), executeBatches
     spill.go           # Disk spill for large tool results (>50K → temp file + preview)
     deferred.go        # Deferred tool loading (tool_search schema merging)
+    microcompact.go    # Tier 2 semantic compaction for large native tool results
+    delta.go           # DeltaProvider interface, TemporalDelta (date rollover detection)
     loopdetect.go      # 9 stuck-loop detectors
     readtracker.go     # read-before-edit enforcement
     approval_cache.go  # per-turn approval caching
@@ -47,6 +49,8 @@ internal/
     loader.go          # LoadAgent (config.yaml, commands/, skills/), ListAgents, ParseAgentMention
     api.go             # Agent CRUD operations for daemon API
     validate.go        # Agent name/field validation, BuiltinCommands
+    embed.go           # EnsureBuiltins, MaterializeBuiltin, embed.FS bundled agents
+    builtin/           # Bundled agent definitions (explorer, reviewer)
   client/
     gateway.go         # GatewayClient: Complete, CompleteStream, ListTools
     sse.go             # SSE event parsing
@@ -54,6 +58,8 @@ internal/
     config.go          # Config struct, Load(), multi-level merge (global/project/local)
     settings.go        # UI settings
     setup.go           # --setup wizard
+  cwdctx/
+    cwdctx.go          # Session-scoped CWD: context propagation, path resolution helpers
   context/
     window.go          # EstimateTokens, ShouldCompact, ShapeHistory
     summarize.go       # GenerateSummary (two-phase: analysis scratchpad → summary)
@@ -184,7 +190,7 @@ Schedule tests use `t.TempDir()` as `plistDir` — they never write to real `~/L
 - npm: `@kocoro/shanclaw` → `npm install -g @kocoro/shanclaw`
 - **Versioning: PATCH only (0.0.x)** — do NOT bump minor/major unless explicitly asked
 - Release: `git tag -a vX.Y.Z` → `git push origin vX.Y.Z` → CI builds + publishes
-- `docs/plans/` is gitignored — never commit plan files
+- `docs/` is gitignored — documentation lives locally only
 
 ## 28 Local Tools
 

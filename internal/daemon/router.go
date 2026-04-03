@@ -347,6 +347,26 @@ func (sc *SessionCache) CancelRoute(key string) {
 	}
 }
 
+// CancelBySessionID cancels any active route whose sessionID matches,
+// regardless of route key type (agent:<name>, session:<id>, default:<s>:<c>).
+func (sc *SessionCache) CancelBySessionID(sessionID string) {
+	sc.mu.Lock()
+	var cancels []context.CancelFunc
+	for _, entry := range sc.routes {
+		if entry != nil && entry.sessionID == sessionID {
+			if entry.cancel != nil {
+				cancels = append(cancels, entry.cancel)
+			} else {
+				entry.cancelPending = true
+			}
+		}
+	}
+	sc.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
 // Evict closes and removes the manager for this agent and drops matching route
 // state. For active routes (in-flight run), it marks them as evicting and
 // cancels — UnlockRoute finalizes cleanup when the run completes.

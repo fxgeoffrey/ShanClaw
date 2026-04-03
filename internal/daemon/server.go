@@ -551,7 +551,7 @@ func (s *Server) handleSessionSearch(w http.ResponseWriter, r *http.Request) {
 // message_index 表示保留前 N 条消息，N 之后的消息全部丢弃，再以 new_content 重新发送。
 func (s *Server) handleEditMessage(w http.ResponseWriter, r *http.Request) {
 	if s.deps == nil {
-		http.Error(w, `{"error":"daemon deps not configured"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "daemon deps not configured")
 		return
 	}
 	id := r.PathValue("id")
@@ -584,8 +584,9 @@ func (s *Server) handleEditMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 先取消当前 session 路由的活跃任务（如有），防止与截断操作并发
-	s.deps.SessionCache.CancelRoute("session:" + sanitizeRouteValue(id))
+	// Cancel any active run using this session, regardless of route key type
+	// (agent:<name>, session:<id>, default:<source>:<channel>).
+	s.deps.SessionCache.CancelBySessionID(id)
 
 	// 截断 session 历史消息
 	mgr := s.deps.SessionCache.GetOrCreateManager(s.deps.SessionCache.SessionsDir(body.Agent))
@@ -615,7 +616,7 @@ func (s *Server) handleEditMessage(w http.ResponseWriter, r *http.Request) {
 	handler := &httpEventHandler{}
 	result, err := RunAgent(r.Context(), s.deps, runReq, handler)
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

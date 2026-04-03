@@ -86,19 +86,80 @@ func TestListAgents(t *testing.T) {
 	for _, name := range []string{"alpha", "beta"} {
 		agentDir := filepath.Join(dir, name)
 		os.MkdirAll(agentDir, 0700)
-		os.WriteFile(filepath.Join(agentDir, "AGENT.md"), []byte("agent"), 0600)
+		os.WriteFile(filepath.Join(agentDir, "AGENT.md"), []byte("test"), 0600)
 	}
-	os.MkdirAll(filepath.Join(dir, "no-agent"), 0700)
+	os.MkdirAll(filepath.Join(dir, "invalid"), 0700)
 
-	names, err := ListAgents(dir)
+	entries, err := ListAgents(dir)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("ListAgents: %v", err)
 	}
-	if len(names) != 2 {
-		t.Fatalf("got %d agents, want 2", len(names))
+	if len(entries) != 2 {
+		t.Fatalf("expected 2, got %d", len(entries))
 	}
-	if names[0] != "alpha" || names[1] != "beta" {
-		t.Errorf("agents = %v, want [alpha beta]", names)
+	if entries[0].Name != "alpha" || entries[1].Name != "beta" {
+		t.Fatalf("unexpected names: %v", entries)
+	}
+}
+
+func TestListAgents_WithBuiltins(t *testing.T) {
+	dir := t.TempDir()
+
+	// User agent
+	userDir := filepath.Join(dir, "myagent")
+	os.MkdirAll(userDir, 0700)
+	os.WriteFile(filepath.Join(userDir, "AGENT.md"), []byte("user"), 0600)
+
+	// Builtin agents
+	for _, name := range []string{"explorer", "reviewer"} {
+		d := filepath.Join(dir, "_builtin", name)
+		os.MkdirAll(d, 0700)
+		os.WriteFile(filepath.Join(d, "AGENT.md"), []byte("builtin"), 0600)
+	}
+
+	entries, err := ListAgents(dir)
+	if err != nil {
+		t.Fatalf("ListAgents: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(entries))
+	}
+
+	byName := make(map[string]AgentEntry)
+	for _, e := range entries {
+		byName[e.Name] = e
+	}
+	if e, ok := byName["explorer"]; !ok || !e.Builtin || e.Override {
+		t.Fatalf("explorer: expected builtin=true override=false, got %+v", byName["explorer"])
+	}
+	if e, ok := byName["myagent"]; !ok || e.Builtin || e.Override {
+		t.Fatalf("myagent: expected builtin=false override=false, got %+v", byName["myagent"])
+	}
+}
+
+func TestListAgents_OverrideDeduplication(t *testing.T) {
+	dir := t.TempDir()
+
+	builtinDir := filepath.Join(dir, "_builtin", "explorer")
+	os.MkdirAll(builtinDir, 0700)
+	os.WriteFile(filepath.Join(builtinDir, "AGENT.md"), []byte("builtin"), 0600)
+
+	userDir := filepath.Join(dir, "explorer")
+	os.MkdirAll(userDir, 0700)
+	os.WriteFile(filepath.Join(userDir, "AGENT.md"), []byte("user"), 0600)
+
+	entries, err := ListAgents(dir)
+	if err != nil {
+		t.Fatalf("ListAgents: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 deduplicated entry, got %d", len(entries))
+	}
+	if !entries[0].Override {
+		t.Fatal("expected Override=true for deduplicated entry")
+	}
+	if entries[0].Builtin {
+		t.Fatal("overridden entry should have Builtin=false")
 	}
 }
 

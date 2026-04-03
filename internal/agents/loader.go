@@ -351,13 +351,60 @@ func LoadGlobalSkills(shannonDir string) ([]*skills.Skill, error) {
 	)
 }
 
-func ListAgents(agentsDir string) ([]string, error) {
-	entries, err := os.ReadDir(agentsDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
+// AgentEntry represents an agent in the listing with source metadata.
+type AgentEntry struct {
+	Name     string `json:"name"`
+	Builtin  bool   `json:"builtin"`  // loaded from _builtin
+	Override bool   `json:"override"` // user-defined agent overrides a builtin
+}
+
+func ListAgents(agentsDir string) ([]AgentEntry, error) {
+	userNames := listAgentNames(agentsDir)
+	builtinNames := listAgentNames(filepath.Join(agentsDir, "_builtin"))
+
+	builtinSet := make(map[string]bool, len(builtinNames))
+	for _, n := range builtinNames {
+		builtinSet[n] = true
+	}
+
+	seen := make(map[string]bool)
+	var entries []AgentEntry
+
+	// User-defined agents first (they win on dedup)
+	for _, name := range userNames {
+		if name == "_builtin" {
+			continue
 		}
-		return nil, err
+		seen[name] = true
+		entries = append(entries, AgentEntry{
+			Name:     name,
+			Builtin:  false,
+			Override: builtinSet[name],
+		})
+	}
+
+	// Builtin agents not overridden
+	for _, name := range builtinNames {
+		if seen[name] {
+			continue
+		}
+		entries = append(entries, AgentEntry{
+			Name:    name,
+			Builtin: true,
+		})
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Name < entries[j].Name
+	})
+	return entries, nil
+}
+
+// listAgentNames scans a directory for valid agent subdirectories.
+func listAgentNames(dir string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
 	}
 	var names []string
 	for _, e := range entries {
@@ -367,13 +414,12 @@ func ListAgents(agentsDir string) ([]string, error) {
 		if err := ValidateAgentName(e.Name()); err != nil {
 			continue
 		}
-		agentMD := filepath.Join(agentsDir, e.Name(), "AGENT.md")
-		if _, err := os.Stat(agentMD); err == nil {
+		if _, err := os.Stat(filepath.Join(dir, e.Name(), "AGENT.md")); err == nil {
 			names = append(names, e.Name())
 		}
 	}
 	sort.Strings(names)
-	return names, nil
+	return names
 }
 
 func ParseAgentMention(msg string) (string, string) {

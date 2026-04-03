@@ -211,6 +211,63 @@ func TestAgentConfig_CWD(t *testing.T) {
 	}
 }
 
+func TestLoadAgent_BuiltinFallback(t *testing.T) {
+	dir := t.TempDir()
+	// Create builtin agent only
+	builtinDir := filepath.Join(dir, "_builtin", "explorer")
+	os.MkdirAll(builtinDir, 0700)
+	os.WriteFile(filepath.Join(builtinDir, "AGENT.md"), []byte("builtin explorer"), 0600)
+
+	ag, err := LoadAgent(dir, "explorer")
+	if err != nil {
+		t.Fatalf("LoadAgent: %v", err)
+	}
+	if ag.Prompt != "builtin explorer" {
+		t.Fatalf("expected builtin prompt, got %q", ag.Prompt)
+	}
+}
+
+func TestLoadAgent_UserOverrideWins(t *testing.T) {
+	dir := t.TempDir()
+	// Create both builtin and user agent
+	builtinDir := filepath.Join(dir, "_builtin", "explorer")
+	os.MkdirAll(builtinDir, 0700)
+	os.WriteFile(filepath.Join(builtinDir, "AGENT.md"), []byte("builtin"), 0600)
+
+	userDir := filepath.Join(dir, "explorer")
+	os.MkdirAll(userDir, 0700)
+	os.WriteFile(filepath.Join(userDir, "AGENT.md"), []byte("user override"), 0600)
+
+	ag, err := LoadAgent(dir, "explorer")
+	if err != nil {
+		t.Fatalf("LoadAgent: %v", err)
+	}
+	if ag.Prompt != "user override" {
+		t.Fatalf("expected user override, got %q", ag.Prompt)
+	}
+}
+
+func TestLoadAgent_MemoryFromRuntimeDir(t *testing.T) {
+	dir := t.TempDir()
+	// Builtin definition
+	builtinDir := filepath.Join(dir, "_builtin", "explorer")
+	os.MkdirAll(builtinDir, 0700)
+	os.WriteFile(filepath.Join(builtinDir, "AGENT.md"), []byte("explorer"), 0600)
+
+	// Memory in top-level runtime dir (not in _builtin)
+	runtimeDir := filepath.Join(dir, "explorer")
+	os.MkdirAll(runtimeDir, 0700)
+	os.WriteFile(filepath.Join(runtimeDir, "MEMORY.md"), []byte("runtime memory"), 0600)
+
+	ag, err := LoadAgent(dir, "explorer")
+	if err != nil {
+		t.Fatalf("LoadAgent: %v", err)
+	}
+	if ag.Memory != "runtime memory" {
+		t.Fatalf("expected runtime memory, got %q", ag.Memory)
+	}
+}
+
 func TestAgentConfig_CWD_RejectsRelativePath(t *testing.T) {
 	dir := t.TempDir()
 	agentDir := filepath.Join(dir, "test-agent")

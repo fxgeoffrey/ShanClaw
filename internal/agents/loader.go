@@ -114,13 +114,26 @@ func LoadAgent(agentsDir, name string) (*Agent, error) {
 	if err := ValidateAgentName(name); err != nil {
 		return nil, err
 	}
+
+	// Two-step resolution: user dir first, then _builtin fallback
 	dir := filepath.Join(agentsDir, name)
+	if _, err := os.Stat(filepath.Join(dir, "AGENT.md")); err != nil {
+		builtinDir := filepath.Join(agentsDir, "_builtin", name)
+		if _, err := os.Stat(filepath.Join(builtinDir, "AGENT.md")); err != nil {
+			return nil, fmt.Errorf("agent %q: missing AGENT.md: %w", name, err)
+		}
+		dir = builtinDir
+	}
+
 	promptData, err := os.ReadFile(filepath.Join(dir, "AGENT.md"))
 	if err != nil {
 		return nil, fmt.Errorf("agent %q: missing AGENT.md: %w", name, err)
 	}
+
+	// MEMORY.md always from top-level runtime dir, not definition dir
+	runtimeDir := filepath.Join(agentsDir, name)
 	var memory string
-	if data, err := os.ReadFile(filepath.Join(dir, "MEMORY.md")); err == nil {
+	if data, err := os.ReadFile(filepath.Join(runtimeDir, "MEMORY.md")); err == nil {
 		memory = string(data)
 	}
 
@@ -143,8 +156,7 @@ func LoadAgent(agentsDir, name string) (*Agent, error) {
 	// Load agent-scoped commands (optional)
 	ag.Commands = loadAgentCommands(filepath.Join(dir, "commands"))
 
-	// Load skills from _attached.yaml manifest. No manifest = no skills.
-	// Users explicitly attach skills via the agent editor toggle checklist.
+	// Load skills from _attached.yaml manifest
 	shannonDir := filepath.Dir(agentsDir)
 	attachedNames, hasManifest := loadAttachedSkills(filepath.Join(dir, "_attached.yaml"))
 	if hasManifest && len(attachedNames) > 0 {

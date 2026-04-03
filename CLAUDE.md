@@ -179,10 +179,14 @@ go test ./internal/agent/ -v               # agent loop, partitioning, spill, de
 go test ./internal/agents/ -v              # agent loader
 go test ./internal/schedule/ -v            # schedule CRUD + plist tests
 go test ./test/ -v                         # E2E: vision pipeline, persist learnings
+go test ./test/e2e/ -v                     # E2E offline: agents, schedule, session, MCP, cache
+SHANNON_E2E_LIVE=1 go test ./test/e2e/ -v  # E2E live: one-shot, daemon, bundled agents (costs tokens)
 go build ./...                             # build check
 ```
 
 Schedule tests use `t.TempDir()` as `plistDir` — they never write to real `~/Library/LaunchAgents/`.
+
+E2E tests in `test/e2e/` are split into offline (no API, runs in CI) and live (needs `SHANNON_E2E_LIVE=1` + configured endpoint). Run live tests before each release.
 
 ## Building & Releasing
 

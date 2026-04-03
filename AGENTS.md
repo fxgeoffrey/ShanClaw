@@ -184,10 +184,14 @@ go test ./internal/daemon/ -v    # daemon WS client, router, runner
 go test ./internal/agents/ -v    # agent loader
 go test ./internal/schedule/ -v  # schedule CRUD + plist tests
 go test ./test/ -v               # E2E coverage
+go test ./test/e2e/ -v           # E2E offline: agents, schedule, session, MCP, cache
+SHANNON_E2E_LIVE=1 go test ./test/e2e/ -v  # E2E live (costs tokens)
 go build ./...                   # build check
 ```
 
 Schedule tests use temp directories and never write to the real LaunchAgents directory.
+
+E2E tests in `test/e2e/` split into offline (no API) and live (`SHANNON_E2E_LIVE=1`). Run live tests before releases.
 
 ## Building & Releasing
 

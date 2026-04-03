@@ -180,7 +180,7 @@ go test ./internal/agents/ -v              # agent loader
 go test ./internal/schedule/ -v            # schedule CRUD + plist tests
 go test ./test/ -v                         # E2E: vision pipeline, persist learnings
 go test ./test/e2e/ -v                     # E2E offline: agents, schedule, session, MCP, cache
-SHANNON_E2E_LIVE=1 go test ./test/e2e/ -v  # E2E live: one-shot, daemon, bundled agents (costs tokens)
+SHANNON_E2E_LIVE=1 go test ./test/e2e/ -v  # E2E live: one-shot, bundled agents (daemon tests skipped until --port/--home isolation)
 go build ./...                             # build check
 ```
 

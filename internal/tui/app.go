@@ -334,6 +334,7 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 			loop.SetContextWindow(*ac.ContextWindow)
 		}
 	}
+	loop.SetDeltaProvider(agent.NewTemporalDelta())
 	// Load skills (agent-scoped or global) and wire to loop + use_skill tool
 	var loadedSkills []*skills.Skill
 	if agentOverride != nil {
@@ -473,6 +474,7 @@ func (m *Model) rebuildAgentLoop() {
 	}
 	loop.SetBypassPermissions(m.bypassPermissions)
 	loop.SetEnableStreaming(true)
+	loop.SetDeltaProvider(agent.NewTemporalDelta())
 	if m.agentOverride != nil {
 		scopedMCPCtx := tools.ResolveMCPContext(m.cfg, m.agentOverride)
 		agentDir := filepath.Join(m.shannonDir, "agents", m.agentOverride.Name)

@@ -208,6 +208,7 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 	}
 	loop.SetHandler(&cliEventHandler{autoApprove: autoApprove})
 	loop.SetBypassPermissions(dangerouslySkipPermissions)
+	loop.SetDeltaProvider(agent.NewTemporalDelta())
 
 	// Load skills (agent-scoped or global) and wire to loop + use_skill tool
 	var loadedSkills []*skills.Skill

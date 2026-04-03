@@ -1354,14 +1354,25 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	// Remove only definition files — preserve runtime state (MEMORY.md, sessions/)
 	// so the builtin can resurface with existing history intact.
 	agentDir := filepath.Join(s.deps.AgentsDir, name)
+	var errs []string
 	for _, f := range []string{"AGENT.md", "config.yaml", "_attached.yaml"} {
-		os.Remove(filepath.Join(agentDir, f))
+		p := filepath.Join(agentDir, f)
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, err.Error())
+		}
 	}
-	os.RemoveAll(filepath.Join(agentDir, "commands"))
-	os.RemoveAll(filepath.Join(agentDir, "skills"))
+	for _, d := range []string{"commands", "skills"} {
+		p := filepath.Join(agentDir, d)
+		if err := os.RemoveAll(p); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	if len(errs) > 0 {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("partial delete: %s", strings.Join(errs, "; ")))
+		return
+	}
 	// Clean up empty dir if no runtime state remains
-	entries, _ := os.ReadDir(agentDir)
-	if len(entries) == 0 {
+	if entries, err := os.ReadDir(agentDir); err == nil && len(entries) == 0 {
 		os.Remove(agentDir)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})

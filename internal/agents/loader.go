@@ -363,7 +363,10 @@ func ListAgents(agentsDir string) ([]AgentEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	builtinNames, _ := listAgentNames(filepath.Join(agentsDir, "_builtin")) // missing _builtin dir is fine
+	builtinNames, err2 := listAgentNames(filepath.Join(agentsDir, "_builtin"))
+	if err2 != nil {
+		return nil, fmt.Errorf("scanning builtin agents: %w", err2)
+	}
 
 	builtinSet := make(map[string]bool, len(builtinNames))
 	for _, n := range builtinNames {

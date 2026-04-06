@@ -55,4 +55,11 @@ jobs:
         # tests rather than replaying cached success from a prior run.
         # -timeout is per-package; the job-level timeout-minutes above
         # is the real overall ceiling.
-        run: go test -count=1 -timeout=5m ./...
+        #
+        # -skip '^TestGhosttyTool_ListTabs_Empty$' excludes one test
+        # that requires Ghostty >= 1.3.0 to be installed on the runner.
+        # GitHub's macos-latest images don't include Ghostty, and the
+        # test isn't a meaningful smoke signal for the marketplace /
+        # daemon work that actually needs CI coverage. Runs locally.
+        # Remove this skip if Ghostty is ever added to the runner setup.
+        run: go test -count=1 -timeout=5m -skip '^TestGhosttyTool_ListTabs_Empty$' ./...

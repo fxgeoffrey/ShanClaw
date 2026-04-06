@@ -66,11 +66,19 @@ func (s *Session) HistoryForLoop() []client.Message {
 // the parallel meta slice removed. If meta is empty or shorter than msgs,
 // unannotated positions are kept. Used by call sites that already have
 // sliced views of session history (e.g. TUI: everything-except-last).
+//
+// The return value aliases the input slice on the fast path (nothing
+// flagged) but is capped to its current length, so a caller that later
+// appends to the result cannot silently mutate the input's backing array
+// past its visible length.
 func FilterInjected(msgs []client.Message, meta []MessageMeta) []client.Message {
 	if len(meta) == 0 {
-		return msgs
+		// Cap capacity so an append on the result allocates fresh storage
+		// instead of extending into the caller's backing array.
+		return msgs[:len(msgs):len(msgs)]
 	}
-	// Fast path: nothing flagged → return the original slice unchanged.
+	// Fast path: nothing flagged → alias the original slice (with capped
+	// capacity, as above).
 	anyInjected := false
 	for i := 0; i < len(msgs) && i < len(meta); i++ {
 		if meta[i].SystemInjected {
@@ -79,7 +87,7 @@ func FilterInjected(msgs []client.Message, meta []MessageMeta) []client.Message 
 		}
 	}
 	if !anyInjected {
-		return msgs
+		return msgs[:len(msgs):len(msgs)]
 	}
 	out := make([]client.Message, 0, len(msgs))
 	for i, msg := range msgs {

@@ -110,3 +110,64 @@ func TestExtractConversationContext_SkipsBlockMessagesWithoutText(t *testing.T) 
 		t.Errorf("msg[0] content = %q", got[0].Content)
 	}
 }
+
+func TestExtractConversationContext_StripsToolResultPayloads(t *testing.T) {
+	// Regression test: a user-role message whose content has BOTH a text
+	// block (the human's reply) AND a tool_result block (e.g. a spill
+	// preview containing "~/.shannon/tmp/tool_result_<id>.txt") must only
+	// contribute the text block to the captured context. MessageContent.Text()
+	// concatenates tool_result payloads (via ToolResultText on the
+	// ToolContent field) too, so a naive Text() call would leak internal
+	// spill paths into the persisted conversation context.
+	blockContent := client.NewBlockContent([]client.ContentBlock{
+		{Type: "text", Text: "here is my actual reply"},
+		{
+			Type:        "tool_result",
+			ToolUseID:   "tu1",
+			ToolContent: "INTERNAL SPILL PREVIEW: /Users/x/.shannon/tmp/tool_result_abc.txt",
+		},
+	})
+	msgs := []client.Message{
+		{Role: "user", Content: blockContent},
+	}
+
+	// Precondition: Content.Text() should actually include the tool_result
+	// payload (that's the leak we're closing). If upstream semantics change
+	// so Text() already excludes tool_result, this precondition fails and
+	// the test becomes moot — update or delete it then.
+	if !strings.Contains(blockContent.Text(), "SPILL") {
+		t.Fatalf("precondition: MessageContent.Text() should include tool_result payload, got %q", blockContent.Text())
+	}
+
+	got := extractConversationContext(snapshotCtx(msgs))
+	if len(got) != 1 {
+		t.Fatalf("got %d msgs, want 1", len(got))
+	}
+	if got[0].Content != "here is my actual reply" {
+		t.Errorf("msg content = %q — tool_result payload leaked into captured context", got[0].Content)
+	}
+	if strings.Contains(got[0].Content, "SPILL") || strings.Contains(got[0].Content, ".shannon/tmp") {
+		t.Errorf("spill / internal path leaked into captured context: %q", got[0].Content)
+	}
+}
+
+func TestExtractConversationContext_ConcatenatesMultipleTextBlocks(t *testing.T) {
+	// If a message has multiple text blocks (unusual but valid), we keep
+	// all of them joined — but still never include tool_result content.
+	blockContent := client.NewBlockContent([]client.ContentBlock{
+		{Type: "text", Text: "first part"},
+		{Type: "tool_use", ID: "tu1", Name: "some_tool"},
+		{Type: "text", Text: "second part"},
+		{Type: "tool_result", ToolUseID: "tu1", ToolContent: "internal junk"},
+	})
+	msgs := []client.Message{
+		{Role: "assistant", Content: blockContent},
+	}
+	got := extractConversationContext(snapshotCtx(msgs))
+	if len(got) != 1 {
+		t.Fatalf("got %d msgs, want 1", len(got))
+	}
+	if got[0].Content != "first part\nsecond part" {
+		t.Errorf("msg content = %q, want %q", got[0].Content, "first part\nsecond part")
+	}
+}

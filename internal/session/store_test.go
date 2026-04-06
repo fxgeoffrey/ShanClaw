@@ -419,18 +419,33 @@ func TestHistoryForLoop_ShortMeta(t *testing.T) {
 }
 
 func TestFilterInjected_NoFlagsFastPath(t *testing.T) {
-	// When nothing is flagged, FilterInjected must return the original slice
-	// unchanged (identity comparison) to avoid unnecessary allocation.
-	msgs := []client.Message{
-		{Role: "user", Content: client.NewTextContent("a")},
-		{Role: "assistant", Content: client.NewTextContent("b")},
-	}
+	// When nothing is flagged, FilterInjected takes the fast path: it aliases
+	// the input slice (no allocation) but caps the capacity so a later append
+	// on the result cannot silently extend into the caller's backing array
+	// past the visible length.
+	backing := make([]client.Message, 2, 10) // extra capacity on purpose
+	backing[0] = client.Message{Role: "user", Content: client.NewTextContent("a")}
+	backing[1] = client.Message{Role: "assistant", Content: client.NewTextContent("b")}
 	meta := []MessageMeta{{Source: "x"}, {Source: "x"}}
-	got := FilterInjected(msgs, meta)
+
+	got := FilterInjected(backing, meta)
 	if len(got) != 2 {
 		t.Fatalf("got len %d, want 2", len(got))
 	}
-	if &got[0] != &msgs[0] {
-		t.Error("expected fast path to return original slice")
+	if &got[0] != &backing[0] {
+		t.Error("expected fast path to alias the original slice (no allocation)")
+	}
+	if cap(got) != len(got) {
+		t.Errorf("expected capped capacity %d, got %d — append on result could corrupt caller's backing array", len(got), cap(got))
+	}
+}
+
+func TestFilterInjected_NoMetaFastPath(t *testing.T) {
+	// The len(meta) == 0 branch must also cap capacity, same reasoning.
+	backing := make([]client.Message, 1, 5)
+	backing[0] = client.Message{Role: "user", Content: client.NewTextContent("a")}
+	got := FilterInjected(backing, nil)
+	if cap(got) != len(got) {
+		t.Errorf("expected capped capacity %d, got %d", len(got), cap(got))
 	}
 }

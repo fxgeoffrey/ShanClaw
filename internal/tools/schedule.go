@@ -183,26 +183,32 @@ func extractConversationContext(ctx context.Context) []schedule.ContextMessage {
 	}
 
 	// Filter: keep only plain-text user/assistant messages.
+	//
+	// For block content we concatenate ONLY the text blocks, never
+	// tool_result blocks. MessageContent.Text() merges tool_result payloads
+	// into its output, and those payloads can include spill file paths
+	// (~/.shannon/tmp/…) or other internal infrastructure text that must
+	// never surface as "conversation context".
 	var filtered []schedule.ContextMessage
 	for _, msg := range messages {
 		if msg.Role != "user" && msg.Role != "assistant" {
 			continue
 		}
-		// Skip messages whose content is purely tool_use/tool_result blocks
-		// with no text block of their own.
+		var text string
 		if msg.Content.HasBlocks() {
-			hasText := false
+			var sb strings.Builder
 			for _, b := range msg.Content.Blocks() {
-				if b.Type == "text" && strings.TrimSpace(b.Text) != "" {
-					hasText = true
-					break
+				if b.Type == "text" && b.Text != "" {
+					if sb.Len() > 0 {
+						sb.WriteString("\n")
+					}
+					sb.WriteString(b.Text)
 				}
 			}
-			if !hasText {
-				continue
-			}
+			text = strings.TrimSpace(sb.String())
+		} else {
+			text = strings.TrimSpace(msg.Content.Text())
 		}
-		text := strings.TrimSpace(msg.Content.Text())
 		if text == "" {
 			continue
 		}

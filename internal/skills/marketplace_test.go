@@ -1,9 +1,12 @@
 package skills
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -382,6 +385,144 @@ func mustWriteExec(t *testing.T, path, content string) {
 	mustWrite(t, path, content)
 	if err := os.Chmod(path, 0755); err != nil {
 		t.Fatalf("chmod: %v", err)
+	}
+}
+
+// zipFileSpec describes one entry in a test zip fixture.
+type zipFileSpec struct {
+	name string      // path inside the zip
+	body string      // file contents
+	mode os.FileMode // file mode (0 means default 0644)
+	link string      // non-empty → emit as a symlink to this target
+}
+
+// makeZipFixture builds an in-memory zip archive from the given entries.
+func makeZipFixture(t *testing.T, specs []zipFileSpec) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, sp := range specs {
+		mode := sp.mode
+		if mode == 0 {
+			mode = 0644
+		}
+		if sp.link != "" {
+			mode |= os.ModeSymlink
+		}
+		hdr := &zip.FileHeader{
+			Name:   sp.name,
+			Method: zip.Deflate,
+		}
+		hdr.SetMode(mode)
+		w, err := zw.CreateHeader(hdr)
+		if err != nil {
+			t.Fatalf("zip CreateHeader %q: %v", sp.name, err)
+		}
+		body := sp.body
+		if sp.link != "" {
+			body = sp.link
+		}
+		if _, err := w.Write([]byte(body)); err != nil {
+			t.Fatalf("zip Write %q: %v", sp.name, err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip Close: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func TestExtractZipToSkillSuccess(t *testing.T) {
+	zipBytes := makeZipFixture(t, []zipFileSpec{
+		{name: "SKILL.md", body: "---\nname: demo\ndescription: d\n---\nbody"},
+		{name: "scripts/run.sh", body: "#!/bin/sh\necho hi", mode: 0755},
+		{name: "references/schema.md", body: "schema content"},
+	})
+
+	destDir := filepath.Join(t.TempDir(), "stage")
+	if err := extractZipToSkill(bytes.NewReader(zipBytes), destDir); err != nil {
+		t.Fatalf("extractZipToSkill: %v", err)
+	}
+
+	// Core files present.
+	if _, err := os.Stat(filepath.Join(destDir, "SKILL.md")); err != nil {
+		t.Errorf("SKILL.md missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(destDir, "references", "schema.md")); err != nil {
+		t.Errorf("references/schema.md missing: %v", err)
+	}
+	// Executable bit preserved on scripts.
+	info, err := os.Stat(filepath.Join(destDir, "scripts", "run.sh"))
+	if err != nil {
+		t.Errorf("scripts/run.sh missing: %v", err)
+	} else if info.Mode().Perm()&0100 == 0 {
+		t.Errorf("scripts/run.sh lost executable bit: %v", info.Mode().Perm())
+	}
+}
+
+func TestExtractZipToSkillExcludesGitMetadata(t *testing.T) {
+	zipBytes := makeZipFixture(t, []zipFileSpec{
+		{name: "SKILL.md", body: "---\nname: demo\ndescription: d\n---\n"},
+		{name: ".git/config", body: "[core]"},
+		{name: ".github/workflows/ci.yml", body: "name: ci"},
+		{name: ".gitignore", body: "node_modules"},
+		{name: ".gitattributes", body: "* text"},
+	})
+
+	destDir := filepath.Join(t.TempDir(), "stage")
+	if err := extractZipToSkill(bytes.NewReader(zipBytes), destDir); err != nil {
+		t.Fatalf("extractZipToSkill: %v", err)
+	}
+	for _, excluded := range []string{".git", ".github", ".gitignore", ".gitattributes"} {
+		if _, err := os.Stat(filepath.Join(destDir, excluded)); !os.IsNotExist(err) {
+			t.Errorf("%s should have been excluded, got err = %v", excluded, err)
+		}
+	}
+}
+
+func TestExtractZipToSkillRejectsSymlink(t *testing.T) {
+	zipBytes := makeZipFixture(t, []zipFileSpec{
+		{name: "SKILL.md", body: "---\nname: demo\ndescription: d\n---\n"},
+		{name: "evil", link: "/etc/passwd"},
+	})
+
+	destDir := filepath.Join(t.TempDir(), "stage")
+	err := extractZipToSkill(bytes.NewReader(zipBytes), destDir)
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Errorf("expected symlink rejection error, got: %v", err)
+	}
+	// Stage dir must be cleaned up on failure.
+	if _, statErr := os.Stat(filepath.Join(destDir, "SKILL.md")); statErr == nil {
+		t.Error("stage dir should be cleaned up after symlink rejection")
+	}
+}
+
+func TestExtractZipToSkillRejectsZipSlip(t *testing.T) {
+	// Classic zip-slip: entry name escapes the destination via ../
+	zipBytes := makeZipFixture(t, []zipFileSpec{
+		{name: "SKILL.md", body: "---\nname: demo\ndescription: d\n---\n"},
+		{name: "../outside.txt", body: "malicious"},
+	})
+
+	destDir := filepath.Join(t.TempDir(), "stage")
+	err := extractZipToSkill(bytes.NewReader(zipBytes), destDir)
+	if err == nil || !strings.Contains(err.Error(), "escapes") {
+		t.Errorf("expected zip-slip rejection error, got: %v", err)
+	}
+}
+
+func TestExtractZipToSkillRejectsSizeCap(t *testing.T) {
+	// Build a tiny zip but feed it through a reader capped tinier than the
+	// compressed size. Simulates a server returning more bytes than the cap.
+	zipBytes := makeZipFixture(t, []zipFileSpec{
+		{name: "SKILL.md", body: strings.Repeat("x", 1024)},
+	})
+
+	destDir := filepath.Join(t.TempDir(), "stage")
+	// Feed exactly 10 bytes so the zip reader can't even parse the header.
+	err := extractZipToSkill(io.LimitReader(bytes.NewReader(zipBytes), 10), destDir)
+	if err == nil {
+		t.Errorf("expected error from truncated zip, got nil")
 	}
 }
 

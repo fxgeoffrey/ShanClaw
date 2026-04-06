@@ -1,6 +1,8 @@
 package skills
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -258,6 +260,148 @@ func InstallFromMarketplace(shannonDir string, entry MarketplaceEntry, locks *Sl
 		return fmt.Errorf("install rename: %w", err)
 	}
 
+	return nil
+}
+
+// Caps for zip-based skill installs. 50 MB is more than generous for
+// any realistic skill (ontology was 12 KB); 200 MB uncompressed guards
+// against zip bombs.
+const (
+	maxZipCompressedBytes   = 50 * 1024 * 1024
+	maxZipUncompressedBytes = 200 * 1024 * 1024
+)
+
+// extractZipToSkill reads a zip archive from body and extracts it into
+// destDir, applying the same exclusion, symlink rejection, and mode
+// preservation rules as stageCleanPayload. It is the zip-transport
+// equivalent of (git clone + stageCleanPayload) collapsed into one
+// step because a zip archive is already a self-contained payload.
+//
+// Rejections (all with destDir cleanup):
+//   - Compressed body > maxZipCompressedBytes
+//   - Sum of uncompressed entry sizes > maxZipUncompressedBytes (zip bomb guard)
+//   - Any entry with a symlink mode bit
+//   - Any entry whose cleaned path escapes destDir (zip-slip)
+//   - Any entry whose first path segment is excluded git metadata
+func extractZipToSkill(body io.Reader, destDir string) error {
+	// Read the entire compressed payload into memory through a hard cap.
+	// archive/zip requires a ReaderAt, so we buffer the body.
+	limited := io.LimitReader(body, maxZipCompressedBytes+1)
+	raw, err := io.ReadAll(limited)
+	if err != nil {
+		return fmt.Errorf("read zip body: %w", err)
+	}
+	if int64(len(raw)) > maxZipCompressedBytes {
+		return fmt.Errorf("zip payload exceeds %d bytes", maxZipCompressedBytes)
+	}
+
+	zr, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		return fmt.Errorf("parse zip: %w", err)
+	}
+
+	excluded := map[string]bool{
+		".git":           true,
+		".github":        true,
+		".gitignore":     true,
+		".gitattributes": true,
+	}
+
+	if err := os.MkdirAll(destDir, 0700); err != nil {
+		return fmt.Errorf("create dest dir: %w", err)
+	}
+
+	// All work happens inside a closure so any failure triggers cleanup
+	// via the single RemoveAll below.
+	extractErr := func() error {
+		absDest, err := filepath.Abs(destDir)
+		if err != nil {
+			return fmt.Errorf("resolve dest dir: %w", err)
+		}
+
+		var totalUncompressed int64
+		for _, f := range zr.File {
+			// Zip-bomb guard: track total uncompressed size.
+			totalUncompressed += int64(f.UncompressedSize64)
+			if totalUncompressed > maxZipUncompressedBytes {
+				return fmt.Errorf("zip uncompressed size exceeds %d bytes", maxZipUncompressedBytes)
+			}
+
+			// Symlink rejection.
+			if f.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("unsupported symlink in skill payload: %s", f.Name)
+			}
+
+			// Clean the path and verify it stays within destDir.
+			// filepath.Clean normalizes ../ which would otherwise escape.
+			cleanRel := filepath.Clean(f.Name)
+			if cleanRel == "." || cleanRel == "" {
+				continue
+			}
+			destPath := filepath.Join(absDest, cleanRel)
+			absPath, err := filepath.Abs(destPath)
+			if err != nil {
+				return fmt.Errorf("resolve entry path %q: %w", f.Name, err)
+			}
+			if absPath != absDest && !strings.HasPrefix(absPath, absDest+string(filepath.Separator)) {
+				return fmt.Errorf("zip entry %q escapes dest dir", f.Name)
+			}
+
+			// Exclusion check: any path segment matches.
+			segments := strings.Split(cleanRel, string(filepath.Separator))
+			skip := false
+			for _, seg := range segments {
+				if excluded[seg] {
+					skip = true
+					break
+				}
+			}
+			if skip {
+				continue
+			}
+
+			if f.FileInfo().IsDir() {
+				if err := os.MkdirAll(destPath, 0700); err != nil {
+					return fmt.Errorf("mkdir %q: %w", destPath, err)
+				}
+				continue
+			}
+
+			// Ensure parent exists (zip entries may list files before dirs).
+			if err := os.MkdirAll(filepath.Dir(destPath), 0700); err != nil {
+				return fmt.Errorf("mkdir parent of %q: %w", destPath, err)
+			}
+
+			// Read and write with mode preservation (masked to 0755,
+			// owner-read guaranteed).
+			rc, err := f.Open()
+			if err != nil {
+				return fmt.Errorf("open zip entry %q: %w", f.Name, err)
+			}
+			content, err := io.ReadAll(rc)
+			rc.Close()
+			if err != nil {
+				return fmt.Errorf("read zip entry %q: %w", f.Name, err)
+			}
+
+			srcMode := f.Mode().Perm() & 0755
+			if srcMode&0400 == 0 {
+				srcMode |= 0400
+			}
+			if err := os.WriteFile(destPath, content, srcMode); err != nil {
+				return fmt.Errorf("write %q: %w", destPath, err)
+			}
+			if err := os.Chmod(destPath, srcMode); err != nil {
+				return fmt.Errorf("chmod %q: %w", destPath, err)
+			}
+		}
+		return nil
+	}()
+
+	if extractErr != nil {
+		os.RemoveAll(destDir)
+		return extractErr
+	}
 	return nil
 }
 

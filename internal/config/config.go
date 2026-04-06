@@ -30,6 +30,7 @@ type Config struct {
 	Tools           ToolsConfig                    `mapstructure:"tools"             yaml:"tools"             json:"tools"`
 	Cloud           CloudConfig                    `mapstructure:"cloud"             yaml:"cloud"             json:"cloud"`
 	Daemon          DaemonConfig                   `mapstructure:"daemon"            yaml:"daemon"            json:"daemon"`
+	Skills          SkillsConfig                   `mapstructure:"skills"            yaml:"skills"            json:"skills"`
 	Hooks           hooks.HookConfig               `mapstructure:"hooks"             yaml:"hooks"             json:"hooks"`
 	MCPServers      map[string]mcp.MCPServerConfig `mapstructure:"mcp_servers"       yaml:"mcp_servers"       json:"mcp_servers"`
 	Sources         map[string]ConfigSource        `mapstructure:"-"                 yaml:"-"                 json:"-"`
@@ -63,6 +64,14 @@ type CloudConfig struct {
 
 type DaemonConfig struct {
 	AutoApprove bool `mapstructure:"auto_approve" yaml:"auto_approve" json:"auto_approve"`
+}
+
+type SkillsConfig struct {
+	Marketplace MarketplaceConfig `mapstructure:"marketplace" yaml:"marketplace" json:"marketplace"`
+}
+
+type MarketplaceConfig struct {
+	RegistryURL string `mapstructure:"registry_url" yaml:"registry_url" json:"registry_url"`
 }
 
 func ShannonDir() string {
@@ -112,6 +121,7 @@ func Load() (*Config, error) {
 	viper.SetDefault("tools.server_tool_timeout", 5)
 	viper.SetDefault("tools.grep_max_results", 100)
 	viper.SetDefault("daemon.auto_approve", false)
+	viper.SetDefault("skills.marketplace.registry_url", "https://raw.githubusercontent.com/Kocoro-lab/shanclaw-skill-registry/main/index.json")
 	viper.SetDefault("cloud.enabled", true)
 	viper.SetDefault("cloud.timeout", 3600)
 

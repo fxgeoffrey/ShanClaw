@@ -57,23 +57,37 @@ func (e MarketplaceEntry) IsMalicious() bool {
 	return e.Security.VirusTotal == "malicious" || e.Security.OpenClaw == "malicious"
 }
 
+// defaultStaleCooldown is the minimum gap between upstream refetch
+// attempts once we've started serving stale. Without it, every Load
+// during a registry outage would re-hit the remote and turn normal UI
+// traffic into a retry storm.
+const defaultStaleCooldown = 1 * time.Minute
+
 // MarketplaceClient fetches and caches the registry index.
 //
 // Caching rules (see design doc §Registry Cache):
 //   - First fetch populates the in-memory cache.
 //   - Subsequent calls within TTL return the cached copy.
 //   - After TTL expires, the next call refetches; on fetch failure the
-//     previous cache is served as stale (IsStale() returns true).
+//     previous cache is served as stale (IsStale() returns true) and a
+//     retry cooldown is set so further Loads keep serving stale without
+//     hammering the upstream.
 //   - If no cache exists and fetch fails, Load returns the error.
 type MarketplaceClient struct {
 	url  string
 	ttl  time.Duration
 	http *http.Client
 
-	mu      sync.Mutex
-	cache   *RegistryIndex
-	fetched time.Time
-	stale   bool
+	// staleCooldown bounds how often we re-attempt an upstream fetch
+	// while in stale mode. Exposed as a field (not a constructor arg)
+	// so tests can set a short cooldown directly.
+	staleCooldown time.Duration
+
+	mu         sync.Mutex
+	cache      *RegistryIndex
+	fetched    time.Time
+	stale      bool
+	retryAfter time.Time
 }
 
 // NewMarketplaceClient constructs a client with the given registry URL and
@@ -81,9 +95,10 @@ type MarketplaceClient struct {
 // tests and by operators who explicitly disable caching).
 func NewMarketplaceClient(url string, ttl time.Duration) *MarketplaceClient {
 	return &MarketplaceClient{
-		url:  url,
-		ttl:  ttl,
-		http: &http.Client{Timeout: 15 * time.Second},
+		url:           url,
+		ttl:           ttl,
+		http:          &http.Client{Timeout: 15 * time.Second},
+		staleCooldown: defaultStaleCooldown,
 	}
 }
 
@@ -93,8 +108,17 @@ func (c *MarketplaceClient) Load(ctx context.Context) (*RegistryIndex, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Fresh cache → return immediately.
 	if c.cache != nil && time.Since(c.fetched) < c.ttl {
 		c.stale = false
+		return c.cache, nil
+	}
+
+	// Stale-mode cooldown in effect → keep serving stale without
+	// re-attempting the upstream fetch. Prevents retry storms during
+	// registry outages.
+	if c.cache != nil && !c.retryAfter.IsZero() && time.Now().Before(c.retryAfter) {
+		c.stale = true
 		return c.cache, nil
 	}
 
@@ -102,6 +126,7 @@ func (c *MarketplaceClient) Load(ctx context.Context) (*RegistryIndex, error) {
 	if err != nil {
 		if c.cache != nil {
 			c.stale = true
+			c.retryAfter = time.Now().Add(c.staleCooldown)
 			return c.cache, nil
 		}
 		return nil, err
@@ -110,6 +135,7 @@ func (c *MarketplaceClient) Load(ctx context.Context) (*RegistryIndex, error) {
 	c.cache = idx
 	c.fetched = time.Now()
 	c.stale = false
+	c.retryAfter = time.Time{}
 	return c.cache, nil
 }
 

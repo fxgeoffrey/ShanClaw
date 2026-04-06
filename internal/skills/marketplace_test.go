@@ -128,6 +128,60 @@ func TestMarketplaceClientStaleOnError(t *testing.T) {
 	}
 }
 
+// TestMarketplaceClientStaleCooldown verifies that once we fall into
+// stale mode during a registry outage, subsequent Loads within the
+// cooldown window do NOT re-hit the upstream. Otherwise heavy UI
+// traffic during an outage would turn into a retry storm.
+func TestMarketplaceClientStaleCooldown(t *testing.T) {
+	var hits int32
+	var fail int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		if atomic.LoadInt32(&fail) == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Write([]byte(`{"version":1,"skills":[{"slug":"demo","name":"demo","description":"d","author":"a","repo":"r"}]}`))
+	}))
+	defer ts.Close()
+
+	// Zero TTL so every Load would refetch without the cooldown guard.
+	// Generous cooldown so it definitely covers the test window.
+	client := NewMarketplaceClient(ts.URL, 0)
+	client.staleCooldown = 10 * time.Second
+
+	// Prime the cache.
+	if _, err := client.Load(context.Background()); err != nil {
+		t.Fatalf("priming Load: %v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("priming hits = %d, want 1", got)
+	}
+
+	// Enter outage; first Load after the outage triggers one fetch
+	// attempt, then serves stale.
+	atomic.StoreInt32(&fail, 1)
+	if _, err := client.Load(context.Background()); err != nil {
+		t.Fatalf("first stale Load: %v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Errorf("after first stale Load hits = %d, want 2", got)
+	}
+	if !client.IsStale() {
+		t.Errorf("expected IsStale() true after first stale Load")
+	}
+
+	// Three more Loads during cooldown: must NOT retry.
+	for i := 0; i < 3; i++ {
+		if _, err := client.Load(context.Background()); err != nil {
+			t.Fatalf("cooldown Load %d: %v", i, err)
+		}
+	}
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Errorf("hits after cooldown Loads = %d, want 2 (no retries during cooldown)", got)
+	}
+}
+
 func TestMarketplaceClientNoCacheNoServer(t *testing.T) {
 	// Unreachable URL, no prior cache → must return error.
 	client := NewMarketplaceClient("http://127.0.0.1:1/no-such", 1*time.Hour)
@@ -423,6 +477,82 @@ func TestInstallFromMarketplaceAlreadyInstalled(t *testing.T) {
 	err := InstallFromMarketplace(shannonDir, entry, locks)
 	if !errors.Is(err, ErrSkillAlreadyInstalled) {
 		t.Errorf("expected ErrSkillAlreadyInstalled, got: %v", err)
+	}
+}
+
+// makeFixtureRepoSubdir creates a fixture repo where SKILL.md lives under
+// skills/<slug>/ rather than at the repo root, plus an unrelated sibling
+// directory that must NOT end up in the installed skill. Used to exercise
+// the sparse-checkout branch of InstallFromMarketplace.
+func makeFixtureRepoSubdir(t *testing.T, slug, skillContent string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := runGit(dir, "init", "-q", "-b", "main"); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	mustWrite(t, filepath.Join(dir, "skills", slug, "SKILL.md"), skillContent)
+	mustWriteExec(t, filepath.Join(dir, "skills", slug, "scripts", "hello.sh"), "#!/bin/sh\necho hi")
+	// Sibling skill that must not bleed into the install.
+	mustWrite(t, filepath.Join(dir, "skills", "other", "SKILL.md"), "---\nname: other\ndescription: x\n---\n")
+	// Unrelated top-level file.
+	mustWrite(t, filepath.Join(dir, "README.md"), "# monorepo")
+
+	for _, args := range [][]string{
+		{"config", "user.email", "test@example.com"},
+		{"config", "user.name", "Test"},
+		{"config", "commit.gpgsign", "false"},
+		{"add", "."},
+		{"commit", "-q", "-m", "init"},
+	} {
+		if err := runGit(dir, args...); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+	return dir
+}
+
+func TestInstallFromMarketplaceSubdirectory(t *testing.T) {
+	repo := makeFixtureRepoSubdir(t, "demo", "---\nname: demo\ndescription: d\n---\nbody")
+	shannonDir := t.TempDir()
+
+	entry := MarketplaceEntry{
+		Slug:     "demo",
+		Name:     "demo",
+		Repo:     "file://" + repo,
+		RepoPath: "skills/demo",
+		Ref:      "main",
+	}
+
+	if err := InstallFromMarketplace(shannonDir, entry, NewSlugLocks()); err != nil {
+		t.Fatalf("InstallFromMarketplace: %v", err)
+	}
+
+	installedRoot := filepath.Join(shannonDir, "skills", "demo")
+
+	// SKILL.md lands at the top of the installed dir, not nested under skills/demo.
+	if _, err := os.Stat(filepath.Join(installedRoot, "SKILL.md")); err != nil {
+		t.Errorf("installed SKILL.md missing: %v", err)
+	}
+
+	// Helper script survives and keeps its executable bit.
+	scriptInfo, err := os.Stat(filepath.Join(installedRoot, "scripts", "hello.sh"))
+	if err != nil {
+		t.Errorf("scripts/hello.sh missing: %v", err)
+	} else if scriptInfo.Mode().Perm()&0100 == 0 {
+		t.Errorf("scripts/hello.sh lost its executable bit: mode = %v", scriptInfo.Mode().Perm())
+	}
+
+	// Unrelated siblings and top-level files must NOT be copied in.
+	mustNotExist := []string{
+		filepath.Join(installedRoot, "README.md"),
+		filepath.Join(installedRoot, "skills"), // no nested skills/ dir
+		filepath.Join(installedRoot, "other"),
+		filepath.Join(installedRoot, ".git"),
+	}
+	for _, p := range mustNotExist {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s should not exist in subdirectory install, got err = %v", p, err)
+		}
 	}
 }
 

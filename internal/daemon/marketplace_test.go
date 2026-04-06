@@ -488,6 +488,128 @@ func firstN(s string, n int) string {
 	return s[:n]
 }
 
+// TestHandleMarketplaceNilDepsReturns500 verifies the nil-deps guard
+// in every marketplace handler. Matches the nil-safety contract of
+// resolveRegistryURL in the constructor: tests that build Server with
+// nil deps must not panic on handler invocation.
+func TestHandleMarketplaceNilDepsReturns500(t *testing.T) {
+	s := &Server{
+		deps:        nil,
+		marketplace: skills.NewMarketplaceClient("http://127.0.0.1:1/unused", 1*time.Hour),
+		slugLocks:   skills.NewSlugLocks(),
+	}
+
+	cases := []struct {
+		name string
+		fn   func(http.ResponseWriter, *http.Request)
+		path string
+		slug string // "" if no path var
+	}{
+		{"list", s.handleMarketplaceList, "/skills/marketplace", ""},
+		{"detail", s.handleMarketplaceDetail, "/skills/marketplace/entry/demo", "demo"},
+		{"install", s.handleMarketplaceInstall, "/skills/marketplace/install/demo", "demo"},
+		{"usage", s.handleSkillUsage, "/skills/demo/usage", ""}, // usage uses name, not slug
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", tc.path, nil)
+			if tc.slug != "" {
+				req.SetPathValue("slug", tc.slug)
+			}
+			if tc.name == "usage" {
+				req.SetPathValue("name", "demo")
+			}
+			rr := httptest.NewRecorder()
+			// Must not panic. Must return 500.
+			defer func() {
+				if p := recover(); p != nil {
+					t.Fatalf("%s handler panicked with nil deps: %v", tc.name, p)
+				}
+			}()
+			tc.fn(rr, req)
+			if rr.Code != http.StatusInternalServerError {
+				t.Errorf("%s: status = %d, want 500", tc.name, rr.Code)
+			}
+		})
+	}
+}
+
+// TestHandleMarketplaceDetailPreviewFieldAlwaysPresent verifies the
+// preview field is present in the JSON schema regardless of install
+// state. Without this, uninstalled skills would have no preview key,
+// breaking Desktop clients that depend on the field's existence.
+func TestHandleMarketplaceDetailPreviewFieldAlwaysPresent(t *testing.T) {
+	s, _ := newTestServerWithMarketplace(t, `{"version":1,"skills":[{"slug":"demo","name":"demo","description":"d","author":"a","repo":"r"}]}`)
+
+	req := httptest.NewRequest("GET", "/skills/marketplace/entry/demo", nil)
+	req.SetPathValue("slug", "demo")
+	rr := httptest.NewRecorder()
+	s.handleMarketplaceDetail(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d", rr.Code)
+	}
+
+	// Unmarshal into a map so we can distinguish "missing key" from
+	// "empty string". A struct would silently zero-value either case.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := raw["preview"]; !ok {
+		t.Errorf("preview field should be present in JSON schema for uninstalled skills, got keys: %v", mapKeys(raw))
+	}
+	if _, ok := raw["installed"]; !ok {
+		t.Errorf("installed field should be present in JSON schema, got keys: %v", mapKeys(raw))
+	}
+}
+
+func mapKeys(m map[string]json.RawMessage) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+// TestHandleMarketplaceInstallGitSymlinkMaps422 verifies that a git
+// payload containing a symlink surfaces as 422 (invalid payload), not
+// 500. Pre-fix, stageCleanPayload returned a bare error that fell
+// through to the default handler branch and got classified as 500.
+// The fix wraps the error with ErrInvalidSkillPayload in installFromGit.
+func TestHandleMarketplaceInstallGitSymlinkMaps422(t *testing.T) {
+	// Fixture git repo with a symlink.
+	repo := t.TempDir()
+	if err := daemonTestRunGit(repo, "init", "-q", "-b", "main"); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	daemonTestWriteFile(t, filepath.Join(repo, "SKILL.md"), "---\nname: demo\ndescription: d\n---\n")
+	// Create a symlink alongside SKILL.md.
+	if err := os.Symlink("/etc/passwd", filepath.Join(repo, "evil")); err != nil {
+		t.Skipf("symlink unsupported on this filesystem: %v", err)
+	}
+	daemonTestRunGit(repo, "config", "user.email", "t@e.com")
+	daemonTestRunGit(repo, "config", "user.name", "t")
+	daemonTestRunGit(repo, "config", "commit.gpgsign", "false")
+	daemonTestRunGit(repo, "add", ".")
+	daemonTestRunGit(repo, "commit", "-q", "-m", "init")
+
+	registryJSON := fmt.Sprintf(`{
+		"version":1,
+		"skills":[{"slug":"demo","name":"demo","description":"d","author":"a","repo":"file://%s","ref":"main"}]
+	}`, repo)
+	s, _ := newTestServerWithMarketplace(t, registryJSON)
+
+	req := httptest.NewRequest("POST", "/skills/marketplace/install/demo", nil)
+	req.SetPathValue("slug", "demo")
+	rr := httptest.NewRecorder()
+	s.handleMarketplaceInstall(rr, req)
+
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Errorf("status = %d, want 422 (symlink in git payload → invalid payload), body = %s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestHandleSkillUsageEmpty(t *testing.T) {
 	s, _ := newTestServerWithMarketplace(t, `{"version":1,"skills":[]}`)
 

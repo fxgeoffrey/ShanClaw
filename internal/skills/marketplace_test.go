@@ -511,6 +511,35 @@ func TestExtractZipToSkillRejectsZipSlip(t *testing.T) {
 	}
 }
 
+// TestExtractZipToSkillZipBombActualBytes verifies the zip-bomb guard
+// counts ACTUAL decompressed bytes, not the attacker-controlled
+// UncompressedSize64 field. Regression test for the pre-fix bypass.
+func TestExtractZipToSkillZipBombActualBytes(t *testing.T) {
+	// Temporarily shrink the uncompressed cap to 512 bytes so a small
+	// fixture can trip the guard without allocating hundreds of MB.
+	original := maxZipUncompressedBytes
+	maxZipUncompressedBytes = 512
+	defer func() { maxZipUncompressedBytes = original }()
+
+	// ~1060 actual bytes across two entries, well over the 512 cap.
+	zipBytes := makeZipFixture(t, []zipFileSpec{
+		{name: "SKILL.md", body: "---\nname: demo\ndescription: d\n---\n"},
+		{name: "payload.txt", body: strings.Repeat("x", 1024)},
+	})
+
+	destDir := filepath.Join(t.TempDir(), "stage")
+	err := extractZipToSkill(bytes.NewReader(zipBytes), destDir)
+	if err == nil {
+		t.Fatal("expected zip-bomb guard to fire, got nil")
+	}
+	if !strings.Contains(err.Error(), "uncompressed size exceeds") {
+		t.Errorf("error should mention uncompressed size cap, got: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(destDir, "SKILL.md")); statErr == nil {
+		t.Error("stage dir should be cleaned up after zip-bomb rejection")
+	}
+}
+
 func TestExtractZipToSkillRejectsSizeCap(t *testing.T) {
 	// Build a tiny zip but feed it through a reader capped tinier than the
 	// compressed size. Simulates a server returning more bytes than the cap.
@@ -566,7 +595,7 @@ func TestInstallFromMarketplaceSuccess(t *testing.T) {
 	}
 	locks := NewSlugLocks()
 
-	if err := InstallFromMarketplace(shannonDir, entry, locks); err != nil {
+	if err := InstallFromMarketplace(context.Background(), shannonDir, entry, locks); err != nil {
 		t.Fatalf("InstallFromMarketplace: %v", err)
 	}
 
@@ -584,7 +613,7 @@ func TestInstallFromMarketplaceNameMismatch(t *testing.T) {
 	shannonDir := t.TempDir()
 
 	entry := MarketplaceEntry{Slug: "demo", Name: "demo", Repo: "file://" + repo, Ref: "main"}
-	err := InstallFromMarketplace(shannonDir, entry, NewSlugLocks())
+	err := InstallFromMarketplace(context.Background(), shannonDir, entry, NewSlugLocks())
 	if err == nil || !errors.Is(err, ErrInvalidSkillPayload) {
 		t.Errorf("expected ErrInvalidSkillPayload, got: %v", err)
 	}
@@ -601,7 +630,7 @@ func TestInstallFromMarketplaceBlocksMalicious(t *testing.T) {
 		Repo:     "file:///does/not/matter",
 		Security: SecurityScan{VirusTotal: "malicious"},
 	}
-	err := InstallFromMarketplace(shannonDir, entry, NewSlugLocks())
+	err := InstallFromMarketplace(context.Background(), shannonDir, entry, NewSlugLocks())
 	if !errors.Is(err, ErrMaliciousSkill) {
 		t.Errorf("expected ErrMaliciousSkill, got: %v", err)
 	}
@@ -612,10 +641,10 @@ func TestInstallFromMarketplaceAlreadyInstalled(t *testing.T) {
 	shannonDir := t.TempDir()
 	entry := MarketplaceEntry{Slug: "demo", Name: "demo", Repo: "file://" + repo, Ref: "main"}
 	locks := NewSlugLocks()
-	if err := InstallFromMarketplace(shannonDir, entry, locks); err != nil {
+	if err := InstallFromMarketplace(context.Background(), shannonDir, entry, locks); err != nil {
 		t.Fatalf("first install: %v", err)
 	}
-	err := InstallFromMarketplace(shannonDir, entry, locks)
+	err := InstallFromMarketplace(context.Background(), shannonDir, entry, locks)
 	if !errors.Is(err, ErrSkillAlreadyInstalled) {
 		t.Errorf("expected ErrSkillAlreadyInstalled, got: %v", err)
 	}
@@ -664,7 +693,7 @@ func TestInstallFromMarketplaceSubdirectory(t *testing.T) {
 		Ref:      "main",
 	}
 
-	if err := InstallFromMarketplace(shannonDir, entry, NewSlugLocks()); err != nil {
+	if err := InstallFromMarketplace(context.Background(), shannonDir, entry, NewSlugLocks()); err != nil {
 		t.Fatalf("InstallFromMarketplace: %v", err)
 	}
 
@@ -717,7 +746,7 @@ func TestInstallFromMarketplaceZipSuccess(t *testing.T) {
 		DownloadURL: ts.URL,
 	}
 
-	if err := InstallFromMarketplace(shannonDir, entry, NewSlugLocks()); err != nil {
+	if err := InstallFromMarketplace(context.Background(), shannonDir, entry, NewSlugLocks()); err != nil {
 		t.Fatalf("InstallFromMarketplace: %v", err)
 	}
 
@@ -749,7 +778,7 @@ func TestInstallFromMarketplaceZipNameMismatch(t *testing.T) {
 	shannonDir := t.TempDir()
 	entry := MarketplaceEntry{Slug: "expected", Name: "expected", DownloadURL: ts.URL}
 
-	err := InstallFromMarketplace(shannonDir, entry, NewSlugLocks())
+	err := InstallFromMarketplace(context.Background(), shannonDir, entry, NewSlugLocks())
 	if err == nil || !errors.Is(err, ErrInvalidSkillPayload) {
 		t.Errorf("expected ErrInvalidSkillPayload for name mismatch, got: %v", err)
 	}
@@ -768,7 +797,7 @@ func TestInstallFromMarketplaceZipMaliciousBlocked(t *testing.T) {
 		DownloadURL: "http://127.0.0.1:1/never-called",
 		Security:    SecurityScan{OpenClaw: "malicious"},
 	}
-	err := InstallFromMarketplace(shannonDir, entry, NewSlugLocks())
+	err := InstallFromMarketplace(context.Background(), shannonDir, entry, NewSlugLocks())
 	if !errors.Is(err, ErrMaliciousSkill) {
 		t.Errorf("expected ErrMaliciousSkill, got: %v", err)
 	}
@@ -784,7 +813,7 @@ func TestInstallFromMarketplaceZipUpstreamFailure(t *testing.T) {
 	shannonDir := t.TempDir()
 	entry := MarketplaceEntry{Slug: "demo", Name: "demo", DownloadURL: ts.URL}
 
-	err := InstallFromMarketplace(shannonDir, entry, NewSlugLocks())
+	err := InstallFromMarketplace(context.Background(), shannonDir, entry, NewSlugLocks())
 	if !errors.Is(err, ErrMarketplaceUpstreamFailure) {
 		t.Errorf("expected ErrMarketplaceUpstreamFailure, got: %v", err)
 	}
@@ -796,7 +825,7 @@ func TestInstallFromMarketplaceNoTransport(t *testing.T) {
 	shannonDir := t.TempDir()
 	entry := MarketplaceEntry{Slug: "demo", Name: "demo"}
 
-	err := InstallFromMarketplace(shannonDir, entry, NewSlugLocks())
+	err := InstallFromMarketplace(context.Background(), shannonDir, entry, NewSlugLocks())
 	if err == nil || !errors.Is(err, ErrInvalidSkillPayload) {
 		t.Errorf("expected ErrInvalidSkillPayload, got: %v", err)
 	}
@@ -819,7 +848,7 @@ func TestInstallFromMarketplaceConcurrentSameSlug(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			results <- InstallFromMarketplace(shannonDir, entry, locks)
+			results <- InstallFromMarketplace(context.Background(), shannonDir, entry, locks)
 		}()
 	}
 	wg.Wait()

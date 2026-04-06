@@ -53,6 +53,20 @@ type Server struct {
 	slugLocks   *skills.SlugLocks
 }
 
+// requireDeps returns true if s.deps is non-nil, otherwise writes a 500
+// and returns false. Marketplace handlers dereference s.deps.ShannonDir
+// and s.deps.AgentsDir; without this guard they'd panic when the server
+// is constructed with nil deps (which some existing tests and callers
+// do — NewServer stays nil-safe via resolveRegistryURL below, so the
+// handlers must match that contract).
+func (s *Server) requireDeps(w http.ResponseWriter) bool {
+	if s == nil || s.deps == nil {
+		writeError(w, http.StatusInternalServerError, "daemon not fully initialized")
+		return false
+	}
+	return true
+}
+
 // resolveRegistryURL returns the configured marketplace registry URL, falling
 // back to the public default. Tolerates nil deps / nil Config so tests that
 // construct NewServer with nil deps continue to work.
@@ -1733,6 +1747,9 @@ func (s *Server) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {
 // --- Marketplace handlers ---
 
 func (s *Server) handleMarketplaceList(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDeps(w) {
+		return
+	}
 	idx, err := s.marketplace.Load(r.Context())
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("marketplace unavailable: %v", err))
@@ -1773,6 +1790,9 @@ func (s *Server) handleMarketplaceList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSkillUsage(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDeps(w) {
+		return
+	}
 	name := r.PathValue("name")
 	if err := skills.ValidateSkillName(name); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -1790,6 +1810,9 @@ func (s *Server) handleSkillUsage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMarketplaceInstall(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDeps(w) {
+		return
+	}
 	slug := r.PathValue("slug")
 	if err := skills.ValidateSkillName(slug); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -1813,7 +1836,7 @@ func (s *Server) handleMarketplaceInstall(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	err = skills.InstallFromMarketplace(s.deps.ShannonDir, *entry, s.slugLocks)
+	err = skills.InstallFromMarketplace(r.Context(), s.deps.ShannonDir, *entry, s.slugLocks)
 	switch {
 	case err == nil:
 		// Load the freshly installed skill so the response body reflects
@@ -1852,6 +1875,9 @@ func (s *Server) handleMarketplaceInstall(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleMarketplaceDetail(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDeps(w) {
+		return
+	}
 	slug := r.PathValue("slug")
 	if err := skills.ValidateSkillName(slug); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -1882,11 +1908,12 @@ func (s *Server) handleMarketplaceDetail(w http.ResponseWriter, r *http.Request)
 
 	// Response wraps the registry entry plus live state. Preview holds the
 	// installed SKILL.md body when present — empty string otherwise, so the
-	// field is always part of the schema.
+	// field is always part of the schema. NO omitempty so Desktop clients
+	// can rely on the field's existence regardless of install state.
 	type detailResponse struct {
 		skills.MarketplaceEntry
 		Installed bool   `json:"installed"`
-		Preview   string `json:"preview,omitempty"`
+		Preview   string `json:"preview"`
 	}
 
 	resp := detailResponse{MarketplaceEntry: *entry}

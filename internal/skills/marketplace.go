@@ -11,12 +11,33 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 )
+
+// marketplaceDownloadClient is the HTTP client used for zip-transport
+// installs. Separate from the MarketplaceClient's registry client so
+// downloads can tolerate slower upstream responses, but still has a
+// 2-minute ceiling as a safety floor if the caller's context has no
+// deadline.
+var marketplaceDownloadClient = &http.Client{Timeout: 2 * time.Minute}
+
+// runGitCtx is a context-aware variant of runGit from api.go. Lets
+// InstallFromMarketplace cancel in-flight clones when the request
+// context is canceled.
+func runGitCtx(ctx context.Context, dir string, args ...string) error {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
 
 // RegistryIndex is the top-level JSON document served by the marketplace
 // registry repo. Field names match the schema in
@@ -172,6 +193,11 @@ var (
 // Both paths share the same validation rules, slug lock, sentinel errors,
 // and cleanup guarantees.
 //
+// ctx is propagated into the transport layer: git clone runs under
+// exec.CommandContext, zip downloads run under an http.Request with the
+// same context. Cancellation aborts the in-flight operation and cleans
+// up staging dirs on the way out.
+//
 // Steps common to both transports:
 //  1. Validate slug.
 //  2. Security gate (malicious → ErrMaliciousSkill).
@@ -182,7 +208,7 @@ var (
 //  7. Atomic rename stage → ~/.shannon/skills/<slug>/.
 //
 // All failures clean up temp directories. No partial installs ever remain.
-func InstallFromMarketplace(shannonDir string, entry MarketplaceEntry, locks *SlugLocks) error {
+func InstallFromMarketplace(ctx context.Context, shannonDir string, entry MarketplaceEntry, locks *SlugLocks) error {
 	if err := ValidateSkillName(entry.Slug); err != nil {
 		return err
 	}
@@ -214,17 +240,18 @@ func InstallFromMarketplace(shannonDir string, entry MarketplaceEntry, locks *Sl
 	// the RemoveAll is a no-op.
 	defer os.RemoveAll(stageDir)
 
-	// Transport dispatch: git path preserves the exact behavior from
-	// earlier tasks; zip path is new and uses extractZipToSkill.
+	// Transport dispatch: git path clones via exec.CommandContext so
+	// cancellation aborts in-flight clones; zip path passes ctx to the
+	// http.Request so cancellation aborts in-flight downloads.
 	if entry.Repo != "" {
-		if err := installFromGit(entry, stageDir, tmpRoot); err != nil {
+		if err := installFromGit(ctx, entry, stageDir, tmpRoot); err != nil {
 			return err
 		}
 	} else {
 		// Remove the empty stageDir MkdirTemp created; extractZipToSkill
 		// recreates it inside its own cleanup guarantees.
 		os.RemoveAll(stageDir)
-		if err := installFromZip(entry, stageDir); err != nil {
+		if err := installFromZip(ctx, entry, stageDir); err != nil {
 			return err
 		}
 	}
@@ -256,9 +283,11 @@ func InstallFromMarketplace(shannonDir string, entry MarketplaceEntry, locks *Sl
 
 // installFromGit clones entry.Repo into a temp dir, selects the right
 // subtree (entry.RepoPath or the clone root), and stages a clean copy
-// into stageDir. Preserves the exact behavior from before the zip
-// dispatch was added.
-func installFromGit(entry MarketplaceEntry, stageDir, tmpRoot string) error {
+// into stageDir. Git subprocesses run under ctx so cancellation
+// propagates. Payload-level validation errors (symlink, walk failure)
+// are wrapped as ErrInvalidSkillPayload so the handler maps them to
+// 422, matching the design doc's error matrix.
+func installFromGit(ctx context.Context, entry MarketplaceEntry, stageDir, tmpRoot string) error {
 	cloneDir, err := os.MkdirTemp(tmpRoot, "skill-clone-"+entry.Slug+"-*")
 	if err != nil {
 		return fmt.Errorf("create clone dir: %w", err)
@@ -270,14 +299,14 @@ func installFromGit(entry MarketplaceEntry, stageDir, tmpRoot string) error {
 		ref = "main"
 	}
 	if entry.RepoPath == "" {
-		if err := runGit(cloneDir, "clone", "--depth=1", "--branch", ref, entry.Repo, "."); err != nil {
+		if err := runGitCtx(ctx, cloneDir, "clone", "--depth=1", "--branch", ref, entry.Repo, "."); err != nil {
 			return fmt.Errorf("%w: git clone: %v", ErrMarketplaceUpstreamFailure, err)
 		}
 	} else {
-		if err := runGit(cloneDir, "clone", "--depth=1", "--filter=blob:none", "--sparse", "--branch", ref, entry.Repo, "."); err != nil {
+		if err := runGitCtx(ctx, cloneDir, "clone", "--depth=1", "--filter=blob:none", "--sparse", "--branch", ref, entry.Repo, "."); err != nil {
 			return fmt.Errorf("%w: git clone: %v", ErrMarketplaceUpstreamFailure, err)
 		}
-		if err := runGit(cloneDir, "sparse-checkout", "set", entry.RepoPath); err != nil {
+		if err := runGitCtx(ctx, cloneDir, "sparse-checkout", "set", entry.RepoPath); err != nil {
 			return fmt.Errorf("%w: git sparse-checkout: %v", ErrMarketplaceUpstreamFailure, err)
 		}
 	}
@@ -290,21 +319,26 @@ func installFromGit(entry MarketplaceEntry, stageDir, tmpRoot string) error {
 	// Remove the empty stageDir MkdirTemp created before calling this
 	// function; stageCleanPayload recreates it.
 	os.RemoveAll(stageDir)
-	return stageCleanPayload(srcDir, stageDir)
+	if err := stageCleanPayload(srcDir, stageDir); err != nil {
+		// Payload-level failures (symlinks, walk errors) are client-
+		// visible invalid payloads, not upstream or internal errors.
+		return fmt.Errorf("%w: %v", ErrInvalidSkillPayload, err)
+	}
+	return nil
 }
 
 // installFromZip fetches entry.DownloadURL and extracts it into stageDir
 // via extractZipToSkill. HTTP failures surface as
-// ErrMarketplaceUpstreamFailure so the handler maps to 502.
-func installFromZip(entry MarketplaceEntry, stageDir string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
+// ErrMarketplaceUpstreamFailure so the handler maps to 502. Uses the
+// caller's ctx directly so client disconnect or daemon shutdown aborts
+// the in-flight download. marketplaceDownloadClient provides a 2-minute
+// safety ceiling when ctx has no deadline.
+func installFromZip(ctx context.Context, entry MarketplaceEntry, stageDir string) error {
 	req, err := http.NewRequestWithContext(ctx, "GET", entry.DownloadURL, nil)
 	if err != nil {
 		return fmt.Errorf("%w: build download request: %v", ErrMarketplaceUpstreamFailure, err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := marketplaceDownloadClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("%w: download: %v", ErrMarketplaceUpstreamFailure, err)
 	}
@@ -314,11 +348,8 @@ func installFromZip(entry MarketplaceEntry, stageDir string) error {
 	}
 
 	if err := extractZipToSkill(resp.Body, stageDir); err != nil {
-		// Differentiate zip parse/extract errors (local) from upstream.
-		// extractZipToSkill itself returns local errors; only the fetch
-		// above is "upstream". We leave the error unwrapped so callers
-		// see either ErrInvalidSkillPayload (if we wrap it below) or a
-		// bare error that maps to 500 via the default handler branch.
+		// Payload-level failures (symlink, zip-slip, zip-bomb, bad
+		// archive) are client-visible invalid payloads. Mapped to 422.
 		return fmt.Errorf("%w: %v", ErrInvalidSkillPayload, err)
 	}
 	return nil
@@ -326,10 +357,12 @@ func installFromZip(entry MarketplaceEntry, stageDir string) error {
 
 // Caps for zip-based skill installs. 50 MB is more than generous for
 // any realistic skill (ontology was 12 KB); 200 MB uncompressed guards
-// against zip bombs.
-const (
-	maxZipCompressedBytes   = 50 * 1024 * 1024
-	maxZipUncompressedBytes = 200 * 1024 * 1024
+// against zip bombs. Variables (not consts) so tests can set a small
+// cap to exercise the guard without allocating 200 MB of in-memory
+// content.
+var (
+	maxZipCompressedBytes   int64 = 50 * 1024 * 1024
+	maxZipUncompressedBytes int64 = 200 * 1024 * 1024
 )
 
 // extractZipToSkill reads a zip archive from body and extracts it into
@@ -380,14 +413,15 @@ func extractZipToSkill(body io.Reader, destDir string) error {
 			return fmt.Errorf("resolve dest dir: %w", err)
 		}
 
-		var totalUncompressed int64
-		for _, f := range zr.File {
-			// Zip-bomb guard: track total uncompressed size.
-			totalUncompressed += int64(f.UncompressedSize64)
-			if totalUncompressed > maxZipUncompressedBytes {
-				return fmt.Errorf("zip uncompressed size exceeds %d bytes", maxZipUncompressedBytes)
-			}
+		// Zip-bomb guard: bound the TOTAL actual bytes decompressed
+		// across all entries, using a LimitReader that counts real
+		// bytes read — not the attacker-controlled UncompressedSize64
+		// in the zip header. This prevents a malicious archive from
+		// declaring 0-byte entries and then streaming gigabytes into
+		// memory via ReadAll.
+		remaining := maxZipUncompressedBytes
 
+		for _, f := range zr.File {
 			// Symlink rejection.
 			if f.Mode()&os.ModeSymlink != 0 {
 				return fmt.Errorf("unsupported symlink in skill payload: %s", f.Name)
@@ -433,17 +467,23 @@ func extractZipToSkill(body io.Reader, destDir string) error {
 				return fmt.Errorf("mkdir parent of %q: %w", destPath, err)
 			}
 
-			// Read and write with mode preservation (masked to 0755,
-			// owner-read guaranteed).
+			// Read with a per-entry budget of (remaining+1) bytes.
+			// If we can read even 1 byte past the budget, the archive
+			// exceeds the uncompressed cap. This tracks ACTUAL bytes
+			// decompressed, not declared size.
 			rc, err := f.Open()
 			if err != nil {
 				return fmt.Errorf("open zip entry %q: %w", f.Name, err)
 			}
-			content, err := io.ReadAll(rc)
+			content, err := io.ReadAll(io.LimitReader(rc, remaining+1))
 			rc.Close()
 			if err != nil {
 				return fmt.Errorf("read zip entry %q: %w", f.Name, err)
 			}
+			if int64(len(content)) > remaining {
+				return fmt.Errorf("zip uncompressed size exceeds %d bytes", maxZipUncompressedBytes)
+			}
+			remaining -= int64(len(content))
 
 			srcMode := f.Mode().Perm() & 0755
 			if srcMode&0400 == 0 {

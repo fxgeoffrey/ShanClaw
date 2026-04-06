@@ -339,6 +339,155 @@ func TestHandleSkillUsage(t *testing.T) {
 	}
 }
 
+// TestE2E_RealClawHubOntology installs the real ontology skill from
+// ClawHub's Convex-hosted zip, exercising the full marketplace handler
+// stack end-to-end with a real HTTP upstream.
+//
+// Gated by SHANNON_E2E_ONTOLOGY=1 so normal test runs don't hit the
+// network. Run with:
+//
+//	SHANNON_E2E_ONTOLOGY=1 go test ./internal/daemon/ -run TestE2E_RealClawHubOntology -v
+//
+// Assertions:
+//   - Install returns 201
+//   - Response body reflects on-disk SKILL.md (frontmatter-derived name)
+//   - SKILL.md, scripts/ontology.py, references/queries.md, references/schema.md all land
+//   - No .git/.github metadata leaks in
+//   - Detail endpoint returns installed=true + preview containing the frontmatter
+//   - Re-install returns 409 with ErrSkillAlreadyInstalled
+//   - Usage endpoint returns empty agents array
+func TestE2E_RealClawHubOntology(t *testing.T) {
+	if os.Getenv("SHANNON_E2E_ONTOLOGY") != "1" {
+		t.Skip("set SHANNON_E2E_ONTOLOGY=1 to run the live ClawHub ontology E2E test")
+	}
+
+	// Build a local registry that points at the real ClawHub download URL.
+	const ontologyZipURL = "https://wry-manatee-359.convex.site/api/v1/download?slug=ontology"
+	registryJSON := fmt.Sprintf(`{
+		"version": 1,
+		"skills": [
+			{
+				"slug": "ontology",
+				"name": "ontology",
+				"description": "Typed knowledge graph for structured agent memory",
+				"author": "oswalpalash",
+				"license": "MIT-0",
+				"download_url": "%s",
+				"homepage": "https://clawhub.ai/oswalpalash/ontology",
+				"downloads": 152759,
+				"stars": 484,
+				"version": "1.0.4"
+			}
+		]
+	}`, ontologyZipURL)
+
+	s, _ := newTestServerWithMarketplace(t, registryJSON)
+
+	// 1. Install
+	req := httptest.NewRequest("POST", "/skills/marketplace/install/ontology", nil)
+	req.SetPathValue("slug", "ontology")
+	rr := httptest.NewRecorder()
+	s.handleMarketplaceInstall(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("install: status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	var meta skills.SkillMeta
+	if err := json.Unmarshal(rr.Body.Bytes(), &meta); err != nil {
+		t.Fatalf("unmarshal install response: %v", err)
+	}
+	if meta.Name != "ontology" {
+		t.Errorf("install response Name = %q, want ontology", meta.Name)
+	}
+	if meta.Description == "" {
+		t.Error("install response Description is empty — expected on-disk SKILL.md description")
+	}
+	t.Logf("install response: name=%q description=%q source=%q",
+		meta.Name, meta.Description, meta.Source)
+
+	// 2. Verify installed tree
+	installedRoot := filepath.Join(s.deps.ShannonDir, "skills", "ontology")
+	expectedFiles := []string{
+		"SKILL.md",
+		"scripts/ontology.py",
+		"references/queries.md",
+		"references/schema.md",
+	}
+	for _, rel := range expectedFiles {
+		p := filepath.Join(installedRoot, rel)
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Errorf("expected file missing: %s — %v", rel, err)
+			continue
+		}
+		if info.Size() == 0 {
+			t.Errorf("expected file empty: %s", rel)
+		}
+		t.Logf("  ✓ %s (%d bytes)", rel, info.Size())
+	}
+
+	// No git metadata leaked in.
+	for _, forbidden := range []string{".git", ".github", ".gitignore", ".gitattributes"} {
+		if _, err := os.Stat(filepath.Join(installedRoot, forbidden)); !os.IsNotExist(err) {
+			t.Errorf("git metadata leaked in: %s", forbidden)
+		}
+	}
+
+	// 3. Detail endpoint now shows installed=true and a preview.
+	req = httptest.NewRequest("GET", "/skills/marketplace/entry/ontology", nil)
+	req.SetPathValue("slug", "ontology")
+	rr = httptest.NewRecorder()
+	s.handleMarketplaceDetail(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("detail: status = %d", rr.Code)
+	}
+	var detail struct {
+		Slug      string `json:"slug"`
+		Installed bool   `json:"installed"`
+		Preview   string `json:"preview"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("unmarshal detail: %v", err)
+	}
+	if !detail.Installed {
+		t.Error("detail: Installed should be true after successful install")
+	}
+	if !strings.Contains(detail.Preview, "name: ontology") {
+		t.Errorf("detail Preview should contain frontmatter 'name: ontology', got first 200 chars: %q",
+			firstN(detail.Preview, 200))
+	}
+
+	// 4. Re-install → 409
+	req = httptest.NewRequest("POST", "/skills/marketplace/install/ontology", nil)
+	req.SetPathValue("slug", "ontology")
+	rr = httptest.NewRecorder()
+	s.handleMarketplaceInstall(rr, req)
+	if rr.Code != http.StatusConflict {
+		t.Errorf("re-install: status = %d, want 409", rr.Code)
+	}
+
+	// 5. Usage endpoint → empty agents (nothing attached)
+	req = httptest.NewRequest("GET", "/skills/ontology/usage", nil)
+	req.SetPathValue("name", "ontology")
+	rr = httptest.NewRecorder()
+	s.handleSkillUsage(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Errorf("usage: status = %d", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), `"agents":[]`) {
+		t.Errorf("usage body should have empty agents array, got: %s", rr.Body.String())
+	}
+}
+
+func firstN(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
 func TestHandleSkillUsageEmpty(t *testing.T) {
 	s, _ := newTestServerWithMarketplace(t, `{"version":1,"skills":[]}`)
 

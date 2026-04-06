@@ -14,7 +14,12 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # macos-latest matches the project's release.yml and the development
+    # target. ShanClaw ships a meaningful set of macOS-only tools
+    # (accessibility, ghostty, screenshot, applescript) whose tests
+    # invoke platform binaries directly; ubuntu runners lack those
+    # binaries and can't run the full suite.
+    runs-on: macos-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -23,13 +28,21 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          # Matches the go directive in go.mod. setup-go treats this as a
-          # minimum version and uses the latest 1.25.x patch available.
-          go-version: '1.25'
+          # Pin to the exact version in go.mod so CI tracks the project's
+          # Go version automatically on every bump. Mirrors release.yml.
+          go-version-file: go.mod
           cache: true
 
       - name: Verify modules
         run: go mod verify
+
+      - name: Check go.mod/go.sum are tidy
+        # Fails loudly when a PR adds an import without running
+        # `go mod tidy`, instead of letting it pass silently and break
+        # downstream consumers of the module.
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
 
       - name: Vet
         run: go vet ./...
@@ -39,7 +52,7 @@ jobs:
 
       - name: Test
         # -count=1 disables the test result cache so CI actually runs
-        # tests rather than replaying cached success from a prior run on
-        # a different input. Per-test timeout is 5 minutes; the whole
-        # suite completes in well under that locally.
+        # tests rather than replaying cached success from a prior run.
+        # -timeout is per-package; the job-level timeout-minutes above
+        # is the real overall ceiling.
         run: go test -count=1 -timeout=5m ./...

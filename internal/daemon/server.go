@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -47,6 +48,37 @@ type Server struct {
 	// SSE handlers register here so POST /approval can find the right broker.
 	pendingBrokers sync.Map // map[string]*ApprovalBroker
 	onReload       func()   // called after config reload to restart watchers/heartbeat
+
+	marketplace *skills.MarketplaceClient
+	slugLocks   *skills.SlugLocks
+}
+
+// requireDeps returns true if s.deps is non-nil, otherwise writes a 500
+// and returns false. Marketplace handlers dereference s.deps.ShannonDir
+// and s.deps.AgentsDir; without this guard they'd panic when the server
+// is constructed with nil deps (which some existing tests and callers
+// do — NewServer stays nil-safe via resolveRegistryURL below, so the
+// handlers must match that contract).
+func (s *Server) requireDeps(w http.ResponseWriter) bool {
+	if s == nil || s.deps == nil {
+		writeError(w, http.StatusInternalServerError, "daemon not fully initialized")
+		return false
+	}
+	return true
+}
+
+// resolveRegistryURL returns the configured marketplace registry URL, falling
+// back to the public default. Tolerates nil deps / nil Config so tests that
+// construct NewServer with nil deps continue to work.
+func resolveRegistryURL(deps *ServerDeps) string {
+	const defaultURL = "https://raw.githubusercontent.com/Kocoro-lab/shanclaw-skill-registry/main/index.json"
+	if deps == nil || deps.Config == nil {
+		return defaultURL
+	}
+	if u := deps.Config.Skills.Marketplace.RegistryURL; u != "" {
+		return u
+	}
+	return defaultURL
 }
 
 var (
@@ -64,6 +96,8 @@ func NewServer(port int, client *Client, deps *ServerDeps, version string) *Serv
 		approvalBroker:         NewApprovalBroker(func(req ApprovalRequest) error { return nil }),
 		eventBus:               NewEventBus(),
 		notifyApprovalResolved: func(p ApprovalResolvedPayload) error { return nil },
+		marketplace:            skills.NewMarketplaceClient(resolveRegistryURL(deps), 1*time.Hour),
+		slugLocks:              skills.NewSlugLocks(),
 	}
 }
 
@@ -123,6 +157,9 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("DELETE /agents/{name}/skills/{skill}", s.handleDeleteSkill)
 	mux.HandleFunc("GET /skills/downloadable", s.handleListDownloadableSkills)
 	mux.HandleFunc("POST /skills/install/{name}", s.handleInstallSkill)
+	mux.HandleFunc("POST /skills/marketplace/install/{slug}", s.handleMarketplaceInstall)
+	mux.HandleFunc("GET /skills/marketplace", s.handleMarketplaceList)
+	mux.HandleFunc("GET /skills/marketplace/entry/{slug}", s.handleMarketplaceDetail)
 	mux.HandleFunc("GET /skills", s.handleListSkills)
 	mux.HandleFunc("GET /skills/{name}", s.handleGetSkill)
 	mux.HandleFunc("PUT /skills/{name}", s.handlePutGlobalSkill)
@@ -134,6 +171,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("PUT /skills/{name}/references/{filename}", s.handlePutSkillReferences)
 	mux.HandleFunc("DELETE /skills/{name}/references/{filename}", s.handleDeleteSkillReferences)
 	mux.HandleFunc("GET /skills/{name}/assets", s.handleListSkillAssets)
+	mux.HandleFunc("GET /skills/{name}/usage", s.handleSkillUsage)
 	mux.HandleFunc("PUT /skills/{name}/assets/{filename}", s.handlePutSkillAssets)
 	mux.HandleFunc("DELETE /skills/{name}/assets/{filename}", s.handleDeleteSkillAssets)
 	mux.HandleFunc("GET /schedules", s.handleListSchedules)
@@ -1704,6 +1742,221 @@ func (s *Server) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// --- Marketplace handlers ---
+
+func (s *Server) handleMarketplaceList(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDeps(w) {
+		return
+	}
+	idx, err := s.marketplace.Load(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("marketplace unavailable: %v", err))
+		return
+	}
+
+	q := r.URL.Query()
+	page := parseIntParam(q.Get("page"), 1)
+	size := parseIntParam(q.Get("size"), 20)
+	sortKey := q.Get("sort")
+	if sortKey == "" {
+		sortKey = "downloads"
+	}
+	search := q.Get("q")
+
+	entries, total := skills.FilterSortPaginate(idx.Skills, search, sortKey, page, size)
+
+	// Mark `installed` flag for entries already on disk.
+	installed := installedSkillSet(s.deps.ShannonDir)
+	type listItem struct {
+		skills.MarketplaceEntry
+		Installed bool `json:"installed"`
+	}
+	items := make([]listItem, 0, len(entries))
+	for _, e := range entries {
+		items = append(items, listItem{MarketplaceEntry: e, Installed: installed[e.Slug]})
+	}
+
+	if s.marketplace.IsStale() {
+		w.Header().Set("X-Cache-Stale", "true")
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"total":  total,
+		"page":   page,
+		"size":   size,
+		"skills": items,
+	})
+}
+
+func (s *Server) handleSkillUsage(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDeps(w) {
+		return
+	}
+	name := r.PathValue("name")
+	if err := skills.ValidateSkillName(name); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	used, err := agents.AgentsAttachingSkill(s.deps.AgentsDir, name)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("read attached skills: %v", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"skill":  name,
+		"agents": used,
+	})
+}
+
+func (s *Server) handleMarketplaceInstall(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDeps(w) {
+		return
+	}
+	slug := r.PathValue("slug")
+	if err := skills.ValidateSkillName(slug); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	idx, err := s.marketplace.Load(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("marketplace unavailable: %v", err))
+		return
+	}
+	var entry *skills.MarketplaceEntry
+	for i := range idx.Skills {
+		if idx.Skills[i].Slug == slug {
+			entry = &idx.Skills[i]
+			break
+		}
+	}
+	if entry == nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("skill %q not found in marketplace", slug))
+		return
+	}
+
+	err = skills.InstallFromMarketplace(r.Context(), s.deps.ShannonDir, *entry, s.slugLocks)
+	switch {
+	case err == nil:
+		// Load the freshly installed skill so the response body reflects
+		// on-disk truth (frontmatter name, description, source) rather
+		// than synthesized data from the registry. Mirrors the pattern
+		// used by handleInstallSkill for Anthropic-repo installs.
+		sources, _ := s.skillSources()
+		list, _ := skills.LoadSkills(sources...)
+		for _, skill := range list {
+			if skill.Name == entry.Slug {
+				writeJSON(w, http.StatusCreated, skill.ToMeta())
+				return
+			}
+		}
+		// Fallback: install succeeded but the skill did not show up in
+		// LoadSkills. This shouldn't happen because InstallFromMarketplace
+		// guarantees a valid SKILL.md on success, but we return a stable
+		// 201 with minimal info rather than misleading the client.
+		writeJSON(w, http.StatusCreated, skills.SkillMeta{
+			Name:        entry.Slug,
+			Description: entry.Description,
+			Source:      "global",
+		})
+	case errors.Is(err, skills.ErrMaliciousSkill):
+		writeError(w, http.StatusForbidden, err.Error())
+	case errors.Is(err, skills.ErrSkillAlreadyInstalled):
+		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, skills.ErrInvalidSkillPayload):
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+	case errors.Is(err, skills.ErrMarketplaceUpstreamFailure):
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("install failed: %v", err))
+	default:
+		// Local disk/staging failures → 500, per spec error matrix.
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("install failed: %v", err))
+	}
+}
+
+func (s *Server) handleMarketplaceDetail(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDeps(w) {
+		return
+	}
+	slug := r.PathValue("slug")
+	if err := skills.ValidateSkillName(slug); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	idx, err := s.marketplace.Load(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("marketplace unavailable: %v", err))
+		return
+	}
+	var entry *skills.MarketplaceEntry
+	for i := range idx.Skills {
+		if idx.Skills[i].Slug == slug {
+			entry = &idx.Skills[i]
+			break
+		}
+	}
+	if entry == nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("skill %q not found in marketplace", slug))
+		return
+	}
+
+	// Consistent with list + install: malicious entries are hidden.
+	if entry.IsMalicious() {
+		writeError(w, http.StatusForbidden, "skill blocked by security scan")
+		return
+	}
+
+	// Response wraps the registry entry plus live state. Preview holds the
+	// installed SKILL.md body when present — empty string otherwise, so the
+	// field is always part of the schema. NO omitempty so Desktop clients
+	// can rely on the field's existence regardless of install state.
+	type detailResponse struct {
+		skills.MarketplaceEntry
+		Installed bool   `json:"installed"`
+		Preview   string `json:"preview"`
+	}
+
+	resp := detailResponse{MarketplaceEntry: *entry}
+	skillDir := filepath.Join(s.deps.ShannonDir, "skills", slug)
+	skillFile := filepath.Join(skillDir, "SKILL.md")
+	if body, err := os.ReadFile(skillFile); err == nil {
+		resp.Installed = true
+		resp.Preview = string(body)
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// parseIntParam parses a positive int query parameter, falling back to def
+// on empty or invalid input. Shared by marketplace handlers.
+func parseIntParam(raw string, def int) int {
+	if raw == "" {
+		return def
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 {
+		return def
+	}
+	return n
+}
+
+// installedSkillSet returns the set of skill slugs present in
+// ~/.shannon/skills/. Missing directory → empty set, no error.
+func installedSkillSet(shannonDir string) map[string]bool {
+	out := make(map[string]bool)
+	entries, err := os.ReadDir(filepath.Join(shannonDir, "skills"))
+	if err != nil {
+		return out
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(shannonDir, "skills", e.Name(), "SKILL.md")); err == nil {
+			out[e.Name()] = true
+		}
+	}
+	return out
 }
 
 // --- Global skills handlers ---

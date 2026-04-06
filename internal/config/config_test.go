@@ -162,3 +162,18 @@ func TestRuntimeConfigForCWD_AppliesOnlySessionSafeProjectOverrides(t *testing.T
 		t.Fatalf("expected local source for allowed_commands, got %#v", src)
 	}
 }
+
+func TestSkillsConfigDefault(t *testing.T) {
+	// Use a scratch HOME so we don't touch the real ~/.shannon/config.yaml.
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := "https://raw.githubusercontent.com/Kocoro-lab/shanclaw-skill-registry/main/index.json"
+	if cfg.Skills.Marketplace.RegistryURL != want {
+		t.Errorf("Skills.Marketplace.RegistryURL = %q, want %q", cfg.Skills.Marketplace.RegistryURL, want)
+	}
+}

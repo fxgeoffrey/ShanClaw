@@ -1,8 +1,13 @@
 package skills
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestRegistryIndexParse(t *testing.T) {
@@ -55,6 +60,75 @@ func TestRegistryIndexParse(t *testing.T) {
 	}
 	if s.Ref != "main" {
 		t.Errorf("Ref = %q, want main", s.Ref)
+	}
+}
+
+func TestMarketplaceClientFetchAndCache(t *testing.T) {
+	var hits int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"version":1,"updated_at":"2026-04-06T00:00:00Z","skills":[{"slug":"demo","name":"demo","description":"d","author":"a","repo":"https://x/y"}]}`))
+	}))
+	defer ts.Close()
+
+	client := NewMarketplaceClient(ts.URL, 1*time.Hour)
+	idx, err := client.Load(context.Background())
+	if err != nil {
+		t.Fatalf("first Load: %v", err)
+	}
+	if len(idx.Skills) != 1 || idx.Skills[0].Slug != "demo" {
+		t.Fatalf("unexpected index: %+v", idx)
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Errorf("expected 1 hit, got %d", got)
+	}
+
+	// Second call within TTL should not hit the server.
+	if _, err := client.Load(context.Background()); err != nil {
+		t.Fatalf("second Load: %v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Errorf("expected still 1 hit after cached load, got %d", got)
+	}
+}
+
+func TestMarketplaceClientStaleOnError(t *testing.T) {
+	var fail int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.LoadInt32(&fail) == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Write([]byte(`{"version":1,"skills":[{"slug":"demo","name":"demo","description":"d","author":"a","repo":"r"}]}`))
+	}))
+	defer ts.Close()
+
+	// Zero TTL so every call tries to refetch.
+	client := NewMarketplaceClient(ts.URL, 0)
+	if _, err := client.Load(context.Background()); err != nil {
+		t.Fatalf("priming Load: %v", err)
+	}
+
+	atomic.StoreInt32(&fail, 1)
+	idx, err := client.Load(context.Background())
+	if err != nil {
+		t.Fatalf("stale Load should succeed, got: %v", err)
+	}
+	if len(idx.Skills) != 1 {
+		t.Errorf("expected 1 skill from stale cache, got %d", len(idx.Skills))
+	}
+	if !client.IsStale() {
+		t.Errorf("expected IsStale() true after serving stale")
+	}
+}
+
+func TestMarketplaceClientNoCacheNoServer(t *testing.T) {
+	// Unreachable URL, no prior cache → must return error.
+	client := NewMarketplaceClient("http://127.0.0.1:1/no-such", 1*time.Hour)
+	_, err := client.Load(context.Background())
+	if err == nil {
+		t.Fatal("expected error with no cache and unreachable URL")
 	}
 }
 

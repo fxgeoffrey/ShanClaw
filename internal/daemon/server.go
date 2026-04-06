@@ -143,6 +143,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("DELETE /agents/{name}/skills/{skill}", s.handleDeleteSkill)
 	mux.HandleFunc("GET /skills/downloadable", s.handleListDownloadableSkills)
 	mux.HandleFunc("POST /skills/install/{name}", s.handleInstallSkill)
+	mux.HandleFunc("POST /skills/marketplace/install/{slug}", s.handleMarketplaceInstall)
 	mux.HandleFunc("GET /skills/marketplace", s.handleMarketplaceList)
 	mux.HandleFunc("GET /skills/marketplace/{slug}", s.handleMarketplaceDetail)
 	mux.HandleFunc("GET /skills", s.handleListSkills)
@@ -1768,6 +1769,49 @@ func (s *Server) handleMarketplaceList(w http.ResponseWriter, r *http.Request) {
 		"size":   size,
 		"skills": items,
 	})
+}
+
+func (s *Server) handleMarketplaceInstall(w http.ResponseWriter, r *http.Request) {
+	slug := r.PathValue("slug")
+	if err := skills.ValidateSkillName(slug); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	idx, err := s.marketplace.Load(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("marketplace unavailable: %v", err))
+		return
+	}
+	var entry *skills.MarketplaceEntry
+	for i := range idx.Skills {
+		if idx.Skills[i].Slug == slug {
+			entry = &idx.Skills[i]
+			break
+		}
+	}
+	if entry == nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("skill %q not found in marketplace", slug))
+		return
+	}
+
+	err = skills.InstallFromMarketplace(s.deps.ShannonDir, *entry, s.slugLocks)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusCreated, skills.SkillMeta{
+			Name:        entry.Slug,
+			Description: entry.Description,
+			Source:      "global",
+		})
+	case errors.Is(err, skills.ErrMaliciousSkill):
+		writeError(w, http.StatusForbidden, err.Error())
+	case errors.Is(err, skills.ErrSkillAlreadyInstalled):
+		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, skills.ErrInvalidSkillPayload):
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+	default:
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("install failed: %v", err))
+	}
 }
 
 func (s *Server) handleMarketplaceDetail(w http.ResponseWriter, r *http.Request) {

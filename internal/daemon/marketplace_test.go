@@ -2,14 +2,39 @@ package daemon
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/skills"
 )
+
+// daemonTestRunGit runs git inside dir for marketplace handler tests.
+// Mirrors the unexported runGit helper in internal/skills/api.go.
+func daemonTestRunGit(dir string, args ...string) error {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	return cmd.Run()
+}
+
+// daemonTestWriteFile writes a file, creating parent dirs. Mirrors
+// mustWrite from the skills package but without needing t *testing.T
+// everywhere.
+func daemonTestWriteFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+}
 
 // newTestServerWithMarketplace constructs a minimal *Server suitable for
 // exercising the marketplace handlers. It sets only the fields those
@@ -100,6 +125,68 @@ func TestHandleMarketplaceDetailNotFound(t *testing.T) {
 	req.SetPathValue("slug", "nope")
 	rr := httptest.NewRecorder()
 	s.handleMarketplaceDetail(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rr.Code)
+	}
+}
+
+func TestHandleMarketplaceInstallSuccess(t *testing.T) {
+	// Fixture git repo for file:// clone.
+	repo := t.TempDir()
+	if err := daemonTestRunGit(repo, "init", "-q", "-b", "main"); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	daemonTestWriteFile(t, filepath.Join(repo, "SKILL.md"), "---\nname: demo\ndescription: d\n---\nbody")
+	daemonTestRunGit(repo, "config", "user.email", "t@e.com")
+	daemonTestRunGit(repo, "config", "user.name", "t")
+	daemonTestRunGit(repo, "config", "commit.gpgsign", "false")
+	daemonTestRunGit(repo, "add", ".")
+	daemonTestRunGit(repo, "commit", "-q", "-m", "init")
+
+	registryJSON := fmt.Sprintf(`{
+		"version":1,
+		"skills":[{"slug":"demo","name":"demo","description":"d","author":"a","repo":"file://%s","ref":"main"}]
+	}`, repo)
+	s, _ := newTestServerWithMarketplace(t, registryJSON)
+
+	req := httptest.NewRequest("POST", "/skills/marketplace/install/demo", nil)
+	req.SetPathValue("slug", "demo")
+	rr := httptest.NewRecorder()
+	s.handleMarketplaceInstall(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(s.deps.ShannonDir, "skills", "demo", "SKILL.md")); err != nil {
+		t.Errorf("installed file missing: %v", err)
+	}
+}
+
+func TestHandleMarketplaceInstallMaliciousBlocked(t *testing.T) {
+	registryJSON := `{
+		"version":1,
+		"skills":[{"slug":"evil","name":"evil","description":"d","author":"a","repo":"file:///x","security":{"virustotal":"malicious"}}]
+	}`
+	s, _ := newTestServerWithMarketplace(t, registryJSON)
+
+	req := httptest.NewRequest("POST", "/skills/marketplace/install/evil", nil)
+	req.SetPathValue("slug", "evil")
+	rr := httptest.NewRecorder()
+	s.handleMarketplaceInstall(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", rr.Code)
+	}
+}
+
+func TestHandleMarketplaceInstallNotFound(t *testing.T) {
+	s, _ := newTestServerWithMarketplace(t, `{"version":1,"skills":[]}`)
+
+	req := httptest.NewRequest("POST", "/skills/marketplace/install/nope", nil)
+	req.SetPathValue("slug", "nope")
+	rr := httptest.NewRecorder()
+	s.handleMarketplaceInstall(rr, req)
 
 	if rr.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", rr.Code)

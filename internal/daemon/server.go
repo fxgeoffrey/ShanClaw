@@ -145,7 +145,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("POST /skills/install/{name}", s.handleInstallSkill)
 	mux.HandleFunc("POST /skills/marketplace/install/{slug}", s.handleMarketplaceInstall)
 	mux.HandleFunc("GET /skills/marketplace", s.handleMarketplaceList)
-	mux.HandleFunc("GET /skills/marketplace/{slug}", s.handleMarketplaceDetail)
+	mux.HandleFunc("GET /skills/marketplace/entry/{slug}", s.handleMarketplaceDetail)
 	mux.HandleFunc("GET /skills", s.handleListSkills)
 	mux.HandleFunc("GET /skills/{name}", s.handleGetSkill)
 	mux.HandleFunc("PUT /skills/{name}", s.handlePutGlobalSkill)
@@ -157,6 +157,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("PUT /skills/{name}/references/{filename}", s.handlePutSkillReferences)
 	mux.HandleFunc("DELETE /skills/{name}/references/{filename}", s.handleDeleteSkillReferences)
 	mux.HandleFunc("GET /skills/{name}/assets", s.handleListSkillAssets)
+	mux.HandleFunc("GET /skills/{name}/usage", s.handleSkillUsage)
 	mux.HandleFunc("PUT /skills/{name}/assets/{filename}", s.handlePutSkillAssets)
 	mux.HandleFunc("DELETE /skills/{name}/assets/{filename}", s.handleDeleteSkillAssets)
 	mux.HandleFunc("GET /schedules", s.handleListSchedules)
@@ -1768,6 +1769,23 @@ func (s *Server) handleMarketplaceList(w http.ResponseWriter, r *http.Request) {
 		"page":   page,
 		"size":   size,
 		"skills": items,
+	})
+}
+
+func (s *Server) handleSkillUsage(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := skills.ValidateSkillName(name); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	used, err := agents.AgentsAttachingSkill(s.deps.AgentsDir, name)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("read attached skills: %v", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"skill":  name,
+		"agents": used,
 	})
 }
 

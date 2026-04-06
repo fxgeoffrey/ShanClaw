@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Kocoro-lab/ShanClaw/internal/agents"
 	"github.com/Kocoro-lab/ShanClaw/internal/skills"
 )
 
@@ -101,7 +102,7 @@ func TestHandleMarketplaceDetail(t *testing.T) {
 	}`
 	s, _ := newTestServerWithMarketplace(t, registryJSON)
 
-	req := httptest.NewRequest("GET", "/skills/marketplace/demo", nil)
+	req := httptest.NewRequest("GET", "/skills/marketplace/entry/demo", nil)
 	req.SetPathValue("slug", "demo")
 	rr := httptest.NewRecorder()
 	s.handleMarketplaceDetail(rr, req)
@@ -121,7 +122,7 @@ func TestHandleMarketplaceDetail(t *testing.T) {
 func TestHandleMarketplaceDetailNotFound(t *testing.T) {
 	s, _ := newTestServerWithMarketplace(t, `{"version":1,"skills":[]}`)
 
-	req := httptest.NewRequest("GET", "/skills/marketplace/nope", nil)
+	req := httptest.NewRequest("GET", "/skills/marketplace/entry/nope", nil)
 	req.SetPathValue("slug", "nope")
 	rr := httptest.NewRecorder()
 	s.handleMarketplaceDetail(rr, req)
@@ -190,6 +191,57 @@ func TestHandleMarketplaceInstallNotFound(t *testing.T) {
 
 	if rr.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", rr.Code)
+	}
+}
+
+func TestHandleSkillUsage(t *testing.T) {
+	s, _ := newTestServerWithMarketplace(t, `{"version":1,"skills":[]}`)
+
+	// Wire up two agents attaching the skill.
+	if err := agents.SetAttachedSkills(s.deps.AgentsDir, "coder", []string{"demo"}); err != nil {
+		t.Fatalf("SetAttachedSkills coder: %v", err)
+	}
+	if err := agents.SetAttachedSkills(s.deps.AgentsDir, "researcher", []string{"demo", "other"}); err != nil {
+		t.Fatalf("SetAttachedSkills researcher: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/skills/demo/usage", nil)
+	req.SetPathValue("name", "demo")
+	rr := httptest.NewRecorder()
+	s.handleSkillUsage(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Skill  string   `json:"skill"`
+		Agents []string `json:"agents"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if body.Skill != "demo" {
+		t.Errorf("Skill = %q", body.Skill)
+	}
+	want := []string{"coder", "researcher"}
+	if len(body.Agents) != 2 || body.Agents[0] != want[0] || body.Agents[1] != want[1] {
+		t.Errorf("Agents = %v, want %v", body.Agents, want)
+	}
+}
+
+func TestHandleSkillUsageEmpty(t *testing.T) {
+	s, _ := newTestServerWithMarketplace(t, `{"version":1,"skills":[]}`)
+
+	req := httptest.NewRequest("GET", "/skills/unused/usage", nil)
+	req.SetPathValue("name", "unused")
+	rr := httptest.NewRecorder()
+	s.handleSkillUsage(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("status = %d", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), `"agents":[]`) {
+		t.Errorf("expected empty agents array in body, got: %s", rr.Body.String())
 	}
 }
 

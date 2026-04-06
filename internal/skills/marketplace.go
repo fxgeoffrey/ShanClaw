@@ -3,6 +3,7 @@ package skills
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -118,6 +119,119 @@ func (c *MarketplaceClient) IsStale() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.stale
+}
+
+// Sentinel errors so daemon handlers can map to exact HTTP statuses without
+// parsing message strings.
+var (
+	ErrSkillAlreadyInstalled = errors.New("skill already installed")
+	ErrMaliciousSkill        = errors.New("skill blocked by security scan")
+	ErrInvalidSkillPayload   = errors.New("invalid skill payload")
+)
+
+// InstallFromMarketplace runs the full install flow for a marketplace entry.
+// Steps match design doc §Install flow:
+//  1. Validate slug.
+//  2. Security gate (malicious → ErrMaliciousSkill).
+//  3. Per-slug lock (serializes concurrent installs for the same slug).
+//  4. Already-installed check (→ ErrSkillAlreadyInstalled).
+//  5. git clone into a clone temp dir (sparse-checkout when RepoPath is set).
+//  6. Select srcDir (entry.RepoPath or clone root).
+//  7. Parse + verify SKILL.md; verify frontmatter name == slug.
+//  8. stageCleanPayload → clean stage dir.
+//  9. Atomic rename stage → ~/.shannon/skills/<slug>/.
+//  10. Remove clone temp dir.
+//
+// All failures clean up temp directories. No partial installs ever remain.
+func InstallFromMarketplace(shannonDir string, entry MarketplaceEntry, locks *SlugLocks) error {
+	if err := ValidateSkillName(entry.Slug); err != nil {
+		return err
+	}
+	if entry.IsMalicious() {
+		return ErrMaliciousSkill
+	}
+
+	unlock := locks.Lock(entry.Slug)
+	defer unlock()
+
+	destDir := filepath.Join(shannonDir, "skills", entry.Slug)
+	if _, err := os.Stat(filepath.Join(destDir, "SKILL.md")); err == nil {
+		return ErrSkillAlreadyInstalled
+	}
+
+	tmpRoot := filepath.Join(shannonDir, "tmp")
+	if err := os.MkdirAll(tmpRoot, 0700); err != nil {
+		return fmt.Errorf("create tmp root: %w", err)
+	}
+
+	cloneDir, err := os.MkdirTemp(tmpRoot, "skill-clone-"+entry.Slug+"-*")
+	if err != nil {
+		return fmt.Errorf("create clone dir: %w", err)
+	}
+	defer os.RemoveAll(cloneDir)
+
+	stageDir, err := os.MkdirTemp(tmpRoot, "skill-stage-"+entry.Slug+"-*")
+	if err != nil {
+		return fmt.Errorf("create stage dir: %w", err)
+	}
+	// stageDir is removed on failure; on success we rename it away so
+	// the RemoveAll is a no-op.
+	defer os.RemoveAll(stageDir)
+
+	// Step 5: git clone (sparse or full, depending on RepoPath).
+	ref := entry.Ref
+	if ref == "" {
+		ref = "main"
+	}
+	if entry.RepoPath == "" {
+		if err := runGit(cloneDir, "clone", "--depth=1", "--branch", ref, entry.Repo, "."); err != nil {
+			return fmt.Errorf("git clone: %w", err)
+		}
+	} else {
+		if err := runGit(cloneDir, "clone", "--depth=1", "--filter=blob:none", "--sparse", "--branch", ref, entry.Repo, "."); err != nil {
+			return fmt.Errorf("git clone: %w", err)
+		}
+		if err := runGit(cloneDir, "sparse-checkout", "set", entry.RepoPath); err != nil {
+			return fmt.Errorf("git sparse-checkout: %w", err)
+		}
+	}
+
+	// Step 6: pick srcDir.
+	srcDir := cloneDir
+	if entry.RepoPath != "" {
+		srcDir = filepath.Join(cloneDir, entry.RepoPath)
+	}
+
+	// Step 7: verify SKILL.md and name.
+	skillFile := filepath.Join(srcDir, "SKILL.md")
+	if _, err := os.Stat(skillFile); err != nil {
+		return fmt.Errorf("%w: SKILL.md missing at %s", ErrInvalidSkillPayload, srcDir)
+	}
+	parsed, err := loadSkillMD(skillFile, entry.Slug, "marketplace")
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidSkillPayload, err)
+	}
+	if parsed.Name != entry.Slug {
+		return fmt.Errorf("%w: frontmatter name %q != slug %q", ErrInvalidSkillPayload, parsed.Name, entry.Slug)
+	}
+
+	// Remove the empty stageDir MkdirTemp created; stageCleanPayload recreates it.
+	os.RemoveAll(stageDir)
+
+	// Step 8: stage clean payload.
+	if err := stageCleanPayload(srcDir, stageDir); err != nil {
+		return err
+	}
+
+	// Step 9: atomic rename into place.
+	if err := os.MkdirAll(filepath.Dir(destDir), 0700); err != nil {
+		return fmt.Errorf("create skills dir: %w", err)
+	}
+	if err := os.Rename(stageDir, destDir); err != nil {
+		return fmt.Errorf("install rename: %w", err)
+	}
+
+	return nil
 }
 
 // stageCleanPayload walks src and copies every regular file into dst,

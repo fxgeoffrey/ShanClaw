@@ -3,6 +3,7 @@ package skills
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -327,6 +328,149 @@ func mustWriteExec(t *testing.T, path, content string) {
 	mustWrite(t, path, content)
 	if err := os.Chmod(path, 0755); err != nil {
 		t.Fatalf("chmod: %v", err)
+	}
+}
+
+// makeFixtureRepo creates a minimal git repository on disk that can be
+// cloned via file:// URLs. Uses the runGit helper from api.go.
+func makeFixtureRepo(t *testing.T, skillContent string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := runGit(dir, "init", "-q", "-b", "main"); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	mustWrite(t, filepath.Join(dir, "SKILL.md"), skillContent)
+	mustWrite(t, filepath.Join(dir, "README.md"), "# demo")
+	if err := runGit(dir, "config", "user.email", "test@example.com"); err != nil {
+		t.Fatalf("git config email: %v", err)
+	}
+	if err := runGit(dir, "config", "user.name", "Test"); err != nil {
+		t.Fatalf("git config name: %v", err)
+	}
+	if err := runGit(dir, "config", "commit.gpgsign", "false"); err != nil {
+		t.Fatalf("git config gpgsign: %v", err)
+	}
+	if err := runGit(dir, "add", "."); err != nil {
+		t.Fatalf("git add: %v", err)
+	}
+	if err := runGit(dir, "commit", "-q", "-m", "init"); err != nil {
+		t.Fatalf("git commit: %v", err)
+	}
+	return dir
+}
+
+func TestInstallFromMarketplaceSuccess(t *testing.T) {
+	repo := makeFixtureRepo(t, "---\nname: demo\ndescription: d\n---\nbody")
+	shannonDir := t.TempDir()
+
+	entry := MarketplaceEntry{
+		Slug: "demo",
+		Name: "demo",
+		Repo: "file://" + repo,
+		Ref:  "main",
+	}
+	locks := NewSlugLocks()
+
+	if err := InstallFromMarketplace(shannonDir, entry, locks); err != nil {
+		t.Fatalf("InstallFromMarketplace: %v", err)
+	}
+
+	installed := filepath.Join(shannonDir, "skills", "demo", "SKILL.md")
+	if _, err := os.Stat(installed); err != nil {
+		t.Errorf("installed SKILL.md missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(shannonDir, "skills", "demo", ".git")); !os.IsNotExist(err) {
+		t.Error(".git should have been excluded from installed skill")
+	}
+}
+
+func TestInstallFromMarketplaceNameMismatch(t *testing.T) {
+	repo := makeFixtureRepo(t, "---\nname: different\ndescription: d\n---\n")
+	shannonDir := t.TempDir()
+
+	entry := MarketplaceEntry{Slug: "demo", Name: "demo", Repo: "file://" + repo, Ref: "main"}
+	err := InstallFromMarketplace(shannonDir, entry, NewSlugLocks())
+	if err == nil || !errors.Is(err, ErrInvalidSkillPayload) {
+		t.Errorf("expected ErrInvalidSkillPayload, got: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(shannonDir, "skills", "demo")); !os.IsNotExist(err) {
+		t.Error("no skill dir should exist after rejected install")
+	}
+}
+
+func TestInstallFromMarketplaceBlocksMalicious(t *testing.T) {
+	shannonDir := t.TempDir()
+	entry := MarketplaceEntry{
+		Slug:     "demo",
+		Name:     "demo",
+		Repo:     "file:///does/not/matter",
+		Security: SecurityScan{VirusTotal: "malicious"},
+	}
+	err := InstallFromMarketplace(shannonDir, entry, NewSlugLocks())
+	if !errors.Is(err, ErrMaliciousSkill) {
+		t.Errorf("expected ErrMaliciousSkill, got: %v", err)
+	}
+}
+
+func TestInstallFromMarketplaceAlreadyInstalled(t *testing.T) {
+	repo := makeFixtureRepo(t, "---\nname: demo\ndescription: d\n---\n")
+	shannonDir := t.TempDir()
+	entry := MarketplaceEntry{Slug: "demo", Name: "demo", Repo: "file://" + repo, Ref: "main"}
+	locks := NewSlugLocks()
+	if err := InstallFromMarketplace(shannonDir, entry, locks); err != nil {
+		t.Fatalf("first install: %v", err)
+	}
+	err := InstallFromMarketplace(shannonDir, entry, locks)
+	if !errors.Is(err, ErrSkillAlreadyInstalled) {
+		t.Errorf("expected ErrSkillAlreadyInstalled, got: %v", err)
+	}
+}
+
+// TestInstallFromMarketplaceConcurrentSameSlug drives two goroutines at the
+// same slug. With the per-slug lock in place, exactly one must succeed and
+// the other must see ErrSkillAlreadyInstalled — no filesystem corruption,
+// no ENOTEMPTY from a half-finished rename.
+func TestInstallFromMarketplaceConcurrentSameSlug(t *testing.T) {
+	repo := makeFixtureRepo(t, "---\nname: demo\ndescription: d\n---\n")
+	shannonDir := t.TempDir()
+	entry := MarketplaceEntry{Slug: "demo", Name: "demo", Repo: "file://" + repo, Ref: "main"}
+	locks := NewSlugLocks()
+
+	const N = 5
+	results := make(chan error, N)
+	var wg sync.WaitGroup
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results <- InstallFromMarketplace(shannonDir, entry, locks)
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	var successes, alreadyInstalled, other int
+	for err := range results {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrSkillAlreadyInstalled):
+			alreadyInstalled++
+		default:
+			other++
+			t.Errorf("unexpected concurrent install error: %v", err)
+		}
+	}
+	if successes != 1 {
+		t.Errorf("expected exactly 1 successful install, got %d", successes)
+	}
+	if alreadyInstalled != N-1 {
+		t.Errorf("expected %d already-installed results, got %d", N-1, alreadyInstalled)
+	}
+
+	// Final state must be a single clean install.
+	if _, err := os.Stat(filepath.Join(shannonDir, "skills", "demo", "SKILL.md")); err != nil {
+		t.Errorf("installed SKILL.md missing after concurrent installs: %v", err)
 	}
 }
 

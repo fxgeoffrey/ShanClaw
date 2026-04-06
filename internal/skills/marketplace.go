@@ -117,6 +117,39 @@ func (c *MarketplaceClient) IsStale() bool {
 	return c.stale
 }
 
+// SlugLocks is a map of per-slug mutexes. The outer mutex protects map access;
+// each per-slug lock serializes install/uninstall/usage-check operations for
+// that slug only. Different slugs never block each other.
+//
+// Usage:
+//
+//	unlock := locks.Lock("my-skill")
+//	defer unlock()
+type SlugLocks struct {
+	outer   sync.Mutex
+	perSlug map[string]*sync.Mutex
+}
+
+// NewSlugLocks creates an empty SlugLocks.
+func NewSlugLocks() *SlugLocks {
+	return &SlugLocks{perSlug: make(map[string]*sync.Mutex)}
+}
+
+// Lock acquires the per-slug mutex and returns a function that releases it.
+// The returned function is safe to call exactly once (typically via defer).
+func (l *SlugLocks) Lock(slug string) func() {
+	l.outer.Lock()
+	m, ok := l.perSlug[slug]
+	if !ok {
+		m = &sync.Mutex{}
+		l.perSlug[slug] = m
+	}
+	l.outer.Unlock()
+
+	m.Lock()
+	return m.Unlock
+}
+
 // FilterSortPaginate applies the marketplace list pipeline to a raw index slice.
 // Returns the page slice plus the total count of entries that matched the
 // filter (used by the API response for client-side pagination controls).

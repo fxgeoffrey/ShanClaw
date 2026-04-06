@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -194,6 +195,64 @@ func sluggs(es []MarketplaceEntry) []string {
 		out[i] = e.Slug
 	}
 	return out
+}
+
+func TestSlugLockSerializesSameSlug(t *testing.T) {
+	locks := NewSlugLocks()
+	var order []string
+	var mu sync.Mutex
+
+	done := make(chan struct{}, 2)
+	start := make(chan struct{})
+
+	go func() {
+		<-start
+		unlock := locks.Lock("alpha")
+		time.Sleep(20 * time.Millisecond)
+		mu.Lock()
+		order = append(order, "A")
+		mu.Unlock()
+		unlock()
+		done <- struct{}{}
+	}()
+	go func() {
+		<-start
+		time.Sleep(5 * time.Millisecond) // start after A has the lock
+		unlock := locks.Lock("alpha")
+		mu.Lock()
+		order = append(order, "B")
+		mu.Unlock()
+		unlock()
+		done <- struct{}{}
+	}()
+
+	close(start)
+	<-done
+	<-done
+	if len(order) != 2 || order[0] != "A" || order[1] != "B" {
+		t.Errorf("expected serialized order [A, B], got %v", order)
+	}
+}
+
+func TestSlugLockDifferentSlugsConcurrent(t *testing.T) {
+	locks := NewSlugLocks()
+
+	unlockA := locks.Lock("alpha")
+	defer unlockA()
+
+	// Locking a different slug must not block.
+	ch := make(chan struct{})
+	go func() {
+		unlock := locks.Lock("bravo")
+		unlock()
+		close(ch)
+	}()
+	select {
+	case <-ch:
+		// good
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("locking a different slug should not block")
+	}
 }
 
 func TestMarketplaceEntryIsMalicious(t *testing.T) {

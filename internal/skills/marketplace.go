@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -115,6 +118,96 @@ func (c *MarketplaceClient) IsStale() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.stale
+}
+
+// stageCleanPayload walks src and copies every regular file into dst,
+// excluding git metadata (.git/, .github/, .gitignore, .gitattributes) at
+// any depth. Symlinks are rejected unconditionally: if the walk encounters
+// one, the function removes dst (cleaning up any partial copy) and returns
+// a 422-worthy error. See design doc §Install flow step 9.
+//
+// Exclusions match on the base name of any path segment, so nested .git dirs
+// are also skipped.
+//
+// File modes are preserved from the source (masked to 0755 to strip any
+// setuid/setgid/sticky bits), so shipped helper scripts keep their
+// executable bit — this matters for community skills like
+// self-improving-agent that ship scripts/activator.sh.
+func stageCleanPayload(src, dst string) error {
+	excluded := map[string]bool{
+		".git":           true,
+		".github":        true,
+		".gitignore":     true,
+		".gitattributes": true,
+	}
+
+	if err := os.MkdirAll(dst, 0700); err != nil {
+		return fmt.Errorf("create stage dir: %w", err)
+	}
+
+	walkErr := filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == src {
+			return nil
+		}
+
+		// Reject symlinks outright. WalkDir gives us the lstat'd entry via
+		// d.Type(), which preserves the Symlink bit.
+		if d.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("unsupported symlink in skill payload: %s", path)
+		}
+
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+
+		// Exclude if any path segment matches.
+		for _, seg := range strings.Split(rel, string(filepath.Separator)) {
+			if excluded[seg] {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+		}
+
+		destPath := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(destPath, 0700)
+		}
+
+		// Preserve source file mode so shipped helper scripts keep their
+		// executable bit. Mask to 0755 so no file can become setuid/setgid/
+		// sticky via install, and ensure owner-read is always set.
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		srcMode := info.Mode().Perm() & 0755
+		if srcMode&0400 == 0 {
+			srcMode |= 0400
+		}
+
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(destPath, content, srcMode); err != nil {
+			return err
+		}
+		// os.WriteFile respects the umask on some platforms; chmod to
+		// guarantee the requested mode lands on disk.
+		return os.Chmod(destPath, srcMode)
+	})
+
+	if walkErr != nil {
+		os.RemoveAll(dst)
+		return walkErr
+	}
+	return nil
 }
 
 // SlugLocks is a map of per-slug mutexes. The outer mutex protects map access;

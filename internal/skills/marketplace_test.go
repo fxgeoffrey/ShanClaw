@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -252,6 +255,78 @@ func TestSlugLockDifferentSlugsConcurrent(t *testing.T) {
 		// good
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("locking a different slug should not block")
+	}
+}
+
+func TestStageCleanPayloadExcludesGit(t *testing.T) {
+	src := t.TempDir()
+	mustWrite(t, filepath.Join(src, "SKILL.md"), "---\nname: demo\ndescription: d\n---\nbody")
+	mustWriteExec(t, filepath.Join(src, "scripts/run.sh"), "#!/bin/sh\necho hi")
+	mustWrite(t, filepath.Join(src, ".git/config"), "[core]")
+	mustWrite(t, filepath.Join(src, ".github/workflows/ci.yml"), "name: ci")
+	mustWrite(t, filepath.Join(src, ".gitignore"), "node_modules")
+
+	dst := filepath.Join(t.TempDir(), "stage")
+	if err := stageCleanPayload(src, dst); err != nil {
+		t.Fatalf("stageCleanPayload: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dst, "SKILL.md")); err != nil {
+		t.Errorf("SKILL.md missing: %v", err)
+	}
+	// Scripts directory must survive AND keep its executable bit. Community
+	// skills like self-improving-agent ship scripts/activator.sh that break
+	// silently if we strip mode during the copy.
+	scriptInfo, err := os.Stat(filepath.Join(dst, "scripts/run.sh"))
+	if err != nil {
+		t.Errorf("scripts/run.sh missing: %v", err)
+	} else if scriptInfo.Mode().Perm()&0100 == 0 {
+		t.Errorf("scripts/run.sh lost its executable bit: mode = %v", scriptInfo.Mode().Perm())
+	}
+	for _, excluded := range []string{".git", ".github", ".gitignore"} {
+		if _, err := os.Stat(filepath.Join(dst, excluded)); !os.IsNotExist(err) {
+			t.Errorf("%s should have been excluded, got err = %v", excluded, err)
+		}
+	}
+}
+
+func TestStageCleanPayloadRejectsSymlinks(t *testing.T) {
+	src := t.TempDir()
+	mustWrite(t, filepath.Join(src, "SKILL.md"), "---\nname: demo\ndescription: d\n---\n")
+	// Create a symlink pointing outside the src tree.
+	if err := os.Symlink("/etc/passwd", filepath.Join(src, "evil")); err != nil {
+		t.Skipf("symlink not supported on this filesystem: %v", err)
+	}
+
+	dst := filepath.Join(t.TempDir(), "stage")
+	err := stageCleanPayload(src, dst)
+	if err == nil {
+		t.Fatal("expected error on symlink, got nil")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Errorf("error should mention symlink, got: %v", err)
+	}
+	// Stage directory must not contain a half-copied payload.
+	if _, statErr := os.Stat(filepath.Join(dst, "SKILL.md")); statErr == nil {
+		t.Error("stage dir should be cleaned up on symlink rejection")
+	}
+}
+
+func mustWrite(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+}
+
+func mustWriteExec(t *testing.T, path, content string) {
+	t.Helper()
+	mustWrite(t, path, content)
+	if err := os.Chmod(path, 0755); err != nil {
+		t.Fatalf("chmod: %v", err)
 	}
 }
 

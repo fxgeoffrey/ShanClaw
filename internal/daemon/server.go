@@ -144,6 +144,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("GET /skills/downloadable", s.handleListDownloadableSkills)
 	mux.HandleFunc("POST /skills/install/{name}", s.handleInstallSkill)
 	mux.HandleFunc("GET /skills/marketplace", s.handleMarketplaceList)
+	mux.HandleFunc("GET /skills/marketplace/{slug}", s.handleMarketplaceDetail)
 	mux.HandleFunc("GET /skills", s.handleListSkills)
 	mux.HandleFunc("GET /skills/{name}", s.handleGetSkill)
 	mux.HandleFunc("PUT /skills/{name}", s.handlePutGlobalSkill)
@@ -1767,6 +1768,26 @@ func (s *Server) handleMarketplaceList(w http.ResponseWriter, r *http.Request) {
 		"size":   size,
 		"skills": items,
 	})
+}
+
+func (s *Server) handleMarketplaceDetail(w http.ResponseWriter, r *http.Request) {
+	slug := r.PathValue("slug")
+	if err := skills.ValidateSkillName(slug); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	idx, err := s.marketplace.Load(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("marketplace unavailable: %v", err))
+		return
+	}
+	for _, e := range idx.Skills {
+		if e.Slug == slug {
+			writeJSON(w, http.StatusOK, e)
+			return
+		}
+	}
+	writeError(w, http.StatusNotFound, fmt.Sprintf("skill %q not found in marketplace", slug))
 }
 
 // parseIntParam parses a positive int query parameter, falling back to def

@@ -69,6 +69,43 @@ func TestHandleMarketplaceList(t *testing.T) {
 	}
 }
 
+func TestHandleMarketplaceDetail(t *testing.T) {
+	registryJSON := `{
+		"version":1,
+		"skills":[{"slug":"demo","name":"demo","description":"d","author":"a","repo":"r","homepage":"https://example.com"}]
+	}`
+	s, _ := newTestServerWithMarketplace(t, registryJSON)
+
+	req := httptest.NewRequest("GET", "/skills/marketplace/demo", nil)
+	req.SetPathValue("slug", "demo")
+	rr := httptest.NewRecorder()
+	s.handleMarketplaceDetail(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var got skills.MarketplaceEntry
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Slug != "demo" || got.Homepage != "https://example.com" {
+		t.Errorf("unexpected body: %+v", got)
+	}
+}
+
+func TestHandleMarketplaceDetailNotFound(t *testing.T) {
+	s, _ := newTestServerWithMarketplace(t, `{"version":1,"skills":[]}`)
+
+	req := httptest.NewRequest("GET", "/skills/marketplace/nope", nil)
+	req.SetPathValue("slug", "nope")
+	rr := httptest.NewRecorder()
+	s.handleMarketplaceDetail(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rr.Code)
+	}
+}
+
 func TestHandleMarketplaceListFiltersMalicious(t *testing.T) {
 	registryJSON := `{
 		"version":1,

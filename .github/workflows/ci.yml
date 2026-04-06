@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Cancel in-progress runs on the same ref when new commits land, so rapid
+# pushes to a PR don't stack parallel test runs.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          # Matches the go directive in go.mod. setup-go treats this as a
+          # minimum version and uses the latest 1.25.x patch available.
+          go-version: '1.25'
+          cache: true
+
+      - name: Verify modules
+        run: go mod verify
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        # -count=1 disables the test result cache so CI actually runs
+        # tests rather than replaying cached success from a prior run on
+        # a different input. Per-test timeout is 5 minutes; the whole
+        # suite completes in well under that locally.
+        run: go test -count=1 -timeout=5m ./...

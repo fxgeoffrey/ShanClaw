@@ -132,6 +132,70 @@ func TestMarketplaceClientNoCacheNoServer(t *testing.T) {
 	}
 }
 
+func TestFilterSortPaginate(t *testing.T) {
+	entries := []MarketplaceEntry{
+		{Slug: "alpha", Name: "alpha", Description: "The first thing", Author: "alice", Downloads: 10, Stars: 5},
+		{Slug: "bravo", Name: "bravo", Description: "Second thing", Author: "bob", Downloads: 100, Stars: 20},
+		{Slug: "charlie", Name: "charlie", Description: "Third thing", Author: "alice", Downloads: 50, Stars: 15},
+		{Slug: "delta", Name: "delta", Description: "Malicious", Author: "mallory", Downloads: 999,
+			Security: SecurityScan{VirusTotal: "malicious"}},
+	}
+
+	// Default sort = downloads desc, malicious excluded.
+	out, total := FilterSortPaginate(entries, "", "downloads", 1, 10)
+	if total != 3 {
+		t.Errorf("total = %d, want 3 (malicious excluded)", total)
+	}
+	if len(out) != 3 {
+		t.Fatalf("len(out) = %d, want 3", len(out))
+	}
+	if out[0].Slug != "bravo" || out[1].Slug != "charlie" || out[2].Slug != "alpha" {
+		t.Errorf("downloads sort order wrong: %v %v %v", out[0].Slug, out[1].Slug, out[2].Slug)
+	}
+
+	// Sort by name asc.
+	out, _ = FilterSortPaginate(entries, "", "name", 1, 10)
+	if out[0].Slug != "alpha" || out[2].Slug != "charlie" {
+		t.Errorf("name sort order wrong: %v", sluggs(out))
+	}
+
+	// Search: matches name, description, author (case-insensitive).
+	out, total = FilterSortPaginate(entries, "ALICE", "downloads", 1, 10)
+	if total != 2 {
+		t.Errorf("alice search total = %d, want 2", total)
+	}
+	out, total = FilterSortPaginate(entries, "third", "downloads", 1, 10)
+	if total != 1 || out[0].Slug != "charlie" {
+		t.Errorf("third search wrong: total=%d, %v", total, sluggs(out))
+	}
+
+	// Pagination: page 2 of size 2, downloads desc.
+	out, total = FilterSortPaginate(entries, "", "downloads", 2, 2)
+	if total != 3 {
+		t.Errorf("page2 total = %d, want 3", total)
+	}
+	if len(out) != 1 || out[0].Slug != "alpha" {
+		t.Errorf("page2 contents: %v", sluggs(out))
+	}
+
+	// Out-of-range page → empty slice, total still correct.
+	out, total = FilterSortPaginate(entries, "", "downloads", 99, 10)
+	if total != 3 {
+		t.Errorf("OOR total = %d, want 3", total)
+	}
+	if len(out) != 0 {
+		t.Errorf("OOR expected empty slice, got %v", sluggs(out))
+	}
+}
+
+func sluggs(es []MarketplaceEntry) []string {
+	out := make([]string, len(es))
+	for i, e := range es {
+		out[i] = e.Slug
+	}
+	return out
+}
+
 func TestMarketplaceEntryIsMalicious(t *testing.T) {
 	cases := []struct {
 		name string

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -113,6 +115,84 @@ func (c *MarketplaceClient) IsStale() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.stale
+}
+
+// FilterSortPaginate applies the marketplace list pipeline to a raw index slice.
+// Returns the page slice plus the total count of entries that matched the
+// filter (used by the API response for client-side pagination controls).
+//
+// Pipeline:
+//  1. Drop malicious entries (server-side security gate).
+//  2. Apply case-insensitive substring search against name+description+author.
+//  3. Sort by the requested key (downloads|stars|name); unknown keys fall
+//     back to downloads desc.
+//  4. Slice to the requested page. Out-of-range pages return an empty slice.
+//
+// Sort keys:
+//   - "downloads" (default): descending by Downloads, ties broken by name asc
+//   - "stars":               descending by Stars, ties broken by name asc
+//   - "name":                ascending by Name
+func FilterSortPaginate(entries []MarketplaceEntry, query, sortKey string, page, size int) ([]MarketplaceEntry, int) {
+	if page < 1 {
+		page = 1
+	}
+	if size < 1 {
+		size = 20
+	}
+	if size > 100 {
+		size = 100
+	}
+
+	// Step 1+2: filter.
+	q := strings.ToLower(strings.TrimSpace(query))
+	filtered := make([]MarketplaceEntry, 0, len(entries))
+	for _, e := range entries {
+		if e.IsMalicious() {
+			continue
+		}
+		if q != "" {
+			hay := strings.ToLower(e.Name + " " + e.Description + " " + e.Author)
+			if !strings.Contains(hay, q) {
+				continue
+			}
+		}
+		filtered = append(filtered, e)
+	}
+
+	// Step 3: sort.
+	switch sortKey {
+	case "name":
+		sort.SliceStable(filtered, func(i, j int) bool {
+			return filtered[i].Name < filtered[j].Name
+		})
+	case "stars":
+		sort.SliceStable(filtered, func(i, j int) bool {
+			if filtered[i].Stars != filtered[j].Stars {
+				return filtered[i].Stars > filtered[j].Stars
+			}
+			return filtered[i].Name < filtered[j].Name
+		})
+	default: // "downloads" and unknown
+		sort.SliceStable(filtered, func(i, j int) bool {
+			if filtered[i].Downloads != filtered[j].Downloads {
+				return filtered[i].Downloads > filtered[j].Downloads
+			}
+			return filtered[i].Name < filtered[j].Name
+		})
+	}
+
+	total := len(filtered)
+
+	// Step 4: paginate.
+	start := (page - 1) * size
+	if start >= total {
+		return []MarketplaceEntry{}, total
+	}
+	end := start + size
+	if end > total {
+		end = total
+	}
+	return filtered[start:end], total
 }
 
 func (c *MarketplaceClient) fetch(ctx context.Context) (*RegistryIndex, error) {

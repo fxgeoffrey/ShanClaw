@@ -349,3 +349,88 @@ func TestStore_LoadLegacyStringContent(t *testing.T) {
 		t.Errorf("expected 'hi there', got %q", loaded.Messages[1].Content.Text())
 	}
 }
+
+func TestHistoryForLoop_FiltersInjected(t *testing.T) {
+	sess := &Session{
+		Messages: []client.Message{
+			{Role: "user", Content: client.NewTextContent("real user 1")},
+			{Role: "assistant", Content: client.NewTextContent("real assistant 1")},
+			{Role: "user", Content: client.NewTextContent("STOP. You wrote out tool calls as text…")},
+			{Role: "assistant", Content: client.NewTextContent("sorry, trying again")},
+			{Role: "user", Content: client.NewTextContent("real user 2")},
+		},
+		MessageMeta: []MessageMeta{
+			{Source: "local"},
+			{Source: "local"},
+			{Source: "local", SystemInjected: true},
+			{Source: "local"},
+			{Source: "local"},
+		},
+	}
+	got := sess.HistoryForLoop()
+	if len(got) != 4 {
+		t.Fatalf("got %d messages, want 4 (injected nudge must be filtered)", len(got))
+	}
+	for _, m := range got {
+		if m.Content.Text() == "STOP. You wrote out tool calls as text…" {
+			t.Errorf("injected nudge leaked into HistoryForLoop output: %q", m.Content.Text())
+		}
+	}
+	// Real user/assistant messages must survive intact in order.
+	want := []string{"real user 1", "real assistant 1", "sorry, trying again", "real user 2"}
+	for i, m := range got {
+		if m.Content.Text() != want[i] {
+			t.Errorf("msg[%d] = %q, want %q", i, m.Content.Text(), want[i])
+		}
+	}
+}
+
+func TestHistoryForLoop_NoMeta(t *testing.T) {
+	// Legacy sessions with no meta must pass through unchanged.
+	sess := &Session{
+		Messages: []client.Message{
+			{Role: "user", Content: client.NewTextContent("hi")},
+			{Role: "assistant", Content: client.NewTextContent("hello")},
+		},
+	}
+	got := sess.HistoryForLoop()
+	if len(got) != 2 {
+		t.Errorf("got %d messages, want 2", len(got))
+	}
+}
+
+func TestHistoryForLoop_ShortMeta(t *testing.T) {
+	// Meta shorter than Messages (partial legacy migration): keep unannotated tail.
+	sess := &Session{
+		Messages: []client.Message{
+			{Role: "user", Content: client.NewTextContent("legacy1")},
+			{Role: "user", Content: client.NewTextContent("legacy2")},
+			{Role: "user", Content: client.NewTextContent("new nudge")},
+		},
+		MessageMeta: []MessageMeta{
+			{}, // legacy1 — no flag
+			// legacy2 and new nudge have no meta entries at all
+		},
+	}
+	got := sess.HistoryForLoop()
+	if len(got) != 3 {
+		t.Errorf("got %d messages, want 3 (unannotated positions must survive)", len(got))
+	}
+}
+
+func TestFilterInjected_NoFlagsFastPath(t *testing.T) {
+	// When nothing is flagged, FilterInjected must return the original slice
+	// unchanged (identity comparison) to avoid unnecessary allocation.
+	msgs := []client.Message{
+		{Role: "user", Content: client.NewTextContent("a")},
+		{Role: "assistant", Content: client.NewTextContent("b")},
+	}
+	meta := []MessageMeta{{Source: "x"}, {Source: "x"}}
+	got := FilterInjected(msgs, meta)
+	if len(got) != 2 {
+		t.Fatalf("got len %d, want 2", len(got))
+	}
+	if &got[0] != &msgs[0] {
+		t.Error("expected fast path to return original slice")
+	}
+}

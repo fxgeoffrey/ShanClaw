@@ -452,7 +452,10 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 
 	// Snapshot history BEFORE appending the user message so loop.Run(prompt, history)
 	// does not receive the user message twice (once as prompt, once in history).
-	history := sess.Messages
+	// HistoryForLoop strips prior loop-injected guardrail nudges (MessageMeta
+	// .SystemInjected) so they cannot leak into the current run's conversation
+	// snapshot — see session.Session.HistoryForLoop for the full rationale.
+	history := sess.HistoryForLoop()
 
 	// For externally-sourced messages (Slack, LINE, etc.), persist the user message
 	// before the agent loop so the UI can display it immediately on notification.

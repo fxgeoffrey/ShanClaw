@@ -1065,7 +1065,16 @@ func (m *Model) handleSubmit() (tea.Model, tea.Cmd) {
 	m.spinnerIdx = 0
 	m.glyphIdx = 0
 	m.colorIdx = 0
-	return m, tea.Batch(m.runAgentLoop(input, sess.Messages[:len(sess.Messages)-1]), spinnerTick(), spinnerFrameTick())
+	// Pass everything except the just-appended user message as history,
+	// stripping any prior loop-injected guardrail nudges so they can't
+	// leak into this run's conversation snapshot.
+	priorMsgs := sess.Messages[:len(sess.Messages)-1]
+	priorMeta := sess.MessageMeta
+	if len(priorMeta) > len(priorMsgs) {
+		priorMeta = priorMeta[:len(priorMsgs)]
+	}
+	history := session.FilterInjected(priorMsgs, priorMeta)
+	return m, tea.Batch(m.runAgentLoop(input, history), spinnerTick(), spinnerFrameTick())
 }
 
 func (m *Model) runAgentLoop(query string, history []client.Message) tea.Cmd {
@@ -1465,7 +1474,7 @@ func (m *Model) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 			sess := m.sessions.Current()
 			var history []client.Message
 			if sess != nil {
-				history = sess.Messages
+				history = sess.HistoryForLoop()
 			}
 			return m, tea.Batch(m.runAgentLoop(expandedPrompt, history), spinnerTick(), spinnerFrameTick())
 		}

@@ -211,8 +211,21 @@ func (m *Manager) Update(id string, opts *UpdateOpts) error {
 				if opts.Cron != nil {
 					schedules[i].Cron = *opts.Cron
 				}
-				if opts.Prompt != nil {
+				if opts.Prompt != nil && *opts.Prompt != s.Prompt {
 					schedules[i].Prompt = *opts.Prompt
+					// Prompt change means the task goal changed, so the
+					// previously captured "why" is stale. Delete the sidecar
+					// BEFORE save() and while still holding the index lock —
+					// otherwise a scheduler tick could land in the window
+					// where the new prompt is already written but the old
+					// sidecar still exists, mixing old context into the new
+					// task.
+					//
+					// Note: if save() fails afterwards, the sidecar is gone
+					// but the schedule is not updated. That's an acceptable
+					// degradation — losing context is better than running
+					// with an inconsistent (new prompt, old context) state.
+					m.RemoveContext(id)
 				}
 				if opts.Enabled != nil {
 					schedules[i].Enabled = *opts.Enabled
@@ -241,7 +254,7 @@ func (m *Manager) Remove(id string) error {
 		return filtered, nil
 	})
 	if err == nil {
-		// 清理关联的上下文文件
+		// Clean up the associated context sidecar.
 		m.RemoveContext(id)
 	}
 	return err
@@ -257,18 +270,23 @@ func (m *Manager) Sync() (int, error) {
 	return 0, nil
 }
 
-// ContextMessage 是对话上下文的精简表示，只保留 role 和纯文本。
+// ContextMessage is the compact representation of a conversation message used
+// for schedule context sidecars: just the role and plain text.
 type ContextMessage struct {
-	Role    string `json:"role"`    // "user" 或 "assistant"
-	Content string `json:"content"` // 纯文本内容
+	Role    string `json:"role"`    // "user" or "assistant"
+	Content string `json:"content"` // plain text content
 }
 
-// contextDir 返回上下文文件的存储目录。
+// contextDir returns the directory that stores per-schedule context sidecars.
 func (m *Manager) contextDir() string {
 	return filepath.Join(filepath.Dir(m.indexPath), "schedule_context")
 }
 
-// SaveContext 将对话上下文保存到 sidecar 文件。
+// SaveContext writes the conversation context to the schedule's sidecar file.
+// It uses temp+rename to ensure the write is atomic — otherwise a crash or
+// concurrent read could see a half-written JSON file, and a subsequent
+// LoadContext parse failure would cause runSchedule to silently execute with
+// no context.
 func (m *Manager) SaveContext(id string, messages []ContextMessage) error {
 	if len(messages) == 0 {
 		return nil
@@ -281,10 +299,40 @@ func (m *Manager) SaveContext(id string, messages []ContextMessage) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, id+".json"), data, 0600)
+	finalPath := filepath.Join(dir, id+".json")
+	tmp, err := os.CreateTemp(dir, "."+id+"-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("atomic rename: %w", err)
+	}
+	return nil
 }
 
-// LoadContext 加载 schedule 的对话上下文。文件不存在时返回 nil, nil。
+// LoadContext loads the conversation context for a schedule. Returns
+// (nil, nil) when the sidecar file does not exist.
 func (m *Manager) LoadContext(id string) ([]ContextMessage, error) {
 	data, err := os.ReadFile(filepath.Join(m.contextDir(), id+".json"))
 	if err != nil {
@@ -300,12 +348,12 @@ func (m *Manager) LoadContext(id string) ([]ContextMessage, error) {
 	return msgs, nil
 }
 
-// RemoveContext 删除 schedule 的对话上下文文件。
+// RemoveContext deletes the conversation context sidecar for a schedule.
 func (m *Manager) RemoveContext(id string) {
 	os.Remove(filepath.Join(m.contextDir(), id+".json"))
 }
 
-// HasContext 检查 schedule 是否有关联的对话上下文。
+// HasContext reports whether the schedule has an associated context sidecar.
 func (m *Manager) HasContext(id string) bool {
 	_, err := os.Stat(filepath.Join(m.contextDir(), id+".json"))
 	return err == nil

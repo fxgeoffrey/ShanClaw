@@ -28,15 +28,23 @@ type RegistryIndex struct {
 }
 
 // MarketplaceEntry is one skill listing in the registry.
+//
+// Transport: either Repo (git clone) or DownloadURL (HTTP zip) must be set.
+// The git path is the primary transport for skills that have a public
+// source repository. DownloadURL is the fallback for ClawHub skills that
+// exist only as zip artifacts served by ClawHub's Convex backend — there
+// is no GitHub repo to clone, so we fetch the zip and extract it
+// directly into the skills directory.
 type MarketplaceEntry struct {
 	Slug        string       `json:"slug"`
 	Name        string       `json:"name"`
 	Description string       `json:"description"`
 	Author      string       `json:"author"`
 	License     string       `json:"license,omitempty"`
-	Repo        string       `json:"repo"`
+	Repo        string       `json:"repo,omitempty"`
 	RepoPath    string       `json:"repo_path,omitempty"`
 	Ref         string       `json:"ref,omitempty"`
+	DownloadURL string       `json:"download_url,omitempty"`
 	Homepage    string       `json:"homepage,omitempty"`
 	Downloads   int          `json:"downloads,omitempty"`
 	Stars       int          `json:"stars,omitempty"`
@@ -159,17 +167,19 @@ var (
 )
 
 // InstallFromMarketplace runs the full install flow for a marketplace entry.
-// Steps match design doc §Install flow:
+// Dispatches to the git transport (clone → stage) when entry.Repo is set,
+// or the zip transport (HTTP GET → extract) when entry.DownloadURL is set.
+// Both paths share the same validation rules, slug lock, sentinel errors,
+// and cleanup guarantees.
+//
+// Steps common to both transports:
 //  1. Validate slug.
 //  2. Security gate (malicious → ErrMaliciousSkill).
 //  3. Per-slug lock (serializes concurrent installs for the same slug).
 //  4. Already-installed check (→ ErrSkillAlreadyInstalled).
-//  5. git clone into a clone temp dir (sparse-checkout when RepoPath is set).
-//  6. Select srcDir (entry.RepoPath or clone root).
-//  7. Parse + verify SKILL.md; verify frontmatter name == slug.
-//  8. stageCleanPayload → clean stage dir.
-//  9. Atomic rename stage → ~/.shannon/skills/<slug>/.
-//  10. Remove clone temp dir.
+//  5. Transport-specific payload acquisition into a stage directory.
+//  6. Verify SKILL.md exists and parses; verify frontmatter name == slug.
+//  7. Atomic rename stage → ~/.shannon/skills/<slug>/.
 //
 // All failures clean up temp directories. No partial installs ever remain.
 func InstallFromMarketplace(shannonDir string, entry MarketplaceEntry, locks *SlugLocks) error {
@@ -178,6 +188,9 @@ func InstallFromMarketplace(shannonDir string, entry MarketplaceEntry, locks *Sl
 	}
 	if entry.IsMalicious() {
 		return ErrMaliciousSkill
+	}
+	if entry.Repo == "" && entry.DownloadURL == "" {
+		return fmt.Errorf("%w: entry has no transport (need repo or download_url)", ErrInvalidSkillPayload)
 	}
 
 	unlock := locks.Lock(entry.Slug)
@@ -193,12 +206,6 @@ func InstallFromMarketplace(shannonDir string, entry MarketplaceEntry, locks *Sl
 		return fmt.Errorf("create tmp root: %w", err)
 	}
 
-	cloneDir, err := os.MkdirTemp(tmpRoot, "skill-clone-"+entry.Slug+"-*")
-	if err != nil {
-		return fmt.Errorf("create clone dir: %w", err)
-	}
-	defer os.RemoveAll(cloneDir)
-
 	stageDir, err := os.MkdirTemp(tmpRoot, "skill-stage-"+entry.Slug+"-*")
 	if err != nil {
 		return fmt.Errorf("create stage dir: %w", err)
@@ -207,7 +214,57 @@ func InstallFromMarketplace(shannonDir string, entry MarketplaceEntry, locks *Sl
 	// the RemoveAll is a no-op.
 	defer os.RemoveAll(stageDir)
 
-	// Step 5: git clone (sparse or full, depending on RepoPath).
+	// Transport dispatch: git path preserves the exact behavior from
+	// earlier tasks; zip path is new and uses extractZipToSkill.
+	if entry.Repo != "" {
+		if err := installFromGit(entry, stageDir, tmpRoot); err != nil {
+			return err
+		}
+	} else {
+		// Remove the empty stageDir MkdirTemp created; extractZipToSkill
+		// recreates it inside its own cleanup guarantees.
+		os.RemoveAll(stageDir)
+		if err := installFromZip(entry, stageDir); err != nil {
+			return err
+		}
+	}
+
+	// Verify SKILL.md exists and matches the declared slug. Same rules
+	// apply regardless of transport.
+	skillFile := filepath.Join(stageDir, "SKILL.md")
+	if _, err := os.Stat(skillFile); err != nil {
+		return fmt.Errorf("%w: SKILL.md missing at stage dir", ErrInvalidSkillPayload)
+	}
+	parsed, err := loadSkillMD(skillFile, entry.Slug, "marketplace")
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidSkillPayload, err)
+	}
+	if parsed.Name != entry.Slug {
+		return fmt.Errorf("%w: frontmatter name %q != slug %q", ErrInvalidSkillPayload, parsed.Name, entry.Slug)
+	}
+
+	// Atomic rename into place.
+	if err := os.MkdirAll(filepath.Dir(destDir), 0700); err != nil {
+		return fmt.Errorf("create skills dir: %w", err)
+	}
+	if err := os.Rename(stageDir, destDir); err != nil {
+		return fmt.Errorf("install rename: %w", err)
+	}
+
+	return nil
+}
+
+// installFromGit clones entry.Repo into a temp dir, selects the right
+// subtree (entry.RepoPath or the clone root), and stages a clean copy
+// into stageDir. Preserves the exact behavior from before the zip
+// dispatch was added.
+func installFromGit(entry MarketplaceEntry, stageDir, tmpRoot string) error {
+	cloneDir, err := os.MkdirTemp(tmpRoot, "skill-clone-"+entry.Slug+"-*")
+	if err != nil {
+		return fmt.Errorf("create clone dir: %w", err)
+	}
+	defer os.RemoveAll(cloneDir)
+
 	ref := entry.Ref
 	if ref == "" {
 		ref = "main"
@@ -225,41 +282,45 @@ func InstallFromMarketplace(shannonDir string, entry MarketplaceEntry, locks *Sl
 		}
 	}
 
-	// Step 6: pick srcDir.
 	srcDir := cloneDir
 	if entry.RepoPath != "" {
 		srcDir = filepath.Join(cloneDir, entry.RepoPath)
 	}
 
-	// Step 7: verify SKILL.md and name.
-	skillFile := filepath.Join(srcDir, "SKILL.md")
-	if _, err := os.Stat(skillFile); err != nil {
-		return fmt.Errorf("%w: SKILL.md missing at %s", ErrInvalidSkillPayload, srcDir)
-	}
-	parsed, err := loadSkillMD(skillFile, entry.Slug, "marketplace")
+	// Remove the empty stageDir MkdirTemp created before calling this
+	// function; stageCleanPayload recreates it.
+	os.RemoveAll(stageDir)
+	return stageCleanPayload(srcDir, stageDir)
+}
+
+// installFromZip fetches entry.DownloadURL and extracts it into stageDir
+// via extractZipToSkill. HTTP failures surface as
+// ErrMarketplaceUpstreamFailure so the handler maps to 502.
+func installFromZip(entry MarketplaceEntry, stageDir string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", entry.DownloadURL, nil)
 	if err != nil {
+		return fmt.Errorf("%w: build download request: %v", ErrMarketplaceUpstreamFailure, err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("%w: download: %v", ErrMarketplaceUpstreamFailure, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("%w: download status %d", ErrMarketplaceUpstreamFailure, resp.StatusCode)
+	}
+
+	if err := extractZipToSkill(resp.Body, stageDir); err != nil {
+		// Differentiate zip parse/extract errors (local) from upstream.
+		// extractZipToSkill itself returns local errors; only the fetch
+		// above is "upstream". We leave the error unwrapped so callers
+		// see either ErrInvalidSkillPayload (if we wrap it below) or a
+		// bare error that maps to 500 via the default handler branch.
 		return fmt.Errorf("%w: %v", ErrInvalidSkillPayload, err)
 	}
-	if parsed.Name != entry.Slug {
-		return fmt.Errorf("%w: frontmatter name %q != slug %q", ErrInvalidSkillPayload, parsed.Name, entry.Slug)
-	}
-
-	// Remove the empty stageDir MkdirTemp created; stageCleanPayload recreates it.
-	os.RemoveAll(stageDir)
-
-	// Step 8: stage clean payload.
-	if err := stageCleanPayload(srcDir, stageDir); err != nil {
-		return err
-	}
-
-	// Step 9: atomic rename into place.
-	if err := os.MkdirAll(filepath.Dir(destDir), 0700); err != nil {
-		return fmt.Errorf("create skills dir: %w", err)
-	}
-	if err := os.Rename(stageDir, destDir); err != nil {
-		return fmt.Errorf("install rename: %w", err)
-	}
-
 	return nil
 }
 

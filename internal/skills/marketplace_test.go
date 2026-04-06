@@ -697,6 +697,111 @@ func TestInstallFromMarketplaceSubdirectory(t *testing.T) {
 	}
 }
 
+func TestInstallFromMarketplaceZipSuccess(t *testing.T) {
+	zipBytes := makeZipFixture(t, []zipFileSpec{
+		{name: "SKILL.md", body: "---\nname: ziptest\ndescription: From a zip\n---\nbody"},
+		{name: "scripts/run.sh", body: "#!/bin/sh\necho hi", mode: 0755},
+		{name: "references/README.md", body: "ref"},
+	})
+	// Serve the zip over HTTP.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/zip")
+		w.Write(zipBytes)
+	}))
+	defer ts.Close()
+
+	shannonDir := t.TempDir()
+	entry := MarketplaceEntry{
+		Slug:        "ziptest",
+		Name:        "ziptest",
+		DownloadURL: ts.URL,
+	}
+
+	if err := InstallFromMarketplace(shannonDir, entry, NewSlugLocks()); err != nil {
+		t.Fatalf("InstallFromMarketplace: %v", err)
+	}
+
+	// Verify the installed tree.
+	installed := filepath.Join(shannonDir, "skills", "ziptest")
+	if _, err := os.Stat(filepath.Join(installed, "SKILL.md")); err != nil {
+		t.Errorf("SKILL.md missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(installed, "references", "README.md")); err != nil {
+		t.Errorf("references/README.md missing: %v", err)
+	}
+	scriptInfo, err := os.Stat(filepath.Join(installed, "scripts", "run.sh"))
+	if err != nil {
+		t.Errorf("scripts/run.sh missing: %v", err)
+	} else if scriptInfo.Mode().Perm()&0100 == 0 {
+		t.Errorf("scripts/run.sh lost executable bit: %v", scriptInfo.Mode().Perm())
+	}
+}
+
+func TestInstallFromMarketplaceZipNameMismatch(t *testing.T) {
+	zipBytes := makeZipFixture(t, []zipFileSpec{
+		{name: "SKILL.md", body: "---\nname: actual\ndescription: d\n---\n"},
+	})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(zipBytes)
+	}))
+	defer ts.Close()
+
+	shannonDir := t.TempDir()
+	entry := MarketplaceEntry{Slug: "expected", Name: "expected", DownloadURL: ts.URL}
+
+	err := InstallFromMarketplace(shannonDir, entry, NewSlugLocks())
+	if err == nil || !errors.Is(err, ErrInvalidSkillPayload) {
+		t.Errorf("expected ErrInvalidSkillPayload for name mismatch, got: %v", err)
+	}
+	// No skill dir should exist after rejection.
+	if _, err := os.Stat(filepath.Join(shannonDir, "skills", "expected")); !os.IsNotExist(err) {
+		t.Error("no skill dir should exist after rejected zip install")
+	}
+}
+
+func TestInstallFromMarketplaceZipMaliciousBlocked(t *testing.T) {
+	// Malicious gate runs before any network call, so no server needed.
+	shannonDir := t.TempDir()
+	entry := MarketplaceEntry{
+		Slug:        "evil",
+		Name:        "evil",
+		DownloadURL: "http://127.0.0.1:1/never-called",
+		Security:    SecurityScan{OpenClaw: "malicious"},
+	}
+	err := InstallFromMarketplace(shannonDir, entry, NewSlugLocks())
+	if !errors.Is(err, ErrMaliciousSkill) {
+		t.Errorf("expected ErrMaliciousSkill, got: %v", err)
+	}
+}
+
+func TestInstallFromMarketplaceZipUpstreamFailure(t *testing.T) {
+	// Server returns 500 — should surface as ErrMarketplaceUpstreamFailure.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+
+	shannonDir := t.TempDir()
+	entry := MarketplaceEntry{Slug: "demo", Name: "demo", DownloadURL: ts.URL}
+
+	err := InstallFromMarketplace(shannonDir, entry, NewSlugLocks())
+	if !errors.Is(err, ErrMarketplaceUpstreamFailure) {
+		t.Errorf("expected ErrMarketplaceUpstreamFailure, got: %v", err)
+	}
+}
+
+func TestInstallFromMarketplaceNoTransport(t *testing.T) {
+	// Neither Repo nor DownloadURL set → must be rejected before any
+	// filesystem work.
+	shannonDir := t.TempDir()
+	entry := MarketplaceEntry{Slug: "demo", Name: "demo"}
+
+	err := InstallFromMarketplace(shannonDir, entry, NewSlugLocks())
+	if err == nil || !errors.Is(err, ErrInvalidSkillPayload) {
+		t.Errorf("expected ErrInvalidSkillPayload, got: %v", err)
+	}
+}
+
 // TestInstallFromMarketplaceConcurrentSameSlug drives two goroutines at the
 // same slug. With the per-slug lock in place, exactly one must succeed and
 // the other must see ErrSkillAlreadyInstalled — no filesystem corruption,

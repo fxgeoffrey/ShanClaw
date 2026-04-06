@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -47,6 +48,23 @@ type Server struct {
 	// SSE handlers register here so POST /approval can find the right broker.
 	pendingBrokers sync.Map // map[string]*ApprovalBroker
 	onReload       func()   // called after config reload to restart watchers/heartbeat
+
+	marketplace *skills.MarketplaceClient
+	slugLocks   *skills.SlugLocks
+}
+
+// resolveRegistryURL returns the configured marketplace registry URL, falling
+// back to the public default. Tolerates nil deps / nil Config so tests that
+// construct NewServer with nil deps continue to work.
+func resolveRegistryURL(deps *ServerDeps) string {
+	const defaultURL = "https://raw.githubusercontent.com/Kocoro-lab/shanclaw-skill-registry/main/index.json"
+	if deps == nil || deps.Config == nil {
+		return defaultURL
+	}
+	if u := deps.Config.Skills.Marketplace.RegistryURL; u != "" {
+		return u
+	}
+	return defaultURL
 }
 
 var (
@@ -64,6 +82,8 @@ func NewServer(port int, client *Client, deps *ServerDeps, version string) *Serv
 		approvalBroker:         NewApprovalBroker(func(req ApprovalRequest) error { return nil }),
 		eventBus:               NewEventBus(),
 		notifyApprovalResolved: func(p ApprovalResolvedPayload) error { return nil },
+		marketplace:            skills.NewMarketplaceClient(resolveRegistryURL(deps), 1*time.Hour),
+		slugLocks:              skills.NewSlugLocks(),
 	}
 }
 
@@ -123,6 +143,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("DELETE /agents/{name}/skills/{skill}", s.handleDeleteSkill)
 	mux.HandleFunc("GET /skills/downloadable", s.handleListDownloadableSkills)
 	mux.HandleFunc("POST /skills/install/{name}", s.handleInstallSkill)
+	mux.HandleFunc("GET /skills/marketplace", s.handleMarketplaceList)
 	mux.HandleFunc("GET /skills", s.handleListSkills)
 	mux.HandleFunc("GET /skills/{name}", s.handleGetSkill)
 	mux.HandleFunc("PUT /skills/{name}", s.handlePutGlobalSkill)
@@ -1704,6 +1725,80 @@ func (s *Server) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// --- Marketplace handlers ---
+
+func (s *Server) handleMarketplaceList(w http.ResponseWriter, r *http.Request) {
+	idx, err := s.marketplace.Load(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("marketplace unavailable: %v", err))
+		return
+	}
+
+	q := r.URL.Query()
+	page := parseIntParam(q.Get("page"), 1)
+	size := parseIntParam(q.Get("size"), 20)
+	sortKey := q.Get("sort")
+	if sortKey == "" {
+		sortKey = "downloads"
+	}
+	search := q.Get("q")
+
+	entries, total := skills.FilterSortPaginate(idx.Skills, search, sortKey, page, size)
+
+	// Mark `installed` flag for entries already on disk.
+	installed := installedSkillSet(s.deps.ShannonDir)
+	type listItem struct {
+		skills.MarketplaceEntry
+		Installed bool `json:"installed"`
+	}
+	items := make([]listItem, 0, len(entries))
+	for _, e := range entries {
+		items = append(items, listItem{MarketplaceEntry: e, Installed: installed[e.Slug]})
+	}
+
+	if s.marketplace.IsStale() {
+		w.Header().Set("X-Cache-Stale", "true")
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"total":  total,
+		"page":   page,
+		"size":   size,
+		"skills": items,
+	})
+}
+
+// parseIntParam parses a positive int query parameter, falling back to def
+// on empty or invalid input. Shared by marketplace handlers.
+func parseIntParam(raw string, def int) int {
+	if raw == "" {
+		return def
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 {
+		return def
+	}
+	return n
+}
+
+// installedSkillSet returns the set of skill slugs present in
+// ~/.shannon/skills/. Missing directory → empty set, no error.
+func installedSkillSet(shannonDir string) map[string]bool {
+	out := make(map[string]bool)
+	entries, err := os.ReadDir(filepath.Join(shannonDir, "skills"))
+	if err != nil {
+		return out
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(shannonDir, "skills", e.Name(), "SKILL.md")); err == nil {
+			out[e.Name()] = true
+		}
+	}
+	return out
 }
 
 // --- Global skills handlers ---

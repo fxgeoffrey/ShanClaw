@@ -1816,6 +1816,22 @@ func (s *Server) handleMarketplaceInstall(w http.ResponseWriter, r *http.Request
 	err = skills.InstallFromMarketplace(s.deps.ShannonDir, *entry, s.slugLocks)
 	switch {
 	case err == nil:
+		// Load the freshly installed skill so the response body reflects
+		// on-disk truth (frontmatter name, description, source) rather
+		// than synthesized data from the registry. Mirrors the pattern
+		// used by handleInstallSkill for Anthropic-repo installs.
+		sources, _ := s.skillSources()
+		list, _ := skills.LoadSkills(sources...)
+		for _, skill := range list {
+			if skill.Name == entry.Slug {
+				writeJSON(w, http.StatusCreated, skill.ToMeta())
+				return
+			}
+		}
+		// Fallback: install succeeded but the skill did not show up in
+		// LoadSkills. This shouldn't happen because InstallFromMarketplace
+		// guarantees a valid SKILL.md on success, but we return a stable
+		// 201 with minimal info rather than misleading the client.
 		writeJSON(w, http.StatusCreated, skills.SkillMeta{
 			Name:        entry.Slug,
 			Description: entry.Description,
@@ -1827,8 +1843,11 @@ func (s *Server) handleMarketplaceInstall(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, skills.ErrInvalidSkillPayload):
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
-	default:
+	case errors.Is(err, skills.ErrMarketplaceUpstreamFailure):
 		writeError(w, http.StatusBadGateway, fmt.Sprintf("install failed: %v", err))
+	default:
+		// Local disk/staging failures → 500, per spec error matrix.
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("install failed: %v", err))
 	}
 }
 
@@ -1843,13 +1862,42 @@ func (s *Server) handleMarketplaceDetail(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("marketplace unavailable: %v", err))
 		return
 	}
-	for _, e := range idx.Skills {
-		if e.Slug == slug {
-			writeJSON(w, http.StatusOK, e)
-			return
+	var entry *skills.MarketplaceEntry
+	for i := range idx.Skills {
+		if idx.Skills[i].Slug == slug {
+			entry = &idx.Skills[i]
+			break
 		}
 	}
-	writeError(w, http.StatusNotFound, fmt.Sprintf("skill %q not found in marketplace", slug))
+	if entry == nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("skill %q not found in marketplace", slug))
+		return
+	}
+
+	// Consistent with list + install: malicious entries are hidden.
+	if entry.IsMalicious() {
+		writeError(w, http.StatusForbidden, "skill blocked by security scan")
+		return
+	}
+
+	// Response wraps the registry entry plus live state. Preview holds the
+	// installed SKILL.md body when present — empty string otherwise, so the
+	// field is always part of the schema.
+	type detailResponse struct {
+		skills.MarketplaceEntry
+		Installed bool   `json:"installed"`
+		Preview   string `json:"preview,omitempty"`
+	}
+
+	resp := detailResponse{MarketplaceEntry: *entry}
+	skillDir := filepath.Join(s.deps.ShannonDir, "skills", slug)
+	skillFile := filepath.Join(skillDir, "SKILL.md")
+	if body, err := os.ReadFile(skillFile); err == nil {
+		resp.Installed = true
+		resp.Preview = string(body)
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // parseIntParam parses a positive int query parameter, falling back to def

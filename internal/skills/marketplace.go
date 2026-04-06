@@ -150,9 +150,10 @@ func (c *MarketplaceClient) IsStale() bool {
 // Sentinel errors so daemon handlers can map to exact HTTP statuses without
 // parsing message strings.
 var (
-	ErrSkillAlreadyInstalled = errors.New("skill already installed")
-	ErrMaliciousSkill        = errors.New("skill blocked by security scan")
-	ErrInvalidSkillPayload   = errors.New("invalid skill payload")
+	ErrSkillAlreadyInstalled     = errors.New("skill already installed")
+	ErrMaliciousSkill            = errors.New("skill blocked by security scan")
+	ErrInvalidSkillPayload       = errors.New("invalid skill payload")
+	ErrMarketplaceUpstreamFailure = errors.New("marketplace upstream failure")
 )
 
 // InstallFromMarketplace runs the full install flow for a marketplace entry.
@@ -211,14 +212,14 @@ func InstallFromMarketplace(shannonDir string, entry MarketplaceEntry, locks *Sl
 	}
 	if entry.RepoPath == "" {
 		if err := runGit(cloneDir, "clone", "--depth=1", "--branch", ref, entry.Repo, "."); err != nil {
-			return fmt.Errorf("git clone: %w", err)
+			return fmt.Errorf("%w: git clone: %v", ErrMarketplaceUpstreamFailure, err)
 		}
 	} else {
 		if err := runGit(cloneDir, "clone", "--depth=1", "--filter=blob:none", "--sparse", "--branch", ref, entry.Repo, "."); err != nil {
-			return fmt.Errorf("git clone: %w", err)
+			return fmt.Errorf("%w: git clone: %v", ErrMarketplaceUpstreamFailure, err)
 		}
 		if err := runGit(cloneDir, "sparse-checkout", "set", entry.RepoPath); err != nil {
-			return fmt.Errorf("git sparse-checkout: %w", err)
+			return fmt.Errorf("%w: git sparse-checkout: %v", ErrMarketplaceUpstreamFailure, err)
 		}
 	}
 

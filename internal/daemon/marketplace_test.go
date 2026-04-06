@@ -110,12 +110,81 @@ func TestHandleMarketplaceDetail(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
 	}
-	var got skills.MarketplaceEntry
-	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+	var body struct {
+		Slug      string `json:"slug"`
+		Homepage  string `json:"homepage"`
+		Installed bool   `json:"installed"`
+		Preview   string `json:"preview"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if got.Slug != "demo" || got.Homepage != "https://example.com" {
-		t.Errorf("unexpected body: %+v", got)
+	if body.Slug != "demo" || body.Homepage != "https://example.com" {
+		t.Errorf("unexpected body: %+v", body)
+	}
+	if body.Installed {
+		t.Errorf("expected Installed=false for uninstalled skill, got true")
+	}
+	if body.Preview != "" {
+		t.Errorf("expected empty preview for uninstalled skill, got %q", body.Preview)
+	}
+}
+
+func TestHandleMarketplaceDetailInstalledPreview(t *testing.T) {
+	registryJSON := `{
+		"version":1,
+		"skills":[{"slug":"demo","name":"demo","description":"d","author":"a","repo":"r"}]
+	}`
+	s, _ := newTestServerWithMarketplace(t, registryJSON)
+
+	// Simulate the skill already present on disk.
+	skillDir := filepath.Join(s.deps.ShannonDir, "skills", "demo")
+	if err := os.MkdirAll(skillDir, 0700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	const skillBody = "---\nname: demo\ndescription: d\n---\nOn-disk body text."
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillBody), 0600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/skills/marketplace/entry/demo", nil)
+	req.SetPathValue("slug", "demo")
+	rr := httptest.NewRecorder()
+	s.handleMarketplaceDetail(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Installed bool   `json:"installed"`
+		Preview   string `json:"preview"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !body.Installed {
+		t.Errorf("expected Installed=true, got false")
+	}
+	if body.Preview != skillBody {
+		t.Errorf("preview mismatch:\n got %q\nwant %q", body.Preview, skillBody)
+	}
+}
+
+func TestHandleMarketplaceDetailBlocksMalicious(t *testing.T) {
+	registryJSON := `{
+		"version":1,
+		"skills":[{"slug":"evil","name":"evil","description":"d","author":"a","repo":"r",
+			"security":{"virustotal":"malicious"}}]
+	}`
+	s, _ := newTestServerWithMarketplace(t, registryJSON)
+
+	req := httptest.NewRequest("GET", "/skills/marketplace/entry/evil", nil)
+	req.SetPathValue("slug", "evil")
+	rr := httptest.NewRecorder()
+	s.handleMarketplaceDetail(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", rr.Code)
 	}
 }
 
@@ -133,21 +202,28 @@ func TestHandleMarketplaceDetailNotFound(t *testing.T) {
 }
 
 func TestHandleMarketplaceInstallSuccess(t *testing.T) {
-	// Fixture git repo for file:// clone.
+	// Fixture git repo for file:// clone. Deliberately use a description
+	// in the frontmatter that differs from the registry entry so we can
+	// prove the response reflects on-disk truth, not synthesized registry
+	// metadata.
 	repo := t.TempDir()
 	if err := daemonTestRunGit(repo, "init", "-q", "-b", "main"); err != nil {
 		t.Fatalf("git init: %v", err)
 	}
-	daemonTestWriteFile(t, filepath.Join(repo, "SKILL.md"), "---\nname: demo\ndescription: d\n---\nbody")
+	const onDiskDesc = "On-disk authoritative description"
+	daemonTestWriteFile(t, filepath.Join(repo, "SKILL.md"),
+		"---\nname: demo\ndescription: "+onDiskDesc+"\n---\nbody")
 	daemonTestRunGit(repo, "config", "user.email", "t@e.com")
 	daemonTestRunGit(repo, "config", "user.name", "t")
 	daemonTestRunGit(repo, "config", "commit.gpgsign", "false")
 	daemonTestRunGit(repo, "add", ".")
 	daemonTestRunGit(repo, "commit", "-q", "-m", "init")
 
+	// Registry entry intentionally carries a different description so we
+	// can detect drift between response body and on-disk SKILL.md.
 	registryJSON := fmt.Sprintf(`{
 		"version":1,
-		"skills":[{"slug":"demo","name":"demo","description":"d","author":"a","repo":"file://%s","ref":"main"}]
+		"skills":[{"slug":"demo","name":"demo","description":"Registry description (should NOT appear in response)","author":"a","repo":"file://%s","ref":"main"}]
 	}`, repo)
 	s, _ := newTestServerWithMarketplace(t, registryJSON)
 
@@ -161,6 +237,19 @@ func TestHandleMarketplaceInstallSuccess(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(s.deps.ShannonDir, "skills", "demo", "SKILL.md")); err != nil {
 		t.Errorf("installed file missing: %v", err)
+	}
+
+	// Response body must reflect on-disk truth, not the registry entry.
+	var meta skills.SkillMeta
+	if err := json.Unmarshal(rr.Body.Bytes(), &meta); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if meta.Name != "demo" {
+		t.Errorf("meta.Name = %q, want demo", meta.Name)
+	}
+	if meta.Description != onDiskDesc {
+		t.Errorf("meta.Description = %q, want %q (registry description leaked into response)",
+			meta.Description, onDiskDesc)
 	}
 }
 
@@ -178,6 +267,27 @@ func TestHandleMarketplaceInstallMaliciousBlocked(t *testing.T) {
 
 	if rr.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want 403", rr.Code)
+	}
+}
+
+// TestHandleMarketplaceInstallUpstreamFailureMaps502 verifies that a
+// failed git clone surfaces as 502 Bad Gateway (upstream problem), not
+// 500 Internal Server Error (local problem). Uses a registry entry with
+// a bogus file:// path that definitely does not exist.
+func TestHandleMarketplaceInstallUpstreamFailureMaps502(t *testing.T) {
+	registryJSON := `{
+		"version":1,
+		"skills":[{"slug":"demo","name":"demo","description":"d","author":"a","repo":"file:///nonexistent/path/to/repo","ref":"main"}]
+	}`
+	s, _ := newTestServerWithMarketplace(t, registryJSON)
+
+	req := httptest.NewRequest("POST", "/skills/marketplace/install/demo", nil)
+	req.SetPathValue("slug", "demo")
+	rr := httptest.NewRecorder()
+	s.handleMarketplaceInstall(rr, req)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502 (upstream clone failure)", rr.Code)
 	}
 }
 

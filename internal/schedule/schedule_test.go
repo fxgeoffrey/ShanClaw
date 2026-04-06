@@ -1,6 +1,7 @@
 package schedule
 
 import (
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -161,3 +162,157 @@ func TestConcurrentCreates(t *testing.T) {
 
 func strPtr(s string) *string { return &s }
 func boolPtr(b bool) *bool    { return &b }
+
+func TestSaveLoadContextRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	mgr := NewManager(filepath.Join(dir, "schedules.json"))
+	id, err := mgr.Create("bot", "0 9 * * *", "task")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	msgs := []ContextMessage{
+		{Role: "user", Content: "why am I creating this?"},
+		{Role: "assistant", Content: "so you get reminded each morning"},
+	}
+	if err := mgr.SaveContext(id, msgs); err != nil {
+		t.Fatalf("SaveContext: %v", err)
+	}
+
+	if !mgr.HasContext(id) {
+		t.Fatal("HasContext = false after SaveContext")
+	}
+
+	got, err := mgr.LoadContext(id)
+	if err != nil {
+		t.Fatalf("LoadContext: %v", err)
+	}
+	if len(got) != 2 || got[0].Content != msgs[0].Content || got[1].Role != "assistant" {
+		t.Errorf("round-trip mismatch: got %+v", got)
+	}
+}
+
+func TestSaveContextIsAtomic(t *testing.T) {
+	// Atomic writes never leave the final file in a half-written state.
+	// We can't reliably inject a crash mid-write without fault injection,
+	// so instead we verify the write path uses temp+rename by checking
+	// that after a successful write no temp files are left behind and
+	// the final file permissions are 0600.
+	dir := t.TempDir()
+	mgr := NewManager(filepath.Join(dir, "schedules.json"))
+	id, err := mgr.Create("bot", "0 9 * * *", "task")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.SaveContext(id, []ContextMessage{{Role: "user", Content: "hello"}}); err != nil {
+		t.Fatalf("SaveContext: %v", err)
+	}
+	entries, err := os.ReadDir(mgr.contextDir())
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	// Exactly one file, no leftover .tmp files.
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 file in context dir, got %d: %v", len(entries), entries)
+	}
+	name := entries[0].Name()
+	if name != id+".json" {
+		t.Errorf("unexpected file: %q", name)
+	}
+	info, err := os.Stat(filepath.Join(mgr.contextDir(), name))
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if mode := info.Mode().Perm(); mode != 0600 {
+		t.Errorf("file perm = %v, want 0600", mode)
+	}
+}
+
+func TestSaveContextEmptyIsNoOp(t *testing.T) {
+	dir := t.TempDir()
+	mgr := NewManager(filepath.Join(dir, "schedules.json"))
+	id, err := mgr.Create("bot", "0 9 * * *", "task")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.SaveContext(id, nil); err != nil {
+		t.Fatalf("SaveContext(nil): %v", err)
+	}
+	if mgr.HasContext(id) {
+		t.Error("HasContext = true after SaveContext(nil)")
+	}
+}
+
+func TestUpdateClearsContextOnPromptChange(t *testing.T) {
+	dir := t.TempDir()
+	mgr := NewManager(filepath.Join(dir, "schedules.json"))
+	id, err := mgr.Create("bot", "0 9 * * *", "check prod")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.SaveContext(id, []ContextMessage{{Role: "user", Content: "old intent"}}); err != nil {
+		t.Fatalf("SaveContext: %v", err)
+	}
+	if !mgr.HasContext(id) {
+		t.Fatal("precondition: expected context to exist")
+	}
+
+	// Changing the prompt invalidates the captured "why" — sidecar must go.
+	newPrompt := "check staging instead"
+	if err := mgr.Update(id, &UpdateOpts{Prompt: &newPrompt}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if mgr.HasContext(id) {
+		t.Error("context sidecar should have been removed after prompt change")
+	}
+}
+
+func TestUpdatePreservesContextWhenPromptUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	mgr := NewManager(filepath.Join(dir, "schedules.json"))
+	id, err := mgr.Create("bot", "0 9 * * *", "check prod")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.SaveContext(id, []ContextMessage{{Role: "user", Content: "why"}}); err != nil {
+		t.Fatalf("SaveContext: %v", err)
+	}
+
+	// Disabling the schedule (or changing cron) should NOT clear context —
+	// the "why" is still valid.
+	disabled := false
+	if err := mgr.Update(id, &UpdateOpts{Enabled: &disabled}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if !mgr.HasContext(id) {
+		t.Error("context sidecar should survive a non-prompt update")
+	}
+
+	newCron := "0 10 * * *"
+	if err := mgr.Update(id, &UpdateOpts{Cron: &newCron}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if !mgr.HasContext(id) {
+		t.Error("context sidecar should survive a cron-only update")
+	}
+}
+
+func TestUpdatePreservesContextWhenPromptSame(t *testing.T) {
+	// Update called with the same prompt is a no-op for intent — don't clear.
+	dir := t.TempDir()
+	mgr := NewManager(filepath.Join(dir, "schedules.json"))
+	id, err := mgr.Create("bot", "0 9 * * *", "check prod")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.SaveContext(id, []ContextMessage{{Role: "user", Content: "why"}}); err != nil {
+		t.Fatalf("SaveContext: %v", err)
+	}
+	samePrompt := "check prod"
+	if err := mgr.Update(id, &UpdateOpts{Prompt: &samePrompt}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if !mgr.HasContext(id) {
+		t.Error("context sidecar should survive an update that sets the same prompt")
+	}
+}

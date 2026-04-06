@@ -719,13 +719,8 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 	if history != nil {
 		messages = append(messages, ctxwin.SanitizeHistory(history)...)
 	}
-	messages = append(messages, client.Message{Role: "user", Content: client.NewTextContent(assembleUserMessage(parts, userMessage))})
-
-	// 注入对话快照 provider，工具可通过 ConversationSnapshotFromContext 获取当前对话。
-	// 闭包捕获局部变量 messages，调用时返回当前消息的副本。
-	ctx = WithConversationSnapshot(ctx, func() []client.Message {
-		return cloneMessages(messages)
-	})
+	scaffoldedUserText := assembleUserMessage(parts, userMessage)
+	messages = append(messages, client.Message{Role: "user", Content: client.NewTextContent(scaffoldedUserText)})
 
 	// Track where new messages start so RunMessages() can return only this run's
 	// conversation (user prompt + tool calls + results + assistant replies),
@@ -738,6 +733,45 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 	deltaIndices := make(map[int]bool)       // message indices that are delta injections (excluded from persistence)
 	msgTimestamps := make(map[int]time.Time) // message index → creation time
 	msgTimestamps[newMsgOffset] = time.Now() // timestamp the user message
+
+	// Install a conversation snapshot provider. Tools can call
+	// ConversationSnapshotFromContext to read the live conversation. The closure
+	// captures messages / newMsgOffset / injectedIndices / deltaIndices (all are
+	// updated in place by compaction). Two cleanups run on every snapshot:
+	//   1. The current turn's first user message has been wrapped by
+	//      assembleUserMessage with StableContext / VolatileContext scaffolding
+	//      (date, CWD, memory, etc. — session-specific). We replace it with the
+	//      raw userMessage so tools see real user input, not prompt scaffolding.
+	//      Match by EXACT text equality against scaffoldedUserText: after
+	//      compaction the current turn's user message may have been dropped
+	//      from the shaped history entirely, in which case newMsgOffset's
+	//      subtraction-based shift lands on some unrelated message and we
+	//      must not overwrite its content.
+	//   2. Injected / delta messages are filtered out: these are loop-internal
+	//      guardrail / nudge texts (hallucination guards, loop-force-stop, delta
+	//      injections), not real user/assistant turns. Tools must never persist
+	//      them as "conversation context".
+	rawUserMessage := userMessage
+	ctx = WithConversationSnapshot(ctx, func() []client.Message {
+		clone := cloneMessages(messages)
+		if newMsgOffset >= 0 && newMsgOffset < len(clone) {
+			m := clone[newMsgOffset]
+			if m.Role == "user" && !m.Content.HasBlocks() && m.Content.Text() == scaffoldedUserText {
+				clone[newMsgOffset] = client.Message{
+					Role:    "user",
+					Content: client.NewTextContent(rawUserMessage),
+				}
+			}
+		}
+		out := make([]client.Message, 0, len(clone))
+		for i, m := range clone {
+			if injectedIndices[i] || deltaIndices[i] {
+				continue
+			}
+			out = append(out, m)
+		}
+		return out
+	})
 	captureRunMessages := func() {
 		if newMsgOffset >= 1 && newMsgOffset < len(messages) {
 			// Count non-delta messages for allocation
@@ -757,8 +791,15 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 					continue // exclude delta messages from persisted output
 				}
 				msg := messages[i]
-				// Strip volatile context framing from the initial user message
-				if first && msg.Role == "user" {
+				// Strip volatile context framing from the initial user message.
+				// Guarded by an exact text-equality check against scaffoldedUserText:
+				// after compaction the current turn's user message may have been
+				// dropped from the shaped history, in which case newMsgOffset's
+				// subtraction-based shift lands on some unrelated retained message
+				// and overwriting its content would corrupt the persisted session
+				// with userMessage. Same rationale as the snapshot closure guard
+				// above — see that comment for the full explanation.
+				if first && msg.Role == "user" && !msg.Content.HasBlocks() && msg.Content.Text() == scaffoldedUserText {
 					msg = client.Message{
 						Role:    "user",
 						Content: client.NewTextContent(userMessage),

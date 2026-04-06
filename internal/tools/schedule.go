@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/agent"
 	"github.com/Kocoro-lab/ShanClaw/internal/schedule"
@@ -94,7 +95,8 @@ func (t *ScheduleTool) Run(ctx context.Context, argsJSON string) (agent.ToolResu
 		if err != nil {
 			return agent.ToolResult{Content: err.Error(), IsError: true}, nil
 		}
-		// 默认捕获并保存当前对话上下文，触发时 agent 可理解任务背景
+		// Capture and save the current conversation context so the agent
+		// can understand the task background when the schedule fires.
 		if ctxMsgs := extractConversationContext(ctx); len(ctxMsgs) > 0 {
 			if saveErr := t.manager.SaveContext(id, ctxMsgs); saveErr != nil {
 				return agent.ToolResult{Content: fmt.Sprintf("Schedule created: %s (warning: failed to save context: %v)", id, saveErr)}, nil
@@ -166,9 +168,10 @@ func (t *ScheduleTool) IsReadOnlyCall(string) bool {
 	return t.action == "list"
 }
 
-// extractConversationContext 从当前对话快照中提取精简的上下文消息。
-// 只保留 user/assistant 的纯文本内容，跳过 system、tool_use、tool_result。
-// 最多保留最近 20 条消息，总文本不超过 8000 字符。
+// extractConversationContext pulls a compact context from the live
+// conversation snapshot. It keeps only plain-text user/assistant messages
+// and skips system, tool_use, and tool_result messages. At most the last
+// 20 messages are kept, with total text capped at 8000 runes.
 func extractConversationContext(ctx context.Context) []schedule.ContextMessage {
 	snapshotFn := agent.ConversationSnapshotFromContext(ctx)
 	if snapshotFn == nil {
@@ -179,26 +182,33 @@ func extractConversationContext(ctx context.Context) []schedule.ContextMessage {
 		return nil
 	}
 
-	// 过滤：只保留 user/assistant 的纯文本消息
+	// Filter: keep only plain-text user/assistant messages.
+	//
+	// For block content we concatenate ONLY the text blocks, never
+	// tool_result blocks. MessageContent.Text() merges tool_result payloads
+	// into its output, and those payloads can include spill file paths
+	// (~/.shannon/tmp/…) or other internal infrastructure text that must
+	// never surface as "conversation context".
 	var filtered []schedule.ContextMessage
 	for _, msg := range messages {
 		if msg.Role != "user" && msg.Role != "assistant" {
 			continue
 		}
-		// 跳过包含 tool_use/tool_result 块但无文本的消息
+		var text string
 		if msg.Content.HasBlocks() {
-			hasText := false
+			var sb strings.Builder
 			for _, b := range msg.Content.Blocks() {
-				if b.Type == "text" && strings.TrimSpace(b.Text) != "" {
-					hasText = true
-					break
+				if b.Type == "text" && b.Text != "" {
+					if sb.Len() > 0 {
+						sb.WriteString("\n")
+					}
+					sb.WriteString(b.Text)
 				}
 			}
-			if !hasText {
-				continue
-			}
+			text = strings.TrimSpace(sb.String())
+		} else {
+			text = strings.TrimSpace(msg.Content.Text())
 		}
-		text := strings.TrimSpace(msg.Content.Text())
 		if text == "" {
 			continue
 		}
@@ -208,20 +218,21 @@ func extractConversationContext(ctx context.Context) []schedule.ContextMessage {
 		})
 	}
 
-	// 截取最近 20 条
+	// Keep only the most recent 20 messages.
 	const maxMessages = 20
 	if len(filtered) > maxMessages {
 		filtered = filtered[len(filtered)-maxMessages:]
 	}
 
-	// 截断总文本到 8000 字符（从最早的开始丢弃）
+	// Cap total text at 8000 runes (not bytes — Chinese is 3 bytes/char, so
+	// a byte budget would give ~2666 effective chars). Drop oldest first.
 	const maxChars = 8000
 	totalChars := 0
 	for _, m := range filtered {
-		totalChars += len(m.Content)
+		totalChars += utf8.RuneCountInString(m.Content)
 	}
 	for totalChars > maxChars && len(filtered) > 1 {
-		totalChars -= len(filtered[0].Content)
+		totalChars -= utf8.RuneCountInString(filtered[0].Content)
 		filtered = filtered[1:]
 	}
 

@@ -45,6 +45,60 @@ func (s *Session) SourceAt(i int) string {
 	return "unknown"
 }
 
+// HistoryForLoop returns the message history to feed into a fresh agent
+// loop Run(), with loop-internal guardrail/nudge messages filtered out.
+//
+// Injected messages (MessageMeta.SystemInjected == true) are transient
+// single-turn corrections — e.g. the hallucination guardrail "STOP. You
+// wrote out tool calls as text…". Resurrecting them in a future run's
+// context is both (a) confusing to the model, since the correction no
+// longer applies, and (b) a security leak: tools that read the live
+// conversation snapshot (schedule_create, session_search helpers, etc.)
+// would otherwise persist them as if they were real user input.
+//
+// When the meta slice is missing or shorter than Messages (legacy sessions
+// predating the flag), unannotated messages are returned unchanged.
+func (s *Session) HistoryForLoop() []client.Message {
+	return FilterInjected(s.Messages, s.MessageMeta)
+}
+
+// FilterInjected returns msgs with any positions flagged SystemInjected in
+// the parallel meta slice removed. If meta is empty or shorter than msgs,
+// unannotated positions are kept. Used by call sites that already have
+// sliced views of session history (e.g. TUI: everything-except-last).
+//
+// The return value aliases the input slice on the fast path (nothing
+// flagged) but is capped to its current length, so a caller that later
+// appends to the result cannot silently mutate the input's backing array
+// past its visible length.
+func FilterInjected(msgs []client.Message, meta []MessageMeta) []client.Message {
+	if len(meta) == 0 {
+		// Cap capacity so an append on the result allocates fresh storage
+		// instead of extending into the caller's backing array.
+		return msgs[:len(msgs):len(msgs)]
+	}
+	// Fast path: nothing flagged → alias the original slice (with capped
+	// capacity, as above).
+	anyInjected := false
+	for i := 0; i < len(msgs) && i < len(meta); i++ {
+		if meta[i].SystemInjected {
+			anyInjected = true
+			break
+		}
+	}
+	if !anyInjected {
+		return msgs[:len(msgs):len(msgs)]
+	}
+	out := make([]client.Message, 0, len(msgs))
+	for i, msg := range msgs {
+		if i < len(meta) && meta[i].SystemInjected {
+			continue
+		}
+		out = append(out, msg)
+	}
+	return out
+}
+
 type SessionSummary struct {
 	ID        string    `json:"id"`
 	Title     string    `json:"title"`

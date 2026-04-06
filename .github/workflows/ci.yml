@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Cancel in-progress runs on the same ref when new commits land, so rapid
+# pushes to a PR don't stack parallel test runs.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # macos-latest matches the project's release.yml and the development
+    # target. ShanClaw ships a meaningful set of macOS-only tools
+    # (accessibility, ghostty, screenshot, applescript) whose tests
+    # invoke platform binaries directly; ubuntu runners lack those
+    # binaries and can't run the full suite.
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          # Pin to the exact version in go.mod so CI tracks the project's
+          # Go version automatically on every bump. Mirrors release.yml.
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify modules
+        run: go mod verify
+
+      - name: Check go.mod/go.sum are tidy
+        # Fails loudly when a PR adds an import without running
+        # `go mod tidy`, instead of letting it pass silently and break
+        # downstream consumers of the module.
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        # -count=1 disables the test result cache so CI actually runs
+        # tests rather than replaying cached success from a prior run.
+        # -timeout is per-package; the job-level timeout-minutes above
+        # is the real overall ceiling.
+        #
+        # -skip '^TestGhosttyTool_ListTabs_Empty$' excludes one test
+        # that requires Ghostty >= 1.3.0 to be installed on the runner.
+        # GitHub's macos-latest images don't include Ghostty, and the
+        # test isn't a meaningful smoke signal for the marketplace /
+        # daemon work that actually needs CI coverage. Runs locally.
+        # Remove this skip if Ghostty is ever added to the runner setup.
+        run: go test -count=1 -timeout=5m -skip '^TestGhosttyTool_ListTabs_Empty$' ./...

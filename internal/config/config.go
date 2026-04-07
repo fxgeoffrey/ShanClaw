@@ -63,7 +63,8 @@ type CloudConfig struct {
 }
 
 type DaemonConfig struct {
-	AutoApprove bool `mapstructure:"auto_approve" yaml:"auto_approve" json:"auto_approve"`
+	AutoApprove   bool   `mapstructure:"auto_approve" yaml:"auto_approve" json:"auto_approve"`
+	ChromeProfile string `mapstructure:"chrome_profile" yaml:"chrome_profile,omitempty" json:"chrome_profile,omitempty"`
 }
 
 type SkillsConfig struct {

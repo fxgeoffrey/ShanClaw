@@ -1063,6 +1063,8 @@ curl -X POST http://localhost:7533/message \
 }
 ```
 
+**Bridging a messaging platform (Discord, Matrix, custom webhook, etc.) to the daemon?** See the [Channel Integration Guide](examples/channel-integration-guide.md) for the full `POST /message` + SSE + interactive approval workflow, plus a community reference Discord bot. Official Slack/LINE/Feishu/Lark integrations go through Shannon Cloud for multi-tenant OAuth and audit — the local HTTP path here is for personal/dev deployments.
+
 ## Scheduled Tasks
 
 Run agents on a cron schedule using macOS launchd. Schedules persist across reboots.

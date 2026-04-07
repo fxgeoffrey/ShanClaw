@@ -2,6 +2,28 @@
 
 How to connect any messaging platform to ShanClaw via the daemon's local HTTP API.
 
+> **When to use this guide**
+>
+> This guide covers building a **local bridge bot** that forwards messages from
+> a platform (Discord, Matrix, a custom webhook, etc.) into a ShanClaw daemon
+> running on your own machine via `POST /message`.
+>
+> **Use this path when:** you're running a personal or dev-team deployment,
+> single user or small trusted group, same machine as the daemon, and you want
+> full hackability. You own the platform credentials and the bot process.
+>
+> **Use Shannon Cloud instead when:** you need multi-tenant OAuth, per-user
+> quotas, audit logging, or managed channel lifecycle. The official Slack,
+> LINE, Feishu, and Lark integrations live in Shannon Cloud for these reasons.
+> Cloud also handles interactive tool-approval relay back to the originating
+> channel, which the local HTTP path does not provide out of the box (see the
+> Interactive Tool Approval section below — in JSON mode, all tool calls are
+> auto-approved).
+>
+> **Rule of thumb:** official channels go through Cloud, DIY channels go
+> through local HTTP. If you're unsure, start here — you can always migrate a
+> bridge into Cloud later.
+
 ## Architecture
 
 ```
@@ -314,4 +336,6 @@ Possible responses:
 
 ## Reference Implementation
 
-For a working example, see the [ShanClaw Discord Bot](https://github.com/AlanY1an/shanclaw-discord-bot) — a minimal Python bot that bridges Discord to the ShanClaw daemon using the patterns described in this guide.
+For a working example, see the [ShanClaw Discord Bot](https://github.com/AlanY1an/shanclaw-discord-bot) by @AlanY1an — a minimal Python bot (discord.py + aiohttp) that bridges Discord to the ShanClaw daemon using the patterns described in this guide. It demonstrates SSE streaming, interactive tool approval via Discord buttons, and session continuity via `guild_id:channel_id` channel mapping.
+
+This is a community reference, not an official Kocoro-lab project — it lives in the author's personal repo and is maintained there. Treat it as a copy-paste starting point for your own bridge bot in any language.

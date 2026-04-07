@@ -153,12 +153,13 @@ func DeleteAgentCommand(agentsDir, agentName, cmdName string) error {
 // skillFrontmatter is the YAML frontmatter structure for SKILL.md files.
 // Must stay in sync with internal/skills/loader.go skillFrontmatter.
 type skillFrontmatter struct {
-	Name          string            `yaml:"name"`
-	Description   string            `yaml:"description"`
-	License       string            `yaml:"license,omitempty"`
-	Compatibility string            `yaml:"compatibility,omitempty"`
-	Metadata      map[string]string `yaml:"metadata,omitempty"`
-	AllowedTools  string            `yaml:"allowed-tools,omitempty"`
+	Name          string         `yaml:"name"`
+	Slug          string         `yaml:"slug,omitempty"`
+	Description   string         `yaml:"description"`
+	License       string         `yaml:"license,omitempty"`
+	Compatibility string         `yaml:"compatibility,omitempty"`
+	Metadata      map[string]any `yaml:"metadata,omitempty"`
+	AllowedTools  string         `yaml:"allowed-tools,omitempty"`
 }
 
 // WriteAgentSkill writes a skill as a SKILL.md file with YAML frontmatter.

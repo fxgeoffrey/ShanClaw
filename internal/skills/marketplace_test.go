@@ -766,6 +766,151 @@ func TestInstallFromMarketplaceZipSuccess(t *testing.T) {
 	}
 }
 
+// Regression test for the "Skill package is malformed" install failure seen
+// on ClawHub skills that ship with nested YAML metadata (e.g. a `clawdbot`
+// object containing emoji, required bins, etc.). The old `map[string]string`
+// typing caused yaml.Unmarshal to reject any non-string value, which surfaced
+// as ErrInvalidSkillPayload → HTTP 422 → Desktop toast. With the widened
+// `map[string]any` typing the install should succeed and the parsed metadata
+// should preserve the nested shape verbatim.
+func TestInstallFromMarketplaceZipNestedMetadata(t *testing.T) {
+	skillMD := `---
+name: docker-essentials
+description: Essential Docker commands and workflows for container management, image operations, and debugging.
+homepage: https://docs.docker.com/
+metadata:
+  clawdbot:
+    emoji: "🐳"
+    requires:
+      bins:
+        - docker
+---
+# Docker Essentials
+Essential Docker commands for container and image management.
+`
+	zipBytes := makeZipFixture(t, []zipFileSpec{
+		{name: "SKILL.md", body: skillMD},
+	})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/zip")
+		w.Write(zipBytes)
+	}))
+	defer ts.Close()
+
+	shannonDir := t.TempDir()
+	entry := MarketplaceEntry{
+		Slug:        "docker-essentials",
+		Name:        "docker-essentials",
+		DownloadURL: ts.URL,
+	}
+
+	if err := InstallFromMarketplace(context.Background(), shannonDir, entry, NewSlugLocks()); err != nil {
+		t.Fatalf("InstallFromMarketplace with nested metadata should succeed, got: %v", err)
+	}
+
+	installed := filepath.Join(shannonDir, "skills", "docker-essentials")
+	if _, err := os.Stat(filepath.Join(installed, "SKILL.md")); err != nil {
+		t.Errorf("SKILL.md missing after install: %v", err)
+	}
+
+	// Reload through the normal loader path and verify the nested metadata
+	// survived the parse → model → re-read roundtrip. This is the exact
+	// path `GET /skills` and `GET /skills/{name}` use.
+	sources := []SkillSource{{Dir: filepath.Join(shannonDir, "skills"), Source: SourceGlobal}}
+	list, err := LoadSkills(sources...)
+	if err != nil {
+		t.Fatalf("LoadSkills after install: %v", err)
+	}
+	var loaded *Skill
+	for _, s := range list {
+		if s.Name == "docker-essentials" {
+			loaded = s
+			break
+		}
+	}
+	if loaded == nil {
+		t.Fatal("docker-essentials not found after LoadSkills")
+	}
+	clawdbot, ok := loaded.Metadata["clawdbot"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected clawdbot to be map[string]any, got %T: %#v", loaded.Metadata["clawdbot"], loaded.Metadata["clawdbot"])
+	}
+	if clawdbot["emoji"] != "🐳" {
+		t.Errorf("emoji roundtrip failed: got %v", clawdbot["emoji"])
+	}
+	requires, ok := clawdbot["requires"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected requires to be map[string]any, got %T", clawdbot["requires"])
+	}
+	bins, ok := requires["bins"].([]any)
+	if !ok || len(bins) != 1 || bins[0] != "docker" {
+		t.Errorf("bins roundtrip failed: got %#v", requires["bins"])
+	}
+}
+
+// Regression test: ClawHub's `ivangdavila/docker` ships with `name: Docker`
+// (display label) and `slug: docker` (identity). The old case-sensitive
+// `fm.Name == dirName` check rejected it as ErrInvalidSkillPayload. With the
+// canonical-name logic (prefer fm.Slug when present), install should succeed
+// and the loaded Skill.Name should be the slug.
+func TestInstallFromMarketplaceZipSlugOverridesDisplayName(t *testing.T) {
+	skillMD := `---
+name: Docker
+slug: docker
+description: Docker containers, images, Compose stacks, networking, and the commands that keep real environments stable.
+metadata:
+  clawdbot:
+    emoji: "🐳"
+    requires:
+      bins:
+        - docker
+---
+# Docker
+Commands and workflows.
+`
+	zipBytes := makeZipFixture(t, []zipFileSpec{
+		{name: "SKILL.md", body: skillMD},
+	})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/zip")
+		w.Write(zipBytes)
+	}))
+	defer ts.Close()
+
+	shannonDir := t.TempDir()
+	entry := MarketplaceEntry{
+		Slug:        "docker",
+		Name:        "docker",
+		DownloadURL: ts.URL,
+	}
+
+	if err := InstallFromMarketplace(context.Background(), shannonDir, entry, NewSlugLocks()); err != nil {
+		t.Fatalf("InstallFromMarketplace with display-name/slug split should succeed, got: %v", err)
+	}
+
+	// The installed skill should be addressable by its slug, not "Docker".
+	sources := []SkillSource{{Dir: filepath.Join(shannonDir, "skills"), Source: SourceGlobal}}
+	list, err := LoadSkills(sources...)
+	if err != nil {
+		t.Fatalf("LoadSkills after install: %v", err)
+	}
+	var loaded *Skill
+	for _, s := range list {
+		if s.Name == "docker" {
+			loaded = s
+			break
+		}
+	}
+	if loaded == nil {
+		t.Fatal("loaded skill name should be canonicalized to the slug, got none matching \"docker\"")
+	}
+	for _, s := range list {
+		if s.Name == "Docker" {
+			t.Errorf("skill should NOT appear under the display name %q, only the slug", s.Name)
+		}
+	}
+}
+
 func TestInstallFromMarketplaceZipNameMismatch(t *testing.T) {
 	zipBytes := makeZipFixture(t, []zipFileSpec{
 		{name: "SKILL.md", body: "---\nname: actual\ndescription: d\n---\n"},

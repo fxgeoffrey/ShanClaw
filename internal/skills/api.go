@@ -14,16 +14,16 @@ import (
 // Includes prompt body and source, unlike SkillMeta (metadata only)
 // or Skill (which hides Source/Dir via json:"-" tags).
 type SkillDetail struct {
-	Name            string            `json:"name"`
-	Description     string            `json:"description"`
-	Prompt          string            `json:"prompt"`
-	Source          string            `json:"source"`
-	InstallSource   string            `json:"install_source"`
-	MarketplaceSlug string            `json:"marketplace_slug,omitempty"`
-	License         string            `json:"license,omitempty"`
-	Compatibility   string            `json:"compatibility,omitempty"`
-	Metadata        map[string]string `json:"metadata,omitempty"`
-	AllowedTools    []string          `json:"allowed_tools,omitempty"`
+	Name            string         `json:"name"`
+	Description     string         `json:"description"`
+	Prompt          string         `json:"prompt"`
+	Source          string         `json:"source"`
+	InstallSource   string         `json:"install_source"`
+	MarketplaceSlug string         `json:"marketplace_slug,omitempty"`
+	License         string         `json:"license,omitempty"`
+	Compatibility   string         `json:"compatibility,omitempty"`
+	Metadata        map[string]any `json:"metadata,omitempty"`
+	AllowedTools    []string       `json:"allowed_tools,omitempty"`
 }
 
 // WriteGlobalSkill writes a skill to the global skills directory

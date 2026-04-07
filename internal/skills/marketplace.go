@@ -262,12 +262,12 @@ func InstallFromMarketplace(ctx context.Context, shannonDir string, entry Market
 	if _, err := os.Stat(skillFile); err != nil {
 		return fmt.Errorf("%w: SKILL.md missing at stage dir", ErrInvalidSkillPayload)
 	}
-	parsed, err := loadSkillMD(skillFile, entry.Slug, "marketplace")
-	if err != nil {
+	// loadSkillMD passes dirName=entry.Slug and enforces that the zip's
+	// canonical identity (frontmatter `slug` when present, else `name`)
+	// matches — so a separate `parsed.Name != entry.Slug` check here would
+	// just duplicate that invariant.
+	if _, err := loadSkillMD(skillFile, entry.Slug, "marketplace"); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidSkillPayload, err)
-	}
-	if parsed.Name != entry.Slug {
-		return fmt.Errorf("%w: frontmatter name %q != slug %q", ErrInvalidSkillPayload, parsed.Name, entry.Slug)
 	}
 	if err := writeMarketplaceProvenance(stageDir, entry.Slug); err != nil {
 		return fmt.Errorf("write marketplace provenance: %w", err)

@@ -33,12 +33,33 @@ func BundledSkillSource(shannonDir string) (SkillSource, error) {
 }
 
 type skillFrontmatter struct {
-	Name          string            `yaml:"name"`
-	Description   string            `yaml:"description"`
-	License       string            `yaml:"license"`
-	Compatibility string            `yaml:"compatibility"`
-	Metadata      map[string]string `yaml:"metadata"`
-	AllowedTools  string            `yaml:"allowed-tools"`
+	Name string `yaml:"name"`
+	// Slug, when present, is the canonical identifier (ClawHub convention:
+	// `name` is a display label like "Docker", `slug` is the URL identifier
+	// like "docker"). If empty, Name is used as the identity — that covers
+	// all bundled/Anthropic skills where the two are equal.
+	Slug          string         `yaml:"slug,omitempty"`
+	Description   string         `yaml:"description"`
+	License       string         `yaml:"license"`
+	Compatibility string         `yaml:"compatibility"`
+	// Metadata is intentionally `map[string]any` so nested YAML values
+	// (ClawHub skills embed a structured `clawdbot` object with emoji,
+	// required bins, etc.) round-trip through loadSkillMD without blowing
+	// up unmarshal. A flat `map[string]string` would reject any non-string
+	// value and surface as ErrInvalidSkillPayload / HTTP 422 "malformed"
+	// — see the regression test in marketplace_test.go.
+	Metadata     map[string]any `yaml:"metadata"`
+	AllowedTools string         `yaml:"allowed-tools"`
+}
+
+// canonicalName returns the authoritative identity for a skill:
+// frontmatter.slug if set, otherwise frontmatter.name. The two are equal for
+// every bundled skill; ClawHub skills separate them.
+func (fm *skillFrontmatter) canonicalName() string {
+	if fm.Slug != "" {
+		return fm.Slug
+	}
+	return fm.Name
 }
 
 func LoadSkills(sources ...SkillSource) ([]*Skill, error) {
@@ -98,10 +119,15 @@ func loadSkillMD(path, dirName, source string) (*Skill, error) {
 	if fm.Name == "" {
 		return nil, fmt.Errorf("skill name is required in frontmatter")
 	}
-	if fm.Name != dirName {
-		return nil, fmt.Errorf("skill name %q must match directory name %q", fm.Name, dirName)
+	// Use the canonical identity (slug when present, else name). This lets
+	// ClawHub-style frontmatter — display `name: Docker`, URL `slug: docker`
+	// — satisfy the directory-name check without forcing authors to lowercase
+	// the display label.
+	canonical := fm.canonicalName()
+	if canonical != dirName {
+		return nil, fmt.Errorf("skill %q must match directory name %q", canonical, dirName)
 	}
-	if err := ValidateSkillName(fm.Name); err != nil {
+	if err := ValidateSkillName(canonical); err != nil {
 		return nil, err
 	}
 	if fm.Description == "" {
@@ -112,7 +138,7 @@ func loadSkillMD(path, dirName, source string) (*Skill, error) {
 		allowedTools = strings.Fields(fm.AllowedTools)
 	}
 	return &Skill{
-		Name:          fm.Name,
+		Name:          canonical,
 		Description:   fm.Description,
 		Prompt:        strings.TrimSpace(string(body)),
 		License:       fm.License,

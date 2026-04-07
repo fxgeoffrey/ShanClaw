@@ -3,17 +3,20 @@ package skills
 // Skill is a composable capability loaded from a SKILL.md file.
 // Follows the Anthropic Agent Skills spec (agentskills.io/specification).
 type Skill struct {
-	Name            string            `json:"name"`
-	Description     string            `json:"description"`
-	Prompt          string            `json:"prompt,omitempty"`
-	License         string            `json:"license,omitempty"`
-	Compatibility   string            `json:"compatibility,omitempty"`
-	Metadata        map[string]string `json:"metadata,omitempty"`
-	AllowedTools    []string          `json:"allowed_tools,omitempty"`
-	Source          string            `json:"-"`
-	InstallSource   string            `json:"-"`
-	MarketplaceSlug string            `json:"-"`
-	Dir             string            `json:"-"`
+	Name            string         `json:"name"`
+	Description     string         `json:"description"`
+	Prompt          string         `json:"prompt,omitempty"`
+	License         string         `json:"license,omitempty"`
+	Compatibility   string         `json:"compatibility,omitempty"`
+	// Metadata uses `map[string]any` to preserve nested YAML structures
+	// (ClawHub uses a structured `clawdbot` object). See skillFrontmatter
+	// in loader.go for rationale.
+	Metadata        map[string]any `json:"metadata,omitempty"`
+	AllowedTools    []string       `json:"allowed_tools,omitempty"`
+	Source          string         `json:"-"`
+	InstallSource   string         `json:"-"`
+	MarketplaceSlug string         `json:"-"`
+	Dir             string         `json:"-"`
 }
 
 // SkillMeta is the lightweight representation for API responses (no body/prompt).

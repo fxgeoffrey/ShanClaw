@@ -106,13 +106,20 @@ func (s *Scheduler) EvaluateDue(now time.Time) []schedule.Schedule {
 		}
 	}
 
+	// Truncate to the wall-clock minute boundary BEFORE asking gronx
+	// whether the schedule is due. gronx.IsDue requires `seconds == 0`
+	// — at any other moment in the minute it returns false even for
+	// `* * * * *`. The aligned ticker fires at minute boundaries but
+	// the wall clock is already a few hundred microseconds past :00 by
+	// the time `now := time.Now()` runs inside tick(), so without this
+	// truncation every schedule misses its fire window silently.
 	truncated := now.Truncate(time.Minute)
 	var due []schedule.Schedule
 	for _, sc := range schedules {
 		if !sc.Enabled {
 			continue
 		}
-		isDue, err := s.gron.IsDue(sc.Cron, now)
+		isDue, err := s.gron.IsDue(sc.Cron, truncated)
 		if err != nil {
 			log.Printf("scheduler: invalid cron %q for schedule %s: %v", sc.Cron, sc.ID, err)
 			continue

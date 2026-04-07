@@ -44,7 +44,7 @@ func TestBuildSystemPrompt_VolatileContainsMemory(t *testing.T) {
 	}
 }
 
-func TestBuildSystemPrompt_VolatileContainsInstructions(t *testing.T) {
+func TestBuildSystemPrompt_StableContextContainsInstructions(t *testing.T) {
 	parts := BuildSystemPrompt(PromptOptions{
 		BasePrompt:   "Base.",
 		Instructions: "Always use gofmt.",
@@ -53,8 +53,60 @@ func TestBuildSystemPrompt_VolatileContainsInstructions(t *testing.T) {
 	if strings.Contains(parts.System, "Always use gofmt.") {
 		t.Error("System should not contain instructions")
 	}
-	if !strings.Contains(parts.VolatileContext, "Always use gofmt.") {
-		t.Error("VolatileContext should contain instructions")
+	if strings.Contains(parts.VolatileContext, "Always use gofmt.") {
+		t.Error("VolatileContext should not contain instructions (must live in StableContext so it joins the cacheable prefix)")
+	}
+	if !strings.Contains(parts.StableContext, "## Instructions") {
+		t.Error("StableContext should contain the Instructions section header")
+	}
+	if !strings.Contains(parts.StableContext, "Always use gofmt.") {
+		t.Error("StableContext should contain instructions body")
+	}
+}
+
+// TestBuildSystemPrompt_InstructionsOnlyStillEmitsStableContext guards the
+// cache-break assembly path: when only instructions are present (no sticky
+// facts), StableContext must still be non-empty so assembleUserMessage emits
+// the <!-- cache_break --> marker. Without this, instructions would silently
+// fall back behind the marker and lose their caching benefit.
+func TestBuildSystemPrompt_InstructionsOnlyStillEmitsStableContext(t *testing.T) {
+	parts := BuildSystemPrompt(PromptOptions{
+		BasePrompt:   "Base.",
+		Instructions: "Never push to main without review.",
+	})
+
+	if parts.StableContext == "" {
+		t.Fatal("StableContext should be non-empty when instructions are set (cache_break depends on this)")
+	}
+	if !strings.Contains(parts.StableContext, "Never push to main without review.") {
+		t.Error("StableContext should contain instructions body")
+	}
+	if strings.Contains(parts.StableContext, "## Session Facts") {
+		t.Error("StableContext should not emit an empty Session Facts header when sticky is empty")
+	}
+}
+
+// TestBuildSystemPrompt_InstructionsBeforeStickyFacts locks in the ordering
+// contract: the more-stable content (file-backed instructions) must precede
+// sticky session facts inside StableContext so a cache-prefix can extend
+// across sessions that share an instructions.md but differ in session source.
+func TestBuildSystemPrompt_InstructionsBeforeStickyFacts(t *testing.T) {
+	parts := BuildSystemPrompt(PromptOptions{
+		BasePrompt:    "Base.",
+		Instructions:  "Always use gofmt.",
+		StickyContext: "Customer: Alice. Order #8891.",
+	})
+
+	instIdx := strings.Index(parts.StableContext, "## Instructions")
+	factsIdx := strings.Index(parts.StableContext, "## Session Facts")
+	if instIdx < 0 {
+		t.Fatal("StableContext missing Instructions header")
+	}
+	if factsIdx < 0 {
+		t.Fatal("StableContext missing Session Facts header")
+	}
+	if instIdx >= factsIdx {
+		t.Errorf("Instructions must precede Session Facts in StableContext, got Instructions@%d Facts@%d", instIdx, factsIdx)
 	}
 }
 
@@ -116,13 +168,15 @@ func TestBuildSystemPrompt_StableContextContainsStickyFacts(t *testing.T) {
 	}
 }
 
-func TestBuildSystemPrompt_EmptyStickyContext(t *testing.T) {
+func TestBuildSystemPrompt_EmptyStableContext(t *testing.T) {
+	// Neither instructions nor sticky facts → StableContext must be empty
+	// (so assembleUserMessage skips the cache_break marker).
 	parts := BuildSystemPrompt(PromptOptions{
 		BasePrompt: "Base.",
 	})
 
 	if parts.StableContext != "" {
-		t.Errorf("StableContext should be empty, got: %q", parts.StableContext)
+		t.Errorf("StableContext should be empty when neither instructions nor sticky facts are set, got: %q", parts.StableContext)
 	}
 }
 
@@ -207,8 +261,8 @@ func TestBuildSystemPrompt_InstructionsTruncation(t *testing.T) {
 		Instructions: bigInstructions,
 	})
 
-	if !strings.Contains(parts.VolatileContext, "[truncated]") {
-		t.Error("expected truncation marker in volatile context instructions")
+	if !strings.Contains(parts.StableContext, "[truncated]") {
+		t.Error("expected truncation marker in stable context instructions")
 	}
 }
 

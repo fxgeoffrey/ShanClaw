@@ -7,6 +7,43 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/prompt"
 )
 
+// TestAssembleUserMessage_InstructionsOnlyEmitsCacheBreak is the end-to-end
+// guard for the instructions-in-StableContext move: when only shared
+// instructions are present (no sticky facts), the assembled user message must
+// still emit the <!-- cache_break --> marker with instructions sitting in the
+// cacheable prefix. This is what locks in the "caching win" contract; a unit
+// test on buildStableContext alone would pass even if assembleUserMessage
+// regressed to skip the marker.
+func TestAssembleUserMessage_InstructionsOnlyEmitsCacheBreak(t *testing.T) {
+	parts := prompt.BuildSystemPrompt(prompt.PromptOptions{
+		BasePrompt:   "You are Shannon.",
+		Instructions: "Never push to main without review.",
+	})
+
+	result := assembleUserMessage(parts, "ship the release")
+
+	idx := strings.Index(result, "<!-- cache_break -->")
+	if idx < 0 {
+		t.Fatalf("expected cache_break marker, got:\n%s", result)
+	}
+
+	prefix := result[:idx]
+	suffix := result[idx:]
+
+	if !strings.Contains(prefix, "## Instructions") {
+		t.Error("Instructions header should be in the cached prefix (before cache_break)")
+	}
+	if !strings.Contains(prefix, "Never push to main without review.") {
+		t.Error("instructions body should be in the cached prefix")
+	}
+	if strings.Contains(suffix, "Never push to main without review.") {
+		t.Error("instructions body must not appear after cache_break")
+	}
+	if !strings.HasSuffix(result, "ship the release") {
+		t.Error("raw user message should be at the end")
+	}
+}
+
 func TestAssembleUserMessage_CacheBreakRegression(t *testing.T) {
 	t.Run("empty stable omits marker", func(t *testing.T) {
 		result := assembleUserMessage(prompt.PromptParts{

@@ -25,8 +25,8 @@ type DeferredToolSummary struct {
 // PromptOptions configures the system prompt assembly.
 type PromptOptions struct {
 	BasePrompt   string   // persona + core operational rules
-	Memory       string   // from LoadMemory (~500 tokens budget)
-	Instructions string   // from LoadInstructions (~4000 tokens budget)
+	Memory       string   // from LoadMemory (~500 tokens budget) — rendered in VolatileContext
+	Instructions string   // from LoadInstructions (~4000 tokens budget) — rendered in StableContext so it joins the cacheable prefix
 	ToolNames    []string // from ToolRegistry.SortedNames(), deterministic
 	ServerTools  []string // server tool names (optional)
 	MCPContext   string   // context from MCP servers (auth info, usage hints)
@@ -57,16 +57,27 @@ type PromptOptions struct {
 // PromptParts separates the system prompt into cacheable and volatile sections.
 // The gateway caches System as a single block. StableContext and VolatileContext
 // are injected into the user message with a <!-- cache_break --> separator.
+//
+// Layer semantics:
+//   - System         : persona, core rules, tool names, skills — gateway-cached.
+//   - StableContext  : shared org-wide instructions (instructions.md + rules/*.md +
+//                      project overrides) and sticky session facts. Changes only
+//                      across sessions or on file edits. Sits before the
+//                      cache_break marker in the user message so providers that
+//                      reuse the pre-break prefix can hit on it.
+//   - VolatileContext: memory (mutated by memory_append mid-session), date/time,
+//                      CWD, MCP server context, output format guidance. Sits
+//                      after the cache_break marker and is re-sent each turn.
 type PromptParts struct {
 	System          string // static: persona + rules + guidance + tool names + skills (cached by gateway)
-	StableContext   string // deterministic per-session: sticky facts (before cache_break)
-	VolatileContext string // changes per-turn: memory, instructions, date/time, CWD, MCP (after cache_break)
+	StableContext   string // per-session cacheable prefix: shared instructions + sticky facts (before cache_break)
+	VolatileContext string // changes per-turn: memory, date/time, CWD, MCP, format guidance (after cache_break)
 }
 
 // BuildSystemPrompt assembles prompt parts from layers.
 // System contains only content that is stable across turns.
-// Volatile content (memory, instructions, date/time, CWD, MCP) goes to VolatileContext.
-// Sticky session facts go to StableContext.
+// Shared instructions and sticky facts go to StableContext (cached prefix).
+// Volatile content (memory, date/time, CWD, MCP) goes to VolatileContext.
 func BuildSystemPrompt(opts PromptOptions) PromptParts {
 	system := buildStaticSystem(opts)
 	stable := buildStableContext(opts)
@@ -150,14 +161,38 @@ func buildStaticSystem(opts PromptOptions) string {
 	return sb.String()
 }
 
-// buildStableContext assembles deterministic per-session content (sticky facts).
-// This content is re-injected from persisted fields each turn and placed before
-// the <!-- cache_break --> marker in the user message.
+// buildStableContext assembles the cacheable per-session prefix: shared
+// instructions followed by sticky session facts. Placed before the
+// <!-- cache_break --> marker in the user message so providers that reuse the
+// pre-break prefix have a chance to cache-hit on it within a session.
+//
+// Ordering: instructions come first because they're the more stable of the
+// two — file-backed and rarely edited — while sticky facts vary per session
+// source. Putting the stabler content first gives the gateway/provider more
+// opportunity to extend a cached prefix. Whether that actually produces a
+// cross-session cache hit depends on upstream gateway/provider behavior and
+// on the rest of the prompt state matching, not just the instructions text.
+//
+// Truncation: shared instructions are bounded by maxInstructionsChars to keep
+// the cached prefix within a predictable budget. Oversized content is trimmed
+// with a [truncated] marker telling the author to reduce file content.
 func buildStableContext(opts PromptOptions) string {
-	if sticky := strings.TrimSpace(opts.StickyContext); sticky != "" {
-		return "## Session Facts\n" + sticky
+	var sb strings.Builder
+
+	if inst := strings.TrimSpace(opts.Instructions); inst != "" {
+		sb.WriteString("## Instructions\n")
+		sb.WriteString(truncate(inst, maxInstructionsChars))
 	}
-	return ""
+
+	if sticky := strings.TrimSpace(opts.StickyContext); sticky != "" {
+		if sb.Len() > 0 {
+			sb.WriteString("\n\n")
+		}
+		sb.WriteString("## Session Facts\n")
+		sb.WriteString(sticky)
+	}
+
+	return sb.String()
 }
 
 // buildVolatileContext assembles content that changes between turns.
@@ -185,16 +220,12 @@ func buildVolatileContext(opts PromptOptions) string {
 	sb.WriteString("\n\n## Output Format\n")
 	sb.WriteString(formatGuidance(opts.OutputFormat))
 
-	// Memory
+	// Memory — stays volatile: memory_append can mutate MEMORY.md during a
+	// turn, so the block must be re-read and re-sent each Run(). Instructions
+	// live in StableContext (cacheable prefix), not here.
 	if mem := strings.TrimSpace(opts.Memory); mem != "" {
 		sb.WriteString("\n\n## Memory\n")
 		sb.WriteString(truncate(mem, maxMemoryChars))
-	}
-
-	// Instructions
-	if inst := strings.TrimSpace(opts.Instructions); inst != "" {
-		sb.WriteString("\n\n## Instructions\n")
-		sb.WriteString(truncate(inst, maxInstructionsChars))
 	}
 
 	// MCP server context

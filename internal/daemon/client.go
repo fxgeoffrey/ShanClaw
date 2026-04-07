@@ -377,11 +377,25 @@ func (c *Client) handleMessage(ctx context.Context, sm ServerMessage) {
 	}); err != nil {
 		log.Printf("daemon: SendReply failed for message %s: %v", sm.MessageID, err)
 		if c.eventBus != nil {
-			payload, _ := json.Marshal(map[string]string{
+			// Match the source fallback applied at the WS callback entry point
+			// (cmd/daemon.go) so consumers see a consistent source field during
+			// Cloud rolling deploys where msg.Source may be empty.
+			source := payload.Source
+			if source == "" {
+				source = payload.Channel
+			}
+			// Use the raw payload.AgentName (not the rewritten "(default)"
+			// display value used by c.activeAgent) so consumers that route
+			// on the agent identifier — including the desktop matcher that
+			// expects "" / "default" for the default agent — see the wire
+			// form rather than the local display string.
+			errPayload, _ := json.Marshal(map[string]any{
+				"agent":      payload.AgentName,
 				"message_id": sm.MessageID,
+				"source":     source,
 				"error":      fmt.Sprintf("reply delivery failed: %v", err),
 			})
-			c.eventBus.Emit(Event{Type: EventAgentError, Payload: payload})
+			c.eventBus.Emit(Event{Type: EventAgentError, Payload: errPayload})
 		}
 	}
 }

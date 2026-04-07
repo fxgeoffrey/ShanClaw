@@ -645,6 +645,11 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		log.Printf("daemon: agent %s hit iteration limit, saving partial result", agentName)
 	}
 
+	// Tracks persistence outcome so the return value can blank SessionID on
+	// failure (in addition to the agent_reply gate inside the block below).
+	// Stays nil for ephemeral requests, which is the desired "no failure" state.
+	var saveErr error
+
 	// Ephemeral requests skip post-run persistence — the caller owns session lifecycle.
 	if !req.Ephemeral {
 		// Set title from first user message (named agents get a fixed title).
@@ -707,18 +712,25 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 				session.MessageMeta{Source: source, Timestamp: session.TimePtr(replyTime)},
 			)
 		}
-		if err := sessMgr.Save(); err != nil {
-			log.Printf("daemon: failed to save session: %v", err)
+		saveErr = sessMgr.Save()
+		if saveErr != nil {
+			log.Printf("daemon: failed to save session: %v", saveErr)
 			if deps.EventBus != nil {
-				payload, _ := json.Marshal(map[string]string{
-					"agent": agentName,
-					"error": fmt.Sprintf("session save failed: %v", err),
+				payload, _ := json.Marshal(map[string]any{
+					"agent":      agentName,
+					"source":     req.Source,
+					"session_id": sess.ID,
+					"error":      fmt.Sprintf("session save failed: %v", saveErr),
 				})
 				deps.EventBus.Emit(Event{Type: EventAgentError, Payload: payload})
 			}
 		}
 
-		if deps.EventBus != nil {
+		// Only emit agent_reply when the session actually persisted. If the
+		// save failed, the conversation is not on disk and downstream
+		// consumers (e.g. desktop schedule notifications that click through
+		// to the session) would point at a session that cannot be loaded.
+		if saveErr == nil && deps.EventBus != nil {
 			payload, _ := json.Marshal(map[string]any{
 				"agent":      agentName,
 				"source":     req.Source,
@@ -744,9 +756,15 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		}
 	}
 
+	// On save failure, blank SessionID so HTTP/SSE clients can't click through
+	// to a session that isn't on disk (matches the agent_reply gate above).
+	returnedSessionID := sess.ID
+	if saveErr != nil {
+		returnedSessionID = ""
+	}
 	return &RunAgentResult{
 		Reply:     result,
-		SessionID: sess.ID,
+		SessionID: returnedSessionID,
 		Agent:     agentName,
 		Usage: RunAgentUsage{
 			InputTokens:  usage.InputTokens,

@@ -95,7 +95,14 @@ func LoadSkills(sources ...SkillSource) ([]*Skill, error) {
 			}
 			s, err := loadSkillMD(skillFile, name, src.Source)
 			if err != nil {
-				return nil, fmt.Errorf("loading skill %s: %w", name, err)
+				// Fail open per skill: a malformed SKILL.md must not block
+				// every other skill in the same (or any other) source. Log a
+				// warning that names the file path so the user can find and
+				// fix it, then move on without marking `seen[name]` — that
+				// way a valid lower-priority version of the same skill name
+				// (e.g. bundled vs broken global) can still take over.
+				log.Printf("WARNING: skipping skill %q (%s): %v", name, skillFile, err)
+				continue
 			}
 			s.Dir = skillDir
 			s.InstallSource, s.MarketplaceSlug = installProvenanceForSkill(src.Source, skillDir)

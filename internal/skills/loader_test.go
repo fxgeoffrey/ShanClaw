@@ -84,12 +84,97 @@ func TestLoadSkills_PriorityDedup(t *testing.T) {
 	}
 }
 
-func TestLoadSkills_NameMismatch(t *testing.T) {
+// TestLoadSkills_NameMismatch_IsSkippedNotErrored locks in fail-open
+// behavior: a single broken skill must not abort the entire LoadSkills call.
+// The skill is logged and dropped; the function returns no error and an empty
+// (or partial) result list.
+func TestLoadSkills_NameMismatch_IsSkippedNotErrored(t *testing.T) {
 	tmp := t.TempDir()
 	createSkillDir(t, tmp, "pdf", "---\nname: wrong-name\ndescription: Mismatch\n---\nBody.")
-	_, err := LoadSkills(SkillSource{Dir: tmp, Source: "global"})
-	if err == nil {
-		t.Fatal("expected error")
+	skills, err := LoadSkills(SkillSource{Dir: tmp, Source: "global"})
+	if err != nil {
+		t.Fatalf("LoadSkills must not error on a single bad skill: %v", err)
+	}
+	if len(skills) != 0 {
+		t.Errorf("expected the bad skill to be skipped, got %d skills", len(skills))
+	}
+}
+
+// TestLoadSkills_FailOpenWithGoodAndBad guards the central fail-open contract:
+// when one skill in a source is malformed (e.g. broken YAML frontmatter), the
+// loader must skip it and still return every other valid skill in the same
+// source. Regression target: a real user environment where one skill with a
+// nested-map metadata block silently broke ALL global skill loading.
+func TestLoadSkills_FailOpenWithGoodAndBad(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Valid skill — must survive.
+	createSkillDir(t, tmp, "pdf", "---\nname: pdf\ndescription: Read PDFs\n---\n# PDF body")
+
+	// Broken skill — frontmatter parses fine but the description field is a
+	// map instead of a string, mirroring the real-world failure observed in
+	// the user's environment ("cannot unmarshal !!map into string"). This
+	// MUST be skipped, not fatal.
+	createSkillDir(t, tmp, "broken", "---\nname: broken\ndescription:\n  nested: oops\n---\n# body")
+
+	// Another valid skill loaded after the broken one in alphabetical order
+	// (sorted by directory name): "pdf" comes before "broken"? No — "broken"
+	// sorts before "pdf". So this confirms the loader recovers and continues
+	// past a mid-stream failure rather than aborting.
+	createSkillDir(t, tmp, "zebra", "---\nname: zebra\ndescription: Stripes\n---\n# zebra body")
+
+	skills, err := LoadSkills(SkillSource{Dir: tmp, Source: "global"})
+	if err != nil {
+		t.Fatalf("LoadSkills must not error when only some skills are bad: %v", err)
+	}
+	if len(skills) != 2 {
+		t.Fatalf("expected 2 valid skills (pdf, zebra) — broken should be skipped — got %d", len(skills))
+	}
+	got := map[string]bool{}
+	for _, s := range skills {
+		got[s.Name] = true
+	}
+	if !got["pdf"] || !got["zebra"] {
+		t.Errorf("expected both pdf and zebra to load, got %v", got)
+	}
+	if got["broken"] {
+		t.Error("broken skill should have been skipped, but it was loaded")
+	}
+}
+
+// TestLoadSkills_BrokenSkillDoesNotShadowLowerSource locks in the part of the
+// fail-open fix that intentionally does NOT mark a broken skill as "seen".
+// If a broken global skill shadowed a working bundled skill of the same name,
+// users would be silently downgraded; instead, the bundled version must take
+// over when the higher-priority source is malformed.
+func TestLoadSkills_BrokenSkillDoesNotShadowLowerSource(t *testing.T) {
+	highPrio := t.TempDir()
+	lowPrio := t.TempDir()
+
+	// Higher-priority source has a broken `pdf` skill (bad name mismatch).
+	createSkillDir(t, highPrio, "pdf", "---\nname: not-pdf\ndescription: x\n---\n# x")
+
+	// Lower-priority source has a valid `pdf` skill.
+	createSkillDir(t, lowPrio, "pdf", "---\nname: pdf\ndescription: Real PDF\n---\n# Real PDF")
+
+	skills, err := LoadSkills(
+		SkillSource{Dir: highPrio, Source: "global"},
+		SkillSource{Dir: lowPrio, Source: "bundled"},
+	)
+	if err != nil {
+		t.Fatalf("LoadSkills returned error: %v", err)
+	}
+	if len(skills) != 1 {
+		t.Fatalf("expected the bundled pdf to take over, got %d skills", len(skills))
+	}
+	if skills[0].Name != "pdf" {
+		t.Errorf("expected name=pdf, got %q", skills[0].Name)
+	}
+	if skills[0].Description != "Real PDF" {
+		t.Errorf("expected the bundled (working) skill to win, got description=%q", skills[0].Description)
+	}
+	if skills[0].Source != "bundled" {
+		t.Errorf("expected source=bundled (broken global was skipped), got %q", skills[0].Source)
 	}
 }
 

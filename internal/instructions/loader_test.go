@@ -54,7 +54,13 @@ func TestLoadInstructions_BasicHierarchy(t *testing.T) {
 	}
 }
 
-func TestLoadInstructions_SourceComments(t *testing.T) {
+// TestLoadInstructions_NoProvenanceComments locks in the removal of
+// <!-- from: /path --> markers from the assembled bundle. Instructions ride
+// in the cached prompt prefix, so filesystem paths would be pure overhead
+// replicated into every cached session. If provenance debugging is ever
+// needed, add it as explicit loader instrumentation rather than embedding
+// paths in the prompt.
+func TestLoadInstructions_NoProvenanceComments(t *testing.T) {
 	shannonDir := t.TempDir()
 	os.WriteFile(filepath.Join(shannonDir, "instructions.md"), []byte("hello"), 0644)
 
@@ -63,9 +69,11 @@ func TestLoadInstructions_SourceComments(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	expected := "<!-- from: " + filepath.Join(shannonDir, "instructions.md") + " -->"
-	if !strings.Contains(result, expected) {
-		t.Errorf("expected source comment %q, got:\n%s", expected, result)
+	if strings.Contains(result, "<!-- from:") {
+		t.Errorf("expected no provenance comments, got:\n%s", result)
+	}
+	if !strings.Contains(result, "hello") {
+		t.Errorf("expected instruction body to be present, got:\n%s", result)
 	}
 }
 
@@ -112,18 +120,19 @@ func TestLoadInstructions_Deduplication(t *testing.T) {
 		t.Errorf("expected 'shared line' exactly once, found %d times in:\n%s", count, result)
 	}
 
-	// The kept occurrence should be in the project section
-	projectComment := "<!-- from: " + filepath.Join(projectDir, "instructions.md") + " -->"
-	projectSection := result[strings.Index(result, projectComment):]
-	if !strings.Contains(projectSection, "shared line") {
-		t.Errorf("expected 'shared line' in project section, not found")
+	// The kept occurrence must be the project one. Output is rendered in
+	// load order (lowest → highest priority), so the project section comes
+	// AFTER the global section. After dedupe, the global section only
+	// contains "global only". Therefore "shared line" must appear after
+	// "global only" in the output.
+	globalOnlyIdx := strings.Index(result, "global only")
+	sharedIdx := strings.Index(result, "shared line")
+	projectOnlyIdx := strings.Index(result, "project only")
+	if globalOnlyIdx < 0 || sharedIdx < 0 || projectOnlyIdx < 0 {
+		t.Fatalf("expected all three markers in output, got:\n%s", result)
 	}
-
-	if !strings.Contains(result, "global only") {
-		t.Errorf("expected 'global only' to be present")
-	}
-	if !strings.Contains(result, "project only") {
-		t.Errorf("expected 'project only' to be present")
+	if sharedIdx <= globalOnlyIdx {
+		t.Errorf("expected 'shared line' to be kept from project (rendered after 'global only'), got:\n%s", result)
 	}
 }
 

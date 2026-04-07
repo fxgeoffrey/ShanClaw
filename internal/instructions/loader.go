@@ -104,6 +104,14 @@ func LoadInstructions(shannonDir string, projectDir string, maxTokens int) (stri
 	}
 
 	// Build output in load order (lowest priority first).
+	//
+	// Provenance markers (<!-- from: /path --> comments) are intentionally
+	// NOT emitted here. The loaded bundle rides in the cached prompt prefix
+	// (see internal/prompt/builder.go buildStableContext), and every byte
+	// here is replicated into every cached session. Filesystem paths are
+	// pure overhead for the model. If provenance debugging is needed, add
+	// explicit debug instrumentation at the loader rather than embedding
+	// path comments in the prompt itself.
 	maxChars := maxTokens * 4
 	var parts []string
 	for _, fc := range loaded {
@@ -112,8 +120,7 @@ func LoadInstructions(shannonDir string, projectDir string, maxTokens int) (stri
 		if content == "" {
 			continue
 		}
-		part := fmt.Sprintf("<!-- from: %s -->\n%s", fc.path, content)
-		parts = append(parts, part)
+		parts = append(parts, content)
 	}
 
 	result := strings.Join(parts, "\n\n")

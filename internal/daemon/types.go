@@ -60,6 +60,7 @@ const (
 	ChannelWeb      = "web"
 	ChannelFeishu   = "feishu"
 	ChannelLark     = "lark"
+	ChannelDiscord  = "discord"
 	ChannelSchedule = "schedule"
 	ChannelSystem   = "system"
 )

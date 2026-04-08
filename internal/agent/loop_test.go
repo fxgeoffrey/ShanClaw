@@ -653,6 +653,28 @@ func (m *bulkyMockMCPTool) IsReadOnlyCall(string) bool {
 	return false
 }
 
+type mockCloudTreeTool struct {
+	name    string
+	content string
+}
+
+func (m *mockCloudTreeTool) Info() ToolInfo {
+	return ToolInfo{
+		Name:        m.name,
+		Description: "mock cloud tree tool",
+		Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
+	}
+}
+
+func (m *mockCloudTreeTool) Run(context.Context, string) (ToolResult, error) {
+	return ToolResult{Content: m.content, CloudResult: true}, nil
+}
+
+func (m *mockCloudTreeTool) RequiresApproval() bool { return false }
+func (m *mockCloudTreeTool) IsReadOnlyCall(string) bool {
+	return true
+}
+
 // TestAgentLoop_CrossIterDedup_SanitizedReplay verifies that cached results
 // go through sanitizeResult before being stored, so replayed content doesn't
 // leak raw base64 blobs into context.
@@ -1288,7 +1310,7 @@ func TestAgentLoop_NativeToolUseBlocks(t *testing.T) {
 	}
 }
 
-func TestAgentLoop_NativeBlocks_IncludesPreamble(t *testing.T) {
+func TestAgentLoop_NativeBlocks_PreservesMeaningfulPreamble(t *testing.T) {
 	var lastMessages []client.Message
 	callCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1326,6 +1348,143 @@ func TestAgentLoop_NativeBlocks_IncludesPreamble(t *testing.T) {
 		}
 	}
 	t.Error("native path should include preamble text in assistant message")
+}
+
+func TestAgentLoop_NativeBlocks_StripsDuplicateToolCallPreamble(t *testing.T) {
+	var lastMessages []client.Message
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		var req client.CompletionRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		lastMessages = req.Messages
+		if callCount == 1 {
+			json.NewEncoder(w).Encode(nativeResponseWithID("Tool calls:\nTool: mock_tool, Args: {}", "tool_use",
+				toolCallWithID("mock_tool", `{}`, "toolu_dup_preamble"), 10, 5))
+		} else {
+			json.NewEncoder(w).Encode(nativeResponse("Done.", "end_turn", nil, 10, 5))
+		}
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&mockTool{name: "mock_tool"})
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+
+	_, _, err := loop.Run(context.Background(), "check file", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, msg := range lastMessages {
+		if msg.Role == "assistant" && msg.Content.HasBlocks() {
+			for _, b := range msg.Content.Blocks() {
+				if b.Type == "text" && strings.Contains(b.Text, "Tool calls:") {
+					t.Fatalf("duplicate serialized tool-call preamble should be stripped, found %q", b.Text)
+				}
+			}
+		}
+	}
+}
+
+func TestAgentLoop_TreeReadShaping_CollapsesRepeatedSnapshots(t *testing.T) {
+	tree := strings.Repeat("button ref=e1234 label=Open\n", 150)
+
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		switch callCount {
+		case 1:
+			json.NewEncoder(w).Encode(nativeResponseWithID("", "tool_use",
+				toolCallWithID("browser_snapshot", `{"step":1}`, "toolu_tree_1"), 10, 5))
+		case 2:
+			json.NewEncoder(w).Encode(nativeResponseWithID("", "tool_use",
+				toolCallWithID("browser_snapshot", `{"step":2}`, "toolu_tree_2"), 10, 5))
+		default:
+			json.NewEncoder(w).Encode(nativeResponse("Done.", "end_turn", nil, 10, 5))
+		}
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&mockCountingTool{name: "browser_snapshot", content: tree})
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+
+	result, _, err := loop.Run(context.Background(), "inspect the page twice", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "Done." {
+		t.Fatalf("unexpected result: %q", result)
+	}
+
+	var toolResults []string
+	for _, msg := range loop.RunMessages() {
+		if !msg.Content.HasBlocks() {
+			continue
+		}
+		for _, b := range msg.Content.Blocks() {
+			if b.Type == "tool_result" {
+				toolResults = append(toolResults, client.ToolResultText(b))
+			}
+		}
+	}
+	if len(toolResults) < 2 {
+		t.Fatalf("expected at least 2 tool results, got %d", len(toolResults))
+	}
+	if !strings.Contains(toolResults[0], "[tree snapshot summary;") {
+		t.Fatalf("expected first snapshot to be shaped, got %q", toolResults[0])
+	}
+	if !strings.Contains(toolResults[1], "unchanged since last read") {
+		t.Fatalf("expected second snapshot to collapse as unchanged, got %q", toolResults[1])
+	}
+}
+
+func TestAgentLoop_CloudResult_BypassesTreeShaping(t *testing.T) {
+	tree := strings.Repeat("button ref=e1234 label=Open\n", 120)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(nativeResponseWithID("", "tool_use",
+			toolCallWithID("browser_snapshot", `{}`, "toolu_cloud_tree"), 10, 5))
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&mockCloudTreeTool{name: "browser_snapshot", content: tree})
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+
+	result, _, err := loop.Run(context.Background(), "get cloud tree", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != tree {
+		t.Fatal("cloud result should bypass shaping and return the original deliverable")
+	}
+
+	var sawRaw bool
+	for _, msg := range loop.RunMessages() {
+		if !msg.Content.HasBlocks() {
+			continue
+		}
+		for _, b := range msg.Content.Blocks() {
+			if b.Type != "tool_result" {
+				continue
+			}
+			text := client.ToolResultText(b)
+			if strings.Contains(text, "[tree snapshot summary;") || strings.Contains(text, "unchanged since last read") {
+				t.Fatalf("cloud result should skip tree shaping, got %q", text)
+			}
+			if strings.Contains(text, "button ref=e1234 label=Open") {
+				sawRaw = true
+			}
+		}
+	}
+	if !sawRaw {
+		t.Fatal("expected raw cloud result content in recorded tool result")
+	}
 }
 
 func TestAgentLoop_FallbackToXML_NoID(t *testing.T) {

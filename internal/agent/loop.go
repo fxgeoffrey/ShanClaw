@@ -914,6 +914,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		retryCount      int
 		iterationCount  int
 		stateVersions   = newStateVersionTracker()
+		lastShapedRead  = make(map[string]ShapedResult)
 
 		// Denied-call blocking: track tool+args denied by the user this turn
 		// to prevent re-prompting for the same call.
@@ -1452,8 +1453,9 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 
 		// Execute all tool calls
 		toolCalls := resp.AllToolCalls()
-		if resp.OutputText != "" {
-			lastText = resp.OutputText
+		normalizedToolText := normalizeStructuredToolCallPreamble(resp.OutputText, toolCalls)
+		if normalizedToolText != "" {
+			lastText = normalizedToolText
 		}
 
 		useNative := hasNativeToolIDs(toolCalls)
@@ -1462,8 +1464,8 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		var resultBlocks []client.ContentBlock
 		if useNative {
 			var assistantBlocks []client.ContentBlock
-			if resp.OutputText != "" {
-				assistantBlocks = append(assistantBlocks, client.ContentBlock{Type: "text", Text: resp.OutputText})
+			if normalizedToolText != "" {
+				assistantBlocks = append(assistantBlocks, client.ContentBlock{Type: "text", Text: normalizedToolText})
 			}
 			for _, fc := range toolCalls {
 				assistantBlocks = append(assistantBlocks, client.NewToolUseBlock(fc.ID, fc.Name, fc.Arguments))
@@ -1720,7 +1722,22 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			// Cloud deliverables use a higher context limit (60K chars ~15K tokens)
 			// to preserve detail for follow-up turns while still bounding context pressure.
 			cleanResult := stripLineNumbers(result.Content)
-			fullResult := cleanResult // preserved for cloud bypass (spill replaces cleanResult)
+			fullResult := cleanResult // preserved for cloud bypass (spill/shaping replace cleanResult)
+			if !result.CloudResult {
+				shapeKey := fc.Name
+				var previous *ShapedResult
+				if shaped, ok := lastShapedRead[shapeKey]; ok {
+					copy := shaped
+					previous = &copy
+				}
+				shaped := shapeContextResult(fc.Name, cleanResult, previous)
+				if shaped.Text != "" {
+					cleanResult = shaped.Text
+				}
+				if shaped.Signature != "" {
+					lastShapedRead[shapeKey] = shaped
+				}
+			}
 
 			// Disk spill: results > 50K chars are saved to a temp file and
 			// replaced with a short preview so they don't blow up context.

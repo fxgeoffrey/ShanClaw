@@ -18,23 +18,24 @@ func TimePtr(t time.Time) *time.Time { return &t }
 // MessageMeta holds per-message metadata not sent to the LLM gateway.
 // Indexed parallel to Session.Messages.
 type MessageMeta struct {
-	Source         string    `json:"source,omitempty"`          // "local", "slack", "line", "shanclaw", "webhook", "scheduler"
-	MessageID      string    `json:"message_id,omitempty"`      // stable ID for dedup (e.g. "msg-<uuid>")
-	Timestamp      *time.Time `json:"timestamp,omitempty"`      // when this message was sent/received; nil = legacy (pre-timestamp)
-	SystemInjected bool      `json:"system_injected,omitempty"` // true for guardrail/nudge messages injected by the agent loop
+	Source         string     `json:"source,omitempty"`          // "local", "slack", "line", "shanclaw", "webhook", "scheduler"
+	MessageID      string     `json:"message_id,omitempty"`      // stable ID for dedup (e.g. "msg-<uuid>")
+	Timestamp      *time.Time `json:"timestamp,omitempty"`       // when this message was sent/received; nil = legacy (pre-timestamp)
+	SystemInjected bool       `json:"system_injected,omitempty"` // true for guardrail/nudge messages injected by the agent loop
 }
 
 type Session struct {
-	ID          string           `json:"id"`
-	CreatedAt   time.Time        `json:"created_at"`
-	UpdatedAt   time.Time        `json:"updated_at"`
-	Title       string           `json:"title"`
-	CWD         string           `json:"cwd"`
-	Messages    []client.Message `json:"messages"`
-	RemoteTasks []string         `json:"remote_tasks,omitempty"`
-	MessageMeta []MessageMeta    `json:"message_meta,omitempty"`
-	Source      string           `json:"source,omitempty"`  // "slack", "line", "shanclaw", "webhook"
-	Channel     string           `json:"channel,omitempty"` // source channel/group identifier
+	SchemaVersion int              `json:"schema_version,omitempty"`
+	ID            string           `json:"id"`
+	CreatedAt     time.Time        `json:"created_at"`
+	UpdatedAt     time.Time        `json:"updated_at"`
+	Title         string           `json:"title"`
+	CWD           string           `json:"cwd"`
+	Messages      []client.Message `json:"messages"`
+	RemoteTasks   []string         `json:"remote_tasks,omitempty"`
+	MessageMeta   []MessageMeta    `json:"message_meta,omitempty"`
+	Source        string           `json:"source,omitempty"`  // "slack", "line", "shanclaw", "webhook"
+	Channel       string           `json:"channel,omitempty"` // source channel/group identifier
 }
 
 // SourceAt returns the source for message at index i, or "unknown" if not available.
@@ -130,6 +131,9 @@ func (s *Store) Save(sess *Session) error {
 	if sess.CreatedAt.IsZero() {
 		sess.CreatedAt = sess.UpdatedAt
 	}
+	if sess.SchemaVersion == 0 {
+		sess.SchemaVersion = 1
+	}
 
 	data, err := json.MarshalIndent(sess, "", "  ")
 	if err != nil {
@@ -157,6 +161,9 @@ func (s *Store) Load(id string) (*Session, error) {
 	var sess Session
 	if err := json.Unmarshal(data, &sess); err != nil {
 		return nil, fmt.Errorf("parse session: %w", err)
+	}
+	if sess.SchemaVersion == 0 {
+		sess.SchemaVersion = 1
 	}
 	return &sess, nil
 }

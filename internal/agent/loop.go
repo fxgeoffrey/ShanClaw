@@ -23,6 +23,7 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/instructions"
 	"github.com/Kocoro-lab/ShanClaw/internal/permissions"
 	"github.com/Kocoro-lab/ShanClaw/internal/prompt"
+	"github.com/Kocoro-lab/ShanClaw/internal/runstatus"
 	"github.com/Kocoro-lab/ShanClaw/internal/skills"
 )
 
@@ -30,6 +31,17 @@ import (
 // but has partial work to return. Callers can check errors.Is(err, ErrMaxIterReached)
 // to distinguish truncated results from hard failures.
 var ErrMaxIterReached = errors.New("agent loop reached iteration limit")
+
+type RunStatus struct {
+	// Partial reports that the run returned a usable partial result instead of a
+	// clean success. In that case FailureCode describes why the result is partial
+	// (for example iteration limit), not a separate hard-failure state.
+	Partial        bool
+	FailureCode    runstatus.Code
+	LastTool       string
+	RetryCount     int
+	IterationCount int
+}
 
 // defaultPersona is the identity line for the default (non-overridden) agent.
 // Named agents replace this with their AGENT.md content.
@@ -277,40 +289,42 @@ type InjectedMessage struct {
 }
 
 type AgentLoop struct {
-	client            *client.GatewayClient
-	tools             *ToolRegistry
-	modelTier         string
-	handler           EventHandler
-	shannonDir        string
-	maxIter           int
-	maxTokens         int
-	resultTrunc       int
-	argsTrunc         int
-	permissions       *permissions.PermissionsConfig
-	auditor           *audit.AuditLogger
-	hookRunner        *hooks.HookRunner
-	mcpContext        string
-	bypassPermissions bool
-	enableStreaming   bool
-	thinking          *client.ThinkingConfig
-	reasoningEffort   string
-	temperature       float64
-	specificModel     string
-	agentBasePrompt   string
-	agentSkills       []*skills.Skill
-	contextWindow     int
-	memoryDir         string      // directory containing MEMORY.md; re-read each Run(), write-before-compact target
-	stickyContext     string      // session-scoped facts injected verbatim into system prompt; never truncated
-	outputFormat      string      // "markdown" (default) or "plain" — controls formatting guidance in volatile context
-	workingSet        *WorkingSet // session-scoped deferred schema cache injected by the caller
-	sessionID         string      // session ID for audit log correlation
-	sessionCWD        string      // session-scoped working directory; set by runner/TUI before Run()
-	deltaProvider     DeltaProvider
-	injectCh          chan InjectedMessage
-	injectedMessages  []string         // messages injected during the last Run(); cleared on each Run() call
-	runMessages       []client.Message // conversation messages accumulated during the last Run() (excludes system+history)
-	runMsgInjected    []bool           // parallel to runMessages: true = system-injected guardrail/nudge
-	runMsgTimestamps  []time.Time      // parallel to runMessages: when each message was created
+	client                       *client.GatewayClient
+	tools                        *ToolRegistry
+	modelTier                    string
+	handler                      EventHandler
+	shannonDir                   string
+	maxIter                      int
+	maxTokens                    int
+	resultTrunc                  int
+	argsTrunc                    int
+	permissions                  *permissions.PermissionsConfig
+	auditor                      *audit.AuditLogger
+	hookRunner                   *hooks.HookRunner
+	mcpContext                   string
+	bypassPermissions            bool
+	enableStreaming              bool
+	thinking                     *client.ThinkingConfig
+	reasoningEffort              string
+	temperature                  float64
+	specificModel                string
+	agentBasePrompt              string
+	agentSkills                  []*skills.Skill
+	contextWindow                int
+	memoryDir                    string      // directory containing MEMORY.md; re-read each Run(), write-before-compact target
+	stickyContext                string      // session-scoped facts injected verbatim into system prompt; never truncated
+	outputFormat                 string      // "markdown" (default) or "plain" — controls formatting guidance in volatile context
+	workingSet                   *WorkingSet // session-scoped deferred schema cache injected by the caller
+	sessionID                    string      // session ID for audit log correlation
+	sessionCWD                   string      // session-scoped working directory; set by runner/TUI before Run()
+	deltaProvider                DeltaProvider
+	injectCh                     chan InjectedMessage
+	injectedMessages             []string         // messages injected during the last Run(); cleared on each Run() call
+	runMessages                  []client.Message // conversation messages accumulated during the last Run() (excludes system+history)
+	runMsgInjected               []bool           // parallel to runMessages: true = system-injected guardrail/nudge
+	runMsgTimestamps             []time.Time      // parallel to runMessages: when each message was created
+	lastRunStatus                RunStatus
+	enableBrowserReadContainment bool
 }
 
 func NewAgentLoop(gw *client.GatewayClient, tools *ToolRegistry, modelTier string, shannonDir string, maxIter int, resultTrunc int, argsTrunc int, perms *permissions.PermissionsConfig, auditor *audit.AuditLogger, hookRunner *hooks.HookRunner) *AgentLoop {
@@ -324,17 +338,18 @@ func NewAgentLoop(gw *client.GatewayClient, tools *ToolRegistry, modelTier strin
 		argsTrunc = 200
 	}
 	return &AgentLoop{
-		client:      gw,
-		tools:       tools,
-		modelTier:   modelTier,
-		shannonDir:  shannonDir,
-		maxIter:     maxIter,
-		resultTrunc: resultTrunc,
-		argsTrunc:   argsTrunc,
-		permissions: perms,
-		auditor:     auditor,
-		hookRunner:  hookRunner,
-		workingSet:  NewWorkingSet(),
+		client:                       gw,
+		tools:                        tools,
+		modelTier:                    modelTier,
+		shannonDir:                   shannonDir,
+		maxIter:                      maxIter,
+		resultTrunc:                  resultTrunc,
+		argsTrunc:                    argsTrunc,
+		permissions:                  perms,
+		auditor:                      auditor,
+		hookRunner:                   hookRunner,
+		workingSet:                   NewWorkingSet(),
+		enableBrowserReadContainment: true,
 	}
 }
 
@@ -356,6 +371,17 @@ func (a *AgentLoop) SetBypassPermissions(bypass bool) {
 
 func (a *AgentLoop) SetMaxTokens(maxTokens int) {
 	a.maxTokens = maxTokens
+}
+
+func (a *AgentLoop) SetEnableBrowserReadContainment(enabled bool) {
+	a.enableBrowserReadContainment = enabled
+}
+
+// LastRunStatus returns the status from the most recent Run call.
+// Callers should read it in the same goroutine immediately after Run returns
+// and snapshot the value if they need to retain it.
+func (a *AgentLoop) LastRunStatus() RunStatus {
+	return a.lastRunStatus
 }
 
 func (a *AgentLoop) SetThinking(cfg *client.ThinkingConfig) {
@@ -603,6 +629,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 	a.runMessages = nil      // reset for this run
 	a.runMsgInjected = nil   // reset for this run
 	a.runMsgTimestamps = nil // reset for this run
+	a.lastRunStatus = RunStatus{}
 
 	if a.workingSet == nil {
 		a.workingSet = NewWorkingSet()
@@ -881,17 +908,31 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		// Cross-iteration dedup: cache successful results from previous iteration
 		// to prevent re-execution of identical tool calls across consecutive iterations.
 		prevIterResults = make(map[string]ToolResult)
+		lastToolName    string
+		retryCount      int
+		iterationCount  int
 
 		// Denied-call blocking: track tool+args denied by the user this turn
 		// to prevent re-prompting for the same call.
 		deniedCalls = make(map[string]bool)
 	)
 
+	setRunStatus := func(code runstatus.Code, partial bool) {
+		a.lastRunStatus = RunStatus{
+			Partial:        partial,
+			FailureCode:    code,
+			LastTool:       lastToolName,
+			RetryCount:     retryCount,
+			IterationCount: iterationCount,
+		}
+	}
+
 	for i := 0; ; i++ {
 		effectiveMax := a.effectiveMaxIter(toolsUsed)
 		if i >= effectiveMax {
 			break
 		}
+		iterationCount = i + 1
 
 		// Check for context cancellation (e.g. user pressed Esc)
 		if ctx.Err() != nil {
@@ -903,6 +944,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				stampMessage()
 			}
 			captureRunMessages()
+			setRunStatus(runstatus.CodeFromError(ctx.Err()), lastText != "")
 			return lastText, usage, ctx.Err()
 		}
 
@@ -1088,6 +1130,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			}
 			if ctx.Err() != nil {
 				captureRunMessages()
+				setRunStatus(runstatus.CodeFromError(ctx.Err()), false)
 				return "", usage, fmt.Errorf("LLM call cancelled: %w", ctx.Err())
 			}
 			// Reactive compaction: if the error is a context-length overflow,
@@ -1196,10 +1239,12 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			}
 			if !isRetryableLLMError(err) || attempt >= maxLLMRetries-1 {
 				captureRunMessages()
+				setRunStatus(runstatus.CodeFromError(err), false)
 				return "", usage, fmt.Errorf("LLM call failed: %w", err)
 			}
 			backoff := time.Duration(1<<attempt) * time.Second // 1s, 2s, 4s
 			reason := classifyLLMError(err)
+			retryCount++
 			fmt.Fprintf(os.Stderr, "[agent] LLM call failed (attempt %d/%d), retrying in %v: %v\n", attempt+1, maxLLMRetries, backoff, err)
 			if a.handler != nil {
 				a.handler.OnCloudAgent("", "retry", fmt.Sprintf("Retrying request (attempt %d/%d): %s", attempt+1, maxLLMRetries, reason))
@@ -1208,6 +1253,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			case <-time.After(backoff):
 			case <-ctx.Done():
 				captureRunMessages()
+				setRunStatus(runstatus.CodeFromError(ctx.Err()), false)
 				return "", usage, fmt.Errorf("LLM call cancelled: %w", ctx.Err())
 			}
 		}
@@ -1367,6 +1413,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				Content: client.NewTextContent(fullText),
 			})
 			captureRunMessages()
+			setRunStatus(runstatus.CodeNone, false)
 			if a.handler != nil {
 				a.handler.OnText(fullText)
 			}
@@ -1597,6 +1644,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			argsStr := callMeta[idx].argsStr
 			decision := callMeta[idx].decision
 			wasApproved := callMeta[idx].wasApproved
+			lastToolName = fc.Name
 
 			er := execResults[idx]
 			result := er.result
@@ -1764,6 +1812,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			})
 			stampMessage()
 			captureRunMessages()
+			setRunStatus(runstatus.CodeNone, false)
 			if a.handler != nil {
 				a.handler.OnText(cloudResultContent)
 			}
@@ -1784,6 +1833,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			})
 			if err != nil {
 				captureRunMessages()
+				setRunStatus(runstatus.CodeFromError(err), false)
 				return "", usage, err
 			}
 			usage.Add(finalResp.Usage)
@@ -1793,6 +1843,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			})
 			stampMessage()
 			captureRunMessages()
+			setRunStatus(runstatus.CodeNone, false)
 			if a.handler != nil {
 				a.handler.OnText(finalResp.OutputText)
 			}
@@ -1815,6 +1866,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				})
 				if err != nil {
 					captureRunMessages()
+					setRunStatus(runstatus.CodeFromError(err), false)
 					return "", usage, err
 				}
 				usage.Add(finalResp.Usage)
@@ -1824,6 +1876,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				})
 				stampMessage()
 				captureRunMessages()
+				setRunStatus(runstatus.CodeNone, false)
 				if a.handler != nil {
 					a.handler.OnText(finalResp.OutputText)
 				}
@@ -1856,6 +1909,9 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 						delete(prevIterResults, readKey)
 					}
 				}
+				if a.enableBrowserReadContainment && isContainedBrowserMutationTool(ac.fc.Name) {
+					evictContainedBrowserReadCache(prevIterResults)
+				}
 			}
 		}
 
@@ -1881,9 +1937,11 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		})
 		stampMessage()
 		captureRunMessages()
+		setRunStatus(runstatus.CodeIterationLimit, true)
 		return lastText, usage, ErrMaxIterReached
 	}
 	captureRunMessages()
+	setRunStatus(runstatus.CodeIterationLimit, false)
 	return "", usage, fmt.Errorf("agent loop exceeded %d iterations", a.effectiveMaxIter(toolsUsed))
 }
 
@@ -2199,6 +2257,30 @@ func hasNativeToolIDs(toolCalls []client.FunctionCall) bool {
 		}
 	}
 	return true
+}
+
+var containedBrowserReadTools = map[string]bool{
+	"browser_snapshot":        true,
+	"browser_take_screenshot": true,
+	"browser_tabs":            true,
+}
+
+func isContainedBrowserMutationTool(name string) bool {
+	return strings.HasPrefix(name, "browser_") && !containedBrowserReadTools[name]
+}
+
+func evictContainedBrowserReadCache(prevIterResults map[string]ToolResult) {
+	if len(prevIterResults) == 0 {
+		return
+	}
+	for key := range prevIterResults {
+		for name := range containedBrowserReadTools {
+			if strings.HasPrefix(key, name+"\x00") {
+				delete(prevIterResults, key)
+				break
+			}
+		}
+	}
 }
 
 // effectiveMaxIter returns a dynamic iteration limit based on tools used so far.

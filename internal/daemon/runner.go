@@ -23,6 +23,7 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/cwdctx"
 	"github.com/Kocoro-lab/ShanClaw/internal/hooks"
 	"github.com/Kocoro-lab/ShanClaw/internal/mcp"
+	"github.com/Kocoro-lab/ShanClaw/internal/runstatus"
 	"github.com/Kocoro-lab/ShanClaw/internal/schedule"
 	"github.com/Kocoro-lab/ShanClaw/internal/session"
 	"github.com/Kocoro-lab/ShanClaw/internal/skills"
@@ -647,13 +648,18 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 	sessMgr.OnSessionClose(sess.ID, loop.SpillCleanupFunc())
 
 	result, usage, runErr := loop.Run(ctx, prompt, history)
+	status := loop.LastRunStatus()
 	if runErr != nil && !errors.Is(runErr, agent.ErrMaxIterReached) {
 		// Hard error — save a user-friendly error message so the session isn't
 		// left with a dangling user message and no assistant reply.
 		// Full error detail goes to the log; session/UI gets a clean summary.
 		log.Printf("daemon: agent %s run error: %v", agentName, runErr)
+		if status.FailureCode == runstatus.CodeNone {
+			status.FailureCode = runstatus.CodeFromError(runErr)
+		}
+		userErr := FriendlyAgentError(runErr)
+		savedSessionID := ""
 		if !req.Ephemeral && result == "" {
-			userErr := FriendlyAgentError(runErr)
 			sess.Messages = append(sess.Messages,
 				client.Message{Role: "assistant", Content: client.NewTextContent(userErr)},
 			)
@@ -662,7 +668,20 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 			)
 			if err := sessMgr.Save(); err != nil {
 				log.Printf("daemon: failed to save error session: %v", err)
+			} else {
+				savedSessionID = sess.ID
 			}
+		}
+		if deps.EventBus != nil {
+			payload, _ := json.Marshal(map[string]any{
+				"agent":          agentName,
+				"source":         req.Source,
+				"session_id":     savedSessionID,
+				"error":          fmt.Sprintf("agent run failed: %v", runErr),
+				"friendly_error": userErr,
+				"failure_code":   status.FailureCode,
+			})
+			deps.EventBus.Emit(Event{Type: EventAgentError, Payload: payload})
 		}
 		return nil, fmt.Errorf("agent error for %s: %w", agentName, runErr)
 	}
@@ -742,10 +761,11 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 			log.Printf("daemon: failed to save session: %v", saveErr)
 			if deps.EventBus != nil {
 				payload, _ := json.Marshal(map[string]any{
-					"agent":      agentName,
-					"source":     req.Source,
-					"session_id": sess.ID,
-					"error":      fmt.Sprintf("session save failed: %v", saveErr),
+					"agent":        agentName,
+					"source":       req.Source,
+					"session_id":   sess.ID,
+					"error":        fmt.Sprintf("session save failed: %v", saveErr),
+					"failure_code": runstatus.CodeUnexpected,
 				})
 				deps.EventBus.Emit(Event{Type: EventAgentError, Payload: payload})
 			}
@@ -829,21 +849,5 @@ func closeRouteDone(done chan struct{}) {
 // FriendlyAgentError maps raw agent errors to user-facing messages.
 // Full error detail is logged separately; this keeps session/UI clean.
 func FriendlyAgentError(err error) string {
-	// Check context errors structurally before string matching.
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return "The request was cancelled or timed out."
-	}
-	msg := err.Error()
-	switch {
-	case strings.Contains(msg, "429"):
-		return "Sorry, the AI service is currently rate-limited. Please try again in a moment."
-	case strings.Contains(msg, "529") || strings.Contains(msg, "overloaded"):
-		return "Sorry, the AI service is temporarily overloaded. Please try again shortly."
-	case strings.Contains(msg, "500") || strings.Contains(msg, "502") || strings.Contains(msg, "503"):
-		return "Sorry, the AI service encountered a temporary error. Please try again."
-	case strings.Contains(msg, "request failed:") || strings.Contains(msg, "stream read error"):
-		return "Sorry, the connection to the AI service was interrupted. Please try again."
-	default:
-		return "Sorry, an unexpected error occurred. Please try again."
-	}
+	return runstatus.FriendlyMessage(runstatus.CodeFromError(err))
 }

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
+	"github.com/Kocoro-lab/ShanClaw/internal/runstatus"
 )
 
 // nativeResponse builds a /v1/completions response for tests.
@@ -123,11 +124,11 @@ type mockHandler struct {
 func (h *mockHandler) OnToolCall(name string, args string) {}
 func (h *mockHandler) OnToolResult(name string, args string, result ToolResult, elapsed time.Duration) {
 }
-func (h *mockHandler) OnText(text string)         { h.lastText = text }
-func (h *mockHandler) OnStreamDelta(delta string) {}
-func (h *mockHandler) OnUsage(usage TurnUsage)    {}
-func (h *mockHandler) OnCloudAgent(agentID, status, message string) {}
-func (h *mockHandler) OnCloudProgress(completed, total int)         {}
+func (h *mockHandler) OnText(text string)                                     { h.lastText = text }
+func (h *mockHandler) OnStreamDelta(delta string)                             {}
+func (h *mockHandler) OnUsage(usage TurnUsage)                                {}
+func (h *mockHandler) OnCloudAgent(agentID, status, message string)           {}
+func (h *mockHandler) OnCloudProgress(completed, total int)                   {}
 func (h *mockHandler) OnCloudPlan(planType, content string, needsReview bool) {}
 func (h *mockHandler) OnApprovalNeeded(tool string, args string) bool {
 	h.approvalRequested = true
@@ -451,6 +452,13 @@ func TestAgentLoop_GracefulMaxIterExit(t *testing.T) {
 	if result != "Step 3 done." {
 		t.Errorf("expected last text from graceful exit, got %q", result)
 	}
+	status := loop.LastRunStatus()
+	if !status.Partial {
+		t.Error("expected partial run status after graceful iteration-limit exit")
+	}
+	if status.FailureCode != runstatus.CodeIterationLimit {
+		t.Errorf("expected iteration-limit failure code, got %q", status.FailureCode)
+	}
 }
 
 func TestEffectiveMaxIter(t *testing.T) {
@@ -712,6 +720,50 @@ func TestAgentLoop_CrossIterDedup_PersistentAcrossIterations(t *testing.T) {
 	// tool_b should execute once (iter 2)
 	if toolB.runs != 1 {
 		t.Errorf("expected tool_b to execute 1 time, got %d", toolB.runs)
+	}
+}
+
+func TestAgentLoop_BrowserContainmentEvictsSnapshotCache(t *testing.T) {
+	snapshotTool := &mockCountingTool{name: "browser_snapshot", content: "snapshot"}
+	navigateTool := &mockCountingTool{name: "browser_navigate", content: "navigated"}
+
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		switch callCount {
+		case 1:
+			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
+				toolCall("browser_snapshot", `{}`), 10, 5))
+		case 2:
+			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
+				toolCall("browser_navigate", `{"url":"https://example.com"}`), 10, 5))
+		case 3:
+			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
+				toolCall("browser_snapshot", `{}`), 10, 5))
+		default:
+			json.NewEncoder(w).Encode(nativeResponse("Done.", "end_turn", nil, 10, 5))
+		}
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(snapshotTool)
+	reg.Register(navigateTool)
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+
+	result, _, err := loop.Run(context.Background(), "test browser cache containment", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "Done." {
+		t.Errorf("expected 'Done.', got %q", result)
+	}
+	if snapshotTool.runs != 2 {
+		t.Errorf("expected browser_snapshot to execute twice after navigation, got %d", snapshotTool.runs)
+	}
+	if navigateTool.runs != 1 {
+		t.Errorf("expected browser_navigate to execute once, got %d", navigateTool.runs)
 	}
 }
 
@@ -1241,10 +1293,10 @@ func TestAgentLoop_NativeBlocks_ImageResult(t *testing.T) {
 
 // mockSlowTool sleeps for a configurable duration and tracks concurrent executions.
 type mockSlowTool struct {
-	name     string
-	delay    time.Duration
-	maxConc  *atomic.Int32 // tracks peak concurrency
-	curConc  *atomic.Int32
+	name    string
+	delay   time.Duration
+	maxConc *atomic.Int32 // tracks peak concurrency
+	curConc *atomic.Int32
 }
 
 func newMockSlowTool(name string, delay time.Duration) *mockSlowTool {
@@ -1278,7 +1330,7 @@ func (m *mockSlowTool) Run(ctx context.Context, args string) (ToolResult, error)
 	return ToolResult{Content: fmt.Sprintf("result from %s", m.name)}, nil
 }
 
-func (m *mockSlowTool) RequiresApproval() bool  { return false }
+func (m *mockSlowTool) RequiresApproval() bool     { return false }
 func (m *mockSlowTool) IsReadOnlyCall(string) bool { return true }
 
 // mockPanicTool panics during Run.
@@ -1900,13 +1952,13 @@ func (h *cloudDelegateHandler) OnToolResult(name string, args string, result Too
 	defer h.mu.Unlock()
 	h.results = append(h.results, cloudDelegateResult{name: name, content: result.Content, isError: result.IsError})
 }
-func (h *cloudDelegateHandler) OnText(text string)                            {}
-func (h *cloudDelegateHandler) OnStreamDelta(delta string)                    {}
-func (h *cloudDelegateHandler) OnUsage(usage TurnUsage)                       {}
-func (h *cloudDelegateHandler) OnCloudAgent(agentID, status, message string)  {}
-func (h *cloudDelegateHandler) OnCloudProgress(completed, total int)          {}
+func (h *cloudDelegateHandler) OnText(text string)                                     {}
+func (h *cloudDelegateHandler) OnStreamDelta(delta string)                             {}
+func (h *cloudDelegateHandler) OnUsage(usage TurnUsage)                                {}
+func (h *cloudDelegateHandler) OnCloudAgent(agentID, status, message string)           {}
+func (h *cloudDelegateHandler) OnCloudProgress(completed, total int)                   {}
 func (h *cloudDelegateHandler) OnCloudPlan(planType, content string, needsReview bool) {}
-func (h *cloudDelegateHandler) OnApprovalNeeded(tool string, args string) bool { return true }
+func (h *cloudDelegateHandler) OnApprovalNeeded(tool string, args string) bool         { return true }
 
 func TestAgentLoop_CloudDelegateLock(t *testing.T) {
 	// Mock cloud_delegate tool: named "cloud_delegate", no approval needed for test (bypass).

@@ -9,6 +9,32 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/agent"
 )
 
+// NotifyHandler delivers a notify tool call through an attached daemon client
+// (typically the Desktop app) instead of shelling out to osascript. It returns
+// true when the notification was delivered — in which case the tool skips the
+// osascript fallback — and false when no client is attached, which tells the
+// tool to fall back to osascript for headless mode.
+type NotifyHandler func(title, body string, sound bool) bool
+
+type notifyHandlerKey struct{}
+
+// WithNotifyHandler returns a context carrying a NotifyHandler. The daemon
+// runner attaches one per run so that notify tool calls from scheduled or
+// interactive agents can be routed through the Desktop's UNUserNotificationCenter
+// with correct app attribution and click-through.
+func WithNotifyHandler(ctx context.Context, h NotifyHandler) context.Context {
+	if h == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, notifyHandlerKey{}, h)
+}
+
+// NotifyHandlerFrom returns the NotifyHandler from ctx, or nil if none is set.
+func NotifyHandlerFrom(ctx context.Context) NotifyHandler {
+	h, _ := ctx.Value(notifyHandlerKey{}).(NotifyHandler)
+	return h
+}
+
 type NotifyTool struct{}
 
 type notifyArgs struct {
@@ -44,6 +70,17 @@ func (t *NotifyTool) Run(ctx context.Context, argsJSON string) (agent.ToolResult
 	body := args.Body
 	if body == "" {
 		body = args.Message
+	}
+
+	// Prefer the Desktop route when a handler is attached. The handler returns
+	// true when a Desktop client is actually subscribed; if it returns false,
+	// the daemon is headless and we fall through to the osascript path so the
+	// banner still shows (attributed to Script Editor, which is expected in
+	// headless mode since there's no app bundle to attribute it to).
+	if h := NotifyHandlerFrom(ctx); h != nil {
+		if h(args.Title, body, args.Sound) {
+			return agent.ToolResult{Content: "notification sent"}, nil
+		}
 	}
 
 	script := buildNotifyScript(args.Title, body, args.Sound)

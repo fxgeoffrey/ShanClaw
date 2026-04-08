@@ -83,3 +83,62 @@ func TestEventBusSlowSubscriberNonBlocking(t *testing.T) {
 		t.Fatal("Emit blocked on slow subscriber")
 	}
 }
+
+// EmitTo must report zero deliveries when the only subscriber's channel is
+// full. The notify tool routing relies on this to fall back to osascript —
+// if a stalled Desktop client silently dropped notifications, the agent's
+// banner would never surface.
+func TestEventBusEmitToReportsSlowSubscriberAsZeroDelivered(t *testing.T) {
+	bus := NewEventBus()
+	ch := bus.Subscribe()
+	defer bus.Unsubscribe(ch)
+
+	// Fill the 64-slot buffer exactly.
+	for i := 0; i < 64; i++ {
+		if delivered := bus.EmitTo(Event{Type: "flood", Payload: json.RawMessage(`{}`)}); delivered != 1 {
+			t.Fatalf("fill iter %d: expected 1 delivery, got %d", i, delivered)
+		}
+	}
+
+	// Next emit must be dropped for this subscriber; delivered count must be 0
+	// so a notify-tool caller knows the fallback is needed.
+	if delivered := bus.EmitTo(Event{Type: "overflow", Payload: json.RawMessage(`{}`)}); delivered != 0 {
+		t.Fatalf("expected 0 deliveries after buffer fill, got %d", delivered)
+	}
+}
+
+// EmitTo with no subscribers returns zero, so the notify tool falls back to
+// osascript in headless mode.
+func TestEventBusEmitToNoSubscribers(t *testing.T) {
+	bus := NewEventBus()
+	if delivered := bus.EmitTo(Event{Type: "orphan", Payload: json.RawMessage(`{}`)}); delivered != 0 {
+		t.Errorf("expected 0 deliveries with no subscribers, got %d", delivered)
+	}
+}
+
+// EmitTo returns the count of subscribers that actually received the event,
+// not the total number attached. If one of two subscribers has a full buffer,
+// EmitTo must return 1 — the call still counts as "delivered" for notify
+// routing purposes because at least one Desktop client got the event.
+func TestEventBusEmitToPartialDelivery(t *testing.T) {
+	bus := NewEventBus()
+	slow := bus.Subscribe()
+	fast := bus.Subscribe()
+	defer bus.Unsubscribe(slow)
+	defer bus.Unsubscribe(fast)
+
+	// Fill only the slow subscriber.
+	for i := 0; i < 64; i++ {
+		_ = bus.EmitTo(Event{Type: "fill", Payload: json.RawMessage(`{}`)})
+	}
+	// Drain the fast subscriber so it has room for the next emit.
+	for i := 0; i < 64; i++ {
+		<-fast
+	}
+
+	// Now slow is full, fast is empty. Next emit should deliver to fast only.
+	delivered := bus.EmitTo(Event{Type: "partial", Payload: json.RawMessage(`{}`)})
+	if delivered != 1 {
+		t.Errorf("expected 1 delivery (to fast only), got %d", delivered)
+	}
+}

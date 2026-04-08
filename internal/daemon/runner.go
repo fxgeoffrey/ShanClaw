@@ -428,6 +428,31 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		setter.SetSessionID(sess.ID)
 	}
 
+	// Route notify tool calls through the EventBus so attached SSE clients
+	// (typically the Desktop app) render the banner via UNUserNotificationCenter
+	// with correct app attribution and click-through routing. Falls back to
+	// the direct osascript path only when EmitTo reports zero deliveries —
+	// either because no client is subscribed, or because every subscriber's
+	// buffer was full. Using EmitTo's delivery count (rather than a liveness
+	// check) means a single stalled subscriber cannot swallow notifications
+	// into a silent void.
+	if deps.EventBus != nil {
+		sessID := sess.ID
+		notifyAgent := agentName
+		notifySource := req.Source
+		ctx = tools.WithNotifyHandler(ctx, func(title, body string, sound bool) bool {
+			payload, _ := json.Marshal(map[string]any{
+				"session_id": sessID,
+				"agent":      notifyAgent,
+				"source":     notifySource,
+				"title":      title,
+				"body":       body,
+				"sound":      sound,
+			})
+			return deps.EventBus.EmitTo(Event{Type: EventNotification, Payload: payload}) > 0
+		})
+	}
+
 	// Persist session to disk before loop.Run() so there's a record even if
 	// the daemon crashes mid-execution. The final save after completion is
 	// still needed to capture the assistant's reply.

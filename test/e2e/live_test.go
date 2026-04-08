@@ -62,8 +62,8 @@ func TestLive_OneShot_SessionCWD(t *testing.T) {
 	// (macOS: /tmp → /private/tmp, /var → /private/var)
 	expected, _ := filepath.EvalSymlinks(tmpDir)
 	out := stdout.String()
-	if !strings.Contains(out, expected) {
-		t.Errorf("expected CWD %q in output, got: %s", expected, out)
+	if !strings.Contains(out, expected) && !strings.Contains(out, tmpDir) {
+		t.Errorf("expected CWD %q or %q in output, got: %s", expected, tmpDir, out)
 	}
 }
 

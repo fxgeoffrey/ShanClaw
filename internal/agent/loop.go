@@ -1724,7 +1724,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			cleanResult := stripLineNumbers(result.Content)
 			fullResult := cleanResult // preserved for cloud bypass (spill/shaping replace cleanResult)
 			if !result.CloudResult {
-				shapeKey := fc.Name
+				shapeKey := shapeContextKey(fc.Name, callMeta[idx].stateTraits, stateVersions)
 				var previous *ShapedResult
 				if shaped, ok := lastShapedRead[shapeKey]; ok {
 					copy := shaped

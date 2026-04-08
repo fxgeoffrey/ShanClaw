@@ -1442,6 +1442,65 @@ func TestAgentLoop_TreeReadShaping_CollapsesRepeatedSnapshots(t *testing.T) {
 	}
 }
 
+func TestAgentLoop_TreeReadShaping_WriteBoundaryPreventsUnchangedCarryover(t *testing.T) {
+	tree := strings.Repeat("button ref=e1234 label=Open\n", 150)
+
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		switch callCount {
+		case 1:
+			json.NewEncoder(w).Encode(nativeResponseWithID("", "tool_use",
+				toolCallWithID("browser_snapshot", `{}`, "toolu_tree_write_1"), 10, 5))
+		case 2:
+			json.NewEncoder(w).Encode(nativeResponseWithID("", "tool_use",
+				toolCallWithID("browser_navigate", `{"url":"https://example.com"}`, "toolu_tree_write_nav"), 10, 5))
+		case 3:
+			json.NewEncoder(w).Encode(nativeResponseWithID("", "tool_use",
+				toolCallWithID("browser_snapshot", `{}`, "toolu_tree_write_2"), 10, 5))
+		default:
+			json.NewEncoder(w).Encode(nativeResponse("Done.", "end_turn", nil, 10, 5))
+		}
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&mockCountingTool{name: "browser_snapshot", content: tree})
+	reg.Register(&mockCountingTool{name: "browser_navigate", content: "navigated"})
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+
+	result, _, err := loop.Run(context.Background(), "inspect, navigate, inspect again", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "Done." {
+		t.Fatalf("unexpected result: %q", result)
+	}
+
+	var snapshotResults []string
+	for _, msg := range loop.RunMessages() {
+		if !msg.Content.HasBlocks() {
+			continue
+		}
+		for _, b := range msg.Content.Blocks() {
+			if b.Type != "tool_result" {
+				continue
+			}
+			text := client.ToolResultText(b)
+			if strings.Contains(text, "tree snapshot") {
+				snapshotResults = append(snapshotResults, text)
+			}
+		}
+	}
+	if len(snapshotResults) < 2 {
+		t.Fatalf("expected at least 2 shaped snapshot results, got %d", len(snapshotResults))
+	}
+	if strings.Contains(snapshotResults[1], "unchanged since last read") {
+		t.Fatalf("snapshot after browser write should not reuse unchanged-collapse state, got %q", snapshotResults[1])
+	}
+}
+
 func TestAgentLoop_CloudResult_BypassesTreeShaping(t *testing.T) {
 	tree := strings.Repeat("button ref=e1234 label=Open\n", 120)
 

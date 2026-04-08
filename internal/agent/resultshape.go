@@ -41,6 +41,16 @@ func shapeContextResult(toolName, content string, previous *ShapedResult) Shaped
 	}
 }
 
+func shapeContextKey(toolName string, traits CallStateTraits, tracker *stateVersionTracker) string {
+	if tracker == nil || len(traits.Reads) == 0 {
+		return toolName
+	}
+	if fingerprint := tracker.fingerprint(traits.Reads); fingerprint != "" {
+		return toolName + "\x00" + fingerprint
+	}
+	return toolName
+}
+
 func shapeTreeResult(content string, previous *ShapedResult) ShapedResult {
 	normalizedLines := normalizeTreeLines(content)
 	if len(normalizedLines) == 0 {

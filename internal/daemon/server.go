@@ -23,6 +23,7 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/agent"
 	"github.com/Kocoro-lab/ShanClaw/internal/agents"
 	"github.com/Kocoro-lab/ShanClaw/internal/config"
+	ctxwin "github.com/Kocoro-lab/ShanClaw/internal/context"
 	"github.com/Kocoro-lab/ShanClaw/internal/mcp"
 	"github.com/Kocoro-lab/ShanClaw/internal/permissions"
 	"github.com/Kocoro-lab/ShanClaw/internal/schedule"
@@ -189,6 +190,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("GET /sessions/{id}", s.handleGetSession)
 	mux.HandleFunc("DELETE /sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("POST /sessions/{id}/edit", s.handleEditMessage)
+	mux.HandleFunc("POST /sessions/{id}/summary", s.handleSessionSummary)
 	mux.HandleFunc("GET /sessions/search", s.handleSessionSearch)
 	mux.HandleFunc("GET /permissions", s.handlePermissions)
 	mux.HandleFunc("POST /permissions/request", s.handlePermissionsRequest)
@@ -659,6 +661,77 @@ func (s *Server) handleEditMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
+}
+
+// handleSessionSummary 生成面向人类阅读的会话摘要，带缓存。
+// 缓存失效条件：消息数量变化（新消息追加或编辑 truncate）。
+func (s *Server) handleSessionSummary(w http.ResponseWriter, r *http.Request) {
+	if s.deps == nil {
+		writeError(w, http.StatusInternalServerError, "daemon deps not configured")
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "session id required")
+		return
+	}
+	if id != filepath.Base(id) || strings.ContainsAny(id, `/\`) {
+		writeError(w, http.StatusBadRequest, "invalid session id")
+		return
+	}
+	agentName := r.URL.Query().Get("agent")
+	if agentName != "" {
+		if err := agents.ValidateAgentName(agentName); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
+	mgr := s.deps.SessionCache.GetOrCreateManager(s.deps.SessionCache.SessionsDir(agentName))
+	sess, err := mgr.Load(id)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("session %q not found", id))
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	if len(sess.Messages) == 0 {
+		writeError(w, http.StatusBadRequest, "session has no messages")
+		return
+	}
+
+	// 缓存命中：消息数量未变
+	if sess.SummaryCache != "" && sess.SummaryCacheMsgN == len(sess.Messages) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"summary":       sess.SummaryCache,
+			"cached":        true,
+			"message_count": len(sess.Messages),
+		})
+		return
+	}
+
+	// 缓存未命中：调用 LLM 生成摘要
+	summary, err := ctxwin.SummarizeForUser(r.Context(), s.deps.GW, sess.Messages)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("summarization failed: %v", err))
+		return
+	}
+
+	// 更新缓存并持久化
+	sess.SummaryCache = summary
+	sess.SummaryCacheMsgN = len(sess.Messages)
+	if saveErr := mgr.SaveSession(sess); saveErr != nil {
+		log.Printf("daemon: failed to save summary cache for session %s: %v", id, saveErr)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"summary":       summary,
+		"cached":        false,
+		"message_count": len(sess.Messages),
+	})
 }
 
 // handleMessage runs an agent turn via POST. Supports synchronous JSON and SSE streaming.

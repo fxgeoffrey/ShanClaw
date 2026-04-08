@@ -71,6 +71,49 @@ func GenerateSummary(ctx context.Context, c Completer, messages []client.Message
 	return extractSummary(resp.OutputText), nil
 }
 
+const userSummarizePrompt = `You are a conversation summarizer. Read the following conversation and produce a clear, well-structured Markdown summary for a human reader.
+
+Requirements:
+- Write in the SAME LANGUAGE as the conversation (if the conversation is in Chinese, write in Chinese; if in English, write in English, etc.)
+- Use Markdown formatting with headers and bullet points
+- Focus on: what was discussed, key decisions made, work completed, and remaining action items
+- Be concise but comprehensive — a reader should understand the conversation's outcome without reading the full transcript
+- Do NOT include internal LLM terminology (tool_call, context window, tokens, etc.)
+- Do NOT wrap the output in code fences — output raw Markdown directly`
+
+// SummarizeForUser 调用 LLM 生成面向人类阅读的会话摘要。
+// 复用 messageText() 序列化逻辑，使用面向人类的 prompt，返回 Markdown 文本。
+func SummarizeForUser(ctx context.Context, c Completer, messages []client.Message) (string, error) {
+	var transcript strings.Builder
+	for _, m := range messages {
+		if m.Role == "system" {
+			continue
+		}
+		text := messageText(m)
+		if text == "" {
+			continue
+		}
+		fmt.Fprintf(&transcript, "[%s]: %s\n\n", m.Role, text)
+	}
+
+	req := client.CompletionRequest{
+		Messages: []client.Message{
+			{Role: "system", Content: client.NewTextContent(userSummarizePrompt)},
+			{Role: "user", Content: client.NewTextContent(transcript.String())},
+		},
+		ModelTier:   "small",
+		Temperature: 0.2,
+		MaxTokens:   2000,
+	}
+
+	resp, err := c.Complete(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("user summarization failed: %w", err)
+	}
+
+	return strings.TrimSpace(resp.OutputText), nil
+}
+
 // extractSummary extracts the <summary> content from a two-phase response.
 // If <summary> tags are present, returns their content.
 // If missing, strips any <analysis> block and returns the remainder.

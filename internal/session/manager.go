@@ -96,9 +96,9 @@ func (m *Manager) Save() error {
 	return m.store.Save(m.current)
 }
 
-// SaveSession 持久化指定 session（可以是非 current 的 session）。
-func (m *Manager) SaveSession(sess *Session) error {
-	return m.store.Save(sess)
+// SaveCacheOnly 持久化 session 但不更新 UpdatedAt，用于摘要缓存等不影响排序的写入。
+func (m *Manager) SaveCacheOnly(sess *Session) error {
+	return m.store.SaveCacheOnly(sess)
 }
 
 func (m *Manager) List() ([]SessionSummary, error) {

@@ -190,7 +190,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("GET /sessions/{id}", s.handleGetSession)
 	mux.HandleFunc("DELETE /sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("POST /sessions/{id}/edit", s.handleEditMessage)
-	mux.HandleFunc("POST /sessions/{id}/summary", s.handleSessionSummary)
+	mux.HandleFunc("GET /sessions/{id}/summary", s.handleSessionSummary)
 	mux.HandleFunc("GET /sessions/search", s.handleSessionSearch)
 	mux.HandleFunc("GET /permissions", s.handlePermissions)
 	mux.HandleFunc("POST /permissions/request", s.handlePermissionsRequest)
@@ -664,7 +664,8 @@ func (s *Server) handleEditMessage(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleSessionSummary 生成面向人类阅读的会话摘要，带缓存。
-// 缓存失效条件：消息数量变化（新消息追加或编辑 truncate）。
+// 缓存失效条件：消息数量或 UpdatedAt 变化（新消息追加或编辑 truncate）。
+// TODO: 对同一 session 的并发请求可能触发多次 LLM 调用，低优先级优化。
 func (s *Server) handleSessionSummary(w http.ResponseWriter, r *http.Request) {
 	if s.deps == nil {
 		writeError(w, http.StatusInternalServerError, "daemon deps not configured")
@@ -675,7 +676,7 @@ func (s *Server) handleSessionSummary(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "session id required")
 		return
 	}
-	if id != filepath.Base(id) || strings.ContainsAny(id, `/\`) {
+	if id != filepath.Base(id) {
 		writeError(w, http.StatusBadRequest, "invalid session id")
 		return
 	}
@@ -703,8 +704,11 @@ func (s *Server) handleSessionSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 缓存命中：消息数量未变
-	if sess.SummaryCache != "" && sess.SummaryCacheMsgN == len(sess.Messages) {
+	// 缓存 key = "消息数:UpdatedAt纳秒"，任何消息变更或编辑都会使之失效
+	cacheKey := fmt.Sprintf("%d:%d", len(sess.Messages), sess.UpdatedAt.UnixNano())
+
+	// 缓存命中
+	if sess.SummaryCache != "" && sess.SummaryCacheKey == cacheKey {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"summary":       sess.SummaryCache,
 			"cached":        true,
@@ -720,10 +724,10 @@ func (s *Server) handleSessionSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 更新缓存并持久化
+	// 更新缓存并持久化（不更新 UpdatedAt）
 	sess.SummaryCache = summary
-	sess.SummaryCacheMsgN = len(sess.Messages)
-	if saveErr := mgr.SaveSession(sess); saveErr != nil {
+	sess.SummaryCacheKey = cacheKey
+	if saveErr := mgr.SaveCacheOnly(sess); saveErr != nil {
 		log.Printf("daemon: failed to save summary cache for session %s: %v", id, saveErr)
 	}
 

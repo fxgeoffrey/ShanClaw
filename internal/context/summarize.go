@@ -36,27 +36,28 @@ type Completer interface {
 	Complete(ctx context.Context, req client.CompletionRequest) (*client.CompletionResponse, error)
 }
 
-// GenerateSummary calls the LLM (small tier) to summarize a conversation.
-// It strips the system message from the input to avoid wasting tokens.
-// Serializes both plain text and block content (tool_use, tool_result).
-func GenerateSummary(ctx context.Context, c Completer, messages []client.Message) (string, error) {
-	// Build conversation transcript, skipping system messages
-	var transcript strings.Builder
+// buildTranscript 将消息序列化为文本 transcript，跳过 system 消息。
+func buildTranscript(messages []client.Message) string {
+	var sb strings.Builder
 	for _, m := range messages {
 		if m.Role == "system" {
 			continue
 		}
-		text := messageText(m)
-		if text == "" {
-			continue
+		if t := messageText(m); t != "" {
+			fmt.Fprintf(&sb, "[%s]: %s\n\n", m.Role, t)
 		}
-		fmt.Fprintf(&transcript, "[%s]: %s\n\n", m.Role, text)
 	}
+	return sb.String()
+}
 
+// GenerateSummary calls the LLM (small tier) to summarize a conversation.
+// It strips the system message from the input to avoid wasting tokens.
+// Serializes both plain text and block content (tool_use, tool_result).
+func GenerateSummary(ctx context.Context, c Completer, messages []client.Message) (string, error) {
 	req := client.CompletionRequest{
 		Messages: []client.Message{
 			{Role: "system", Content: client.NewTextContent(summarizePrompt)},
-			{Role: "user", Content: client.NewTextContent(transcript.String())},
+			{Role: "user", Content: client.NewTextContent(buildTranscript(messages))},
 		},
 		ModelTier:   "small",
 		Temperature: 0.2,
@@ -82,24 +83,11 @@ Requirements:
 - Do NOT wrap the output in code fences — output raw Markdown directly`
 
 // SummarizeForUser 调用 LLM 生成面向人类阅读的会话摘要。
-// 复用 messageText() 序列化逻辑，使用面向人类的 prompt，返回 Markdown 文本。
 func SummarizeForUser(ctx context.Context, c Completer, messages []client.Message) (string, error) {
-	var transcript strings.Builder
-	for _, m := range messages {
-		if m.Role == "system" {
-			continue
-		}
-		text := messageText(m)
-		if text == "" {
-			continue
-		}
-		fmt.Fprintf(&transcript, "[%s]: %s\n\n", m.Role, text)
-	}
-
 	req := client.CompletionRequest{
 		Messages: []client.Message{
 			{Role: "system", Content: client.NewTextContent(userSummarizePrompt)},
-			{Role: "user", Content: client.NewTextContent(transcript.String())},
+			{Role: "user", Content: client.NewTextContent(buildTranscript(messages))},
 		},
 		ModelTier:   "small",
 		Temperature: 0.2,

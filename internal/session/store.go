@@ -33,10 +33,10 @@ type Session struct {
 	Messages    []client.Message `json:"messages"`
 	RemoteTasks []string         `json:"remote_tasks,omitempty"`
 	MessageMeta []MessageMeta    `json:"message_meta,omitempty"`
-	Source           string           `json:"source,omitempty"`              // "slack", "line", "shanclaw", "webhook"
-	Channel          string           `json:"channel,omitempty"`             // source channel/group identifier
-	SummaryCache     string           `json:"summary_cache,omitempty"`      // 缓存的摘要 Markdown
-	SummaryCacheMsgN int              `json:"summary_cache_msg_n,omitempty"` // 生成摘要时的 len(Messages)
+	Source       string `json:"source,omitempty"`            // "slack", "line", "shanclaw", "webhook"
+	Channel      string `json:"channel,omitempty"`           // source channel/group identifier
+	SummaryCache string `json:"summary_cache,omitempty"`     // 缓存的摘要 Markdown
+	SummaryCacheKey string `json:"summary_cache_key,omitempty"` // 生成摘要时的失效 key
 }
 
 // SourceAt returns the source for message at index i, or "unknown" if not available.
@@ -145,6 +145,24 @@ func (s *Store) Save(sess *Session) error {
 
 	if s.index != nil {
 		s.index.UpsertSession(sess) // best-effort, don't fail save on index error
+	}
+	return nil
+}
+
+// SaveCacheOnly 持久化 session 但不更新 UpdatedAt，用于写入摘要缓存等不影响排序的场景。
+func (s *Store) SaveCacheOnly(sess *Session) error {
+	data, err := json.MarshalIndent(sess, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal session: %w", err)
+	}
+
+	path := filepath.Join(s.dir, sess.ID+".json")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return err
+	}
+
+	if s.index != nil {
+		s.index.UpsertSession(sess)
 	}
 	return nil
 }

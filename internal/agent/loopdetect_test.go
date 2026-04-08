@@ -756,11 +756,8 @@ func TestLoopDetector_BrowserFamilyNoProgress(t *testing.T) {
 }
 
 func TestBrowserInToolFamilies(t *testing.T) {
-	family, ok := ToolFamilies["browser"]
-	if !ok {
-		t.Fatal("browser should be in ToolFamilies")
-	}
-	if family != "web" {
-		t.Errorf("browser family should be 'web', got %q", family)
+	family := toolFamily("browser")
+	if family != "browser" {
+		t.Errorf("browser family should be 'browser', got %q", family)
 	}
 }

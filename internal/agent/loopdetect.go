@@ -104,7 +104,7 @@ func NewLoopDetector() *LoopDetector {
 // Record adds a tool call to the sliding window.
 func (ld *LoopDetector) Record(name, argsJSON string, isError bool, errMsg string, resultSig string, isNonActionable bool) {
 	topicHash := ""
-	if ToolFamilies[name] != "" {
+	if toolFamily(name) != "" {
 		normalized := normalizeWebQuery(argsJSON)
 		if normalized != "" {
 			topicHash = hashArgs(normalized)
@@ -249,12 +249,12 @@ func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 
 	// 3. Family no-progress: web tools in the same family, counted by topic similarity.
 	// Tiered escalation: 3 same-topic → nudge, 5 → stronger nudge, 7 → force stop.
-	family := ToolFamilies[name]
+	family := toolFamily(name)
 	if family != "" {
 		latestTopic := ""
 		latestResult := ""
 		for i := len(ld.history) - 1; i >= 0; i-- {
-			if ToolFamilies[ld.history[i].Name] == family {
+			if toolFamily(ld.history[i].Name) == family {
 				if latestTopic == "" && ld.history[i].TopicHash != "" {
 					latestTopic = ld.history[i].TopicHash
 				}
@@ -271,7 +271,7 @@ func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 		sameTopicCount := 0
 		sameResultCount := 0
 		for _, rec := range ld.history {
-			if ToolFamilies[rec.Name] != family {
+			if toolFamily(rec.Name) != family {
 				continue
 			}
 			familyCount++
@@ -331,7 +331,7 @@ func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 		unproductiveStreak := 0
 		for i := len(ld.history) - 1; i >= 0; i-- {
 			rec := ld.history[i]
-			if ToolFamilies[rec.Name] != "search" {
+			if toolFamily(rec.Name) != "search" {
 				break // non-search tool breaks the streak
 			}
 			if !rec.IsNonActionable {

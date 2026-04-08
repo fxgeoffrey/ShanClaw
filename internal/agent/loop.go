@@ -43,6 +43,14 @@ type RunStatus struct {
 	IterationCount int
 }
 
+type MetaBoundary string
+
+const (
+	MetaBoundaryToolSearchLoaded MetaBoundary = "tool_search_loaded"
+	MetaBoundaryPostCompaction   MetaBoundary = "post_compaction"
+	MetaBoundaryRetryAfterError  MetaBoundary = "retry_after_error"
+)
+
 // defaultPersona is the identity line for the default (non-overridden) agent.
 // Named agents replace this with their AGENT.md content.
 const defaultPersona = `You are Shannon, an AI assistant running in a CLI terminal on the user's macOS computer. You have both local tools (file ops, shell, GUI control) and remote server tools (web search, research, analytics, multi-agent workflows).`
@@ -289,42 +297,41 @@ type InjectedMessage struct {
 }
 
 type AgentLoop struct {
-	client                       *client.GatewayClient
-	tools                        *ToolRegistry
-	modelTier                    string
-	handler                      EventHandler
-	shannonDir                   string
-	maxIter                      int
-	maxTokens                    int
-	resultTrunc                  int
-	argsTrunc                    int
-	permissions                  *permissions.PermissionsConfig
-	auditor                      *audit.AuditLogger
-	hookRunner                   *hooks.HookRunner
-	mcpContext                   string
-	bypassPermissions            bool
-	enableStreaming              bool
-	thinking                     *client.ThinkingConfig
-	reasoningEffort              string
-	temperature                  float64
-	specificModel                string
-	agentBasePrompt              string
-	agentSkills                  []*skills.Skill
-	contextWindow                int
-	memoryDir                    string      // directory containing MEMORY.md; re-read each Run(), write-before-compact target
-	stickyContext                string      // session-scoped facts injected verbatim into system prompt; never truncated
-	outputFormat                 string      // "markdown" (default) or "plain" — controls formatting guidance in volatile context
-	workingSet                   *WorkingSet // session-scoped deferred schema cache injected by the caller
-	sessionID                    string      // session ID for audit log correlation
-	sessionCWD                   string      // session-scoped working directory; set by runner/TUI before Run()
-	deltaProvider                DeltaProvider
-	injectCh                     chan InjectedMessage
-	injectedMessages             []string         // messages injected during the last Run(); cleared on each Run() call
-	runMessages                  []client.Message // conversation messages accumulated during the last Run() (excludes system+history)
-	runMsgInjected               []bool           // parallel to runMessages: true = system-injected guardrail/nudge
-	runMsgTimestamps             []time.Time      // parallel to runMessages: when each message was created
-	lastRunStatus                RunStatus
-	enableBrowserReadContainment bool
+	client            *client.GatewayClient
+	tools             *ToolRegistry
+	modelTier         string
+	handler           EventHandler
+	shannonDir        string
+	maxIter           int
+	maxTokens         int
+	resultTrunc       int
+	argsTrunc         int
+	permissions       *permissions.PermissionsConfig
+	auditor           *audit.AuditLogger
+	hookRunner        *hooks.HookRunner
+	mcpContext        string
+	bypassPermissions bool
+	enableStreaming   bool
+	thinking          *client.ThinkingConfig
+	reasoningEffort   string
+	temperature       float64
+	specificModel     string
+	agentBasePrompt   string
+	agentSkills       []*skills.Skill
+	contextWindow     int
+	memoryDir         string      // directory containing MEMORY.md; re-read each Run(), write-before-compact target
+	stickyContext     string      // session-scoped facts injected verbatim into system prompt; never truncated
+	outputFormat      string      // "markdown" (default) or "plain" — controls formatting guidance in volatile context
+	workingSet        *WorkingSet // session-scoped deferred schema cache injected by the caller
+	sessionID         string      // session ID for audit log correlation
+	sessionCWD        string      // session-scoped working directory; set by runner/TUI before Run()
+	deltaProvider     DeltaProvider
+	injectCh          chan InjectedMessage
+	injectedMessages  []string         // messages injected during the last Run(); cleared on each Run() call
+	runMessages       []client.Message // conversation messages accumulated during the last Run() (excludes system+history)
+	runMsgInjected    []bool           // parallel to runMessages: true = system-injected guardrail/nudge
+	runMsgTimestamps  []time.Time      // parallel to runMessages: when each message was created
+	lastRunStatus     RunStatus
 }
 
 func NewAgentLoop(gw *client.GatewayClient, tools *ToolRegistry, modelTier string, shannonDir string, maxIter int, resultTrunc int, argsTrunc int, perms *permissions.PermissionsConfig, auditor *audit.AuditLogger, hookRunner *hooks.HookRunner) *AgentLoop {
@@ -338,18 +345,17 @@ func NewAgentLoop(gw *client.GatewayClient, tools *ToolRegistry, modelTier strin
 		argsTrunc = 200
 	}
 	return &AgentLoop{
-		client:                       gw,
-		tools:                        tools,
-		modelTier:                    modelTier,
-		shannonDir:                   shannonDir,
-		maxIter:                      maxIter,
-		resultTrunc:                  resultTrunc,
-		argsTrunc:                    argsTrunc,
-		permissions:                  perms,
-		auditor:                      auditor,
-		hookRunner:                   hookRunner,
-		workingSet:                   NewWorkingSet(),
-		enableBrowserReadContainment: true,
+		client:      gw,
+		tools:       tools,
+		modelTier:   modelTier,
+		shannonDir:  shannonDir,
+		maxIter:     maxIter,
+		resultTrunc: resultTrunc,
+		argsTrunc:   argsTrunc,
+		permissions: perms,
+		auditor:     auditor,
+		hookRunner:  hookRunner,
+		workingSet:  NewWorkingSet(),
 	}
 }
 
@@ -371,10 +377,6 @@ func (a *AgentLoop) SetBypassPermissions(bypass bool) {
 
 func (a *AgentLoop) SetMaxTokens(maxTokens int) {
 	a.maxTokens = maxTokens
-}
-
-func (a *AgentLoop) SetEnableBrowserReadContainment(enabled bool) {
-	a.enableBrowserReadContainment = enabled
 }
 
 // LastRunStatus returns the status from the most recent Run call.
@@ -911,6 +913,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		lastToolName    string
 		retryCount      int
 		iterationCount  int
+		stateVersions   = newStateVersionTracker()
 
 		// Denied-call blocking: track tool+args denied by the user this turn
 		// to prevent re-prompting for the same call.
@@ -925,6 +928,40 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			RetryCount:     retryCount,
 			IterationCount: iterationCount,
 		}
+	}
+
+	boundaryText := func(boundary MetaBoundary) string {
+		switch boundary {
+		case MetaBoundaryToolSearchLoaded:
+			return "[system] Deferred tool schemas are now loaded. Continue working on the current request using those tools:\n\n" + latestUserText
+		case MetaBoundaryPostCompaction:
+			return "[system] Context was compacted. Stay focused on the current request and continue from there:\n\n" + latestUserText
+		case MetaBoundaryRetryAfterError:
+			return "[system] You are retrying after an interruption. Stay focused on the current request:\n\n" + latestUserText
+		default:
+			return ""
+		}
+	}
+
+	reanchorActiveTask := func(boundary MetaBoundary) {
+		if strings.TrimSpace(latestUserText) == "" {
+			return
+		}
+		text := boundaryText(boundary)
+		if text == "" {
+			return
+		}
+		if len(messages) > 0 {
+			lastIdx := len(messages) - 1
+			if injectedIndices[lastIdx] && messages[lastIdx].Role == "user" && !messages[lastIdx].Content.HasBlocks() && messages[lastIdx].Content.Text() == text {
+				return
+			}
+		}
+		messages = append(messages, client.Message{
+			Role:    "user",
+			Content: client.NewTextContent(text),
+		})
+		markInjected()
 	}
 
 	for i := 0; ; i++ {
@@ -1093,6 +1130,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 						msgTimestamps = rebasedTS
 					}
 					compactionApplied = true
+					reanchorActiveTask(MetaBoundaryPostCompaction)
 				}
 			}
 		}
@@ -1224,6 +1262,8 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 					msgTimestamps = rebasedTS
 				}
 
+				reanchorActiveTask(MetaBoundaryPostCompaction)
+
 				// Rebuild request with compacted messages.
 				req = client.CompletionRequest{
 					Messages:        messages,
@@ -1245,6 +1285,8 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			backoff := time.Duration(1<<attempt) * time.Second // 1s, 2s, 4s
 			reason := classifyLLMError(err)
 			retryCount++
+			reanchorActiveTask(MetaBoundaryRetryAfterError)
+			req.Messages = messages
 			fmt.Fprintf(os.Stderr, "[agent] LLM call failed (attempt %d/%d), retrying in %v: %v\n", attempt+1, maxLLMRetries, backoff, err)
 			if a.handler != nil {
 				a.handler.OnCloudAgent("", "retry", fmt.Sprintf("Retrying request (attempt %d/%d): %s", attempt+1, maxLLMRetries, reason))
@@ -1379,26 +1421,6 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				continue
 			}
 
-			// Post-tool_search continuation nudge: tool_search loaded schemas
-			// but the model stopped with text instead of calling the loaded tools.
-			// Inject a nudge with the most recent user message and loop.
-			// Uses the latest user message (not the original run input) so that
-			// daemon mid-run injections are respected.
-			if toolSearchFired {
-				toolSearchFired = false
-				messages = append(messages, client.Message{
-					Role:    "assistant",
-					Content: client.NewTextContent(resp.OutputText),
-				})
-				stampMessage()
-				messages = append(messages, client.Message{
-					Role:    "user",
-					Content: client.NewTextContent("[system] The deferred tool schemas are now loaded. Here is the current request — continue working on it now using the loaded tools:\n\n" + latestUserText),
-				})
-				markInjected()
-				continue
-			}
-
 			// Only render text for the final response — intermediate text
 			// from checkpoint/hallucination paths must not leak to the user.
 			// If earlier iterations were truncated, prepend the accumulated text.
@@ -1467,6 +1489,8 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			decision    string
 			wasApproved bool
 			resolved    bool // true if already resolved (denied/unknown/hook-denied)
+			cacheKey    string
+			stateTraits CallStateTraits
 		}
 		callMeta := make([]perCallMeta, len(toolCalls))
 		execResults := make([]toolExecResult, len(toolCalls))
@@ -1508,22 +1532,6 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				continue
 			}
 
-			// Cross-iteration dedup: return cached result if identical call succeeded in previous iteration
-			if cached, ok := prevIterResults[dedupKey]; ok {
-				callMeta[idx].resolved = true
-				execResults[idx] = toolExecResult{
-					result: ToolResult{
-						Content: "Already called with identical arguments. Previous result:\n" + cached.Content,
-						IsError: cached.IsError,
-						Images:  cached.Images,
-					},
-				}
-				if a.handler != nil {
-					a.handler.OnToolResult(fc.Name, argsStr, execResults[idx].result, 0)
-				}
-				continue
-			}
-
 			// cloud_delegate: once-per-turn lock. The first call claims the lock;
 			// any subsequent call (same response or later iteration) is blocked.
 			// The lock resets if the call fails, allowing retry.
@@ -1554,6 +1562,32 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 					a.handler.OnToolResult(fc.Name, argsStr, execResults[idx].result, 0)
 				}
 				continue
+			}
+
+			stateTraits := resolveCallStateTraits(fc.Name, argsStr)
+			if !stateTraits.Cacheable && len(stateTraits.Reads) == 0 && len(stateTraits.Writes) == 0 && !stateTraits.UnknownWrite {
+				stateTraits = resolveFallbackReadStateTraits(tool, argsStr)
+			}
+			callMeta[idx].stateTraits = stateTraits
+			callMeta[idx].cacheKey = buildStateAwareCacheKey(fc.Name, fc.Arguments, stateTraits, stateVersions)
+
+			// Cross-iteration dedup: return cached result if identical call against the
+			// same tracked state succeeded in a previous iteration.
+			if callMeta[idx].cacheKey != "" {
+				if cached, ok := prevIterResults[callMeta[idx].cacheKey]; ok {
+					callMeta[idx].resolved = true
+					execResults[idx] = toolExecResult{
+						result: ToolResult{
+							Content: "Already called with identical arguments. Previous result:\n" + cached.Content,
+							IsError: cached.IsError,
+							Images:  cached.Images,
+						},
+					}
+					if a.handler != nil {
+						a.handler.OnToolResult(fc.Name, argsStr, execResults[idx].result, 0)
+					}
+					continue
+				}
 			}
 
 			// Permission check
@@ -1766,7 +1800,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				errMsg = result.Content
 			}
 			resultSig := ""
-			if ToolFamilies[fc.Name] != "" {
+			if toolFamily(fc.Name) != "" {
 				resultSig = extractResultSignature(result.Content)
 			}
 			nonActionable := isNonActionableSearch(fc.Name, result)
@@ -1890,29 +1924,35 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		}
 
 		// Accumulate cross-iteration result cache from this iteration's successful executions.
-		// Sanitize before caching to avoid re-injecting raw base64 blobs into context.
-		// Invalidate stale file_read entries when file_edit/file_write modifies a path.
+		// Cache keys are state-versioned, so writes advance tracked state before later
+		// iterations compute their read fingerprints. Unknown writes fail closed by
+		// clearing the cache because we cannot safely determine what changed.
 		for _, ac := range approved {
 			r := execResults[ac.index].result
-			if !r.IsError {
-				key := ac.fc.Name + "\x00" + normalizeJSON(ac.fc.Arguments)
-				cached := ToolResult{Content: r.Content, IsError: false, Images: r.Images}
-				if len(cached.Images) == 0 {
-					cached.Content = sanitizeResult(cached.Content)
-				}
-				prevIterResults[key] = cached
-
-				// Evict file_read cache when the same path is written/edited
-				if ac.fc.Name == "file_write" || ac.fc.Name == "file_edit" {
-					if p := extractPathArg(callMeta[ac.index].argsStr); p != "" {
-						readKey := "file_read" + "\x00" + normalizeJSON(json.RawMessage(`{"path":"`+p+`"}`))
-						delete(prevIterResults, readKey)
-					}
-				}
-				if a.enableBrowserReadContainment && isContainedBrowserMutationTool(ac.fc.Name) {
-					evictContainedBrowserReadCache(prevIterResults)
-				}
+			if r.IsError {
+				continue
 			}
+
+			meta := callMeta[ac.index]
+			if meta.stateTraits.UnknownWrite {
+				clear(prevIterResults)
+			}
+			if len(meta.stateTraits.Writes) > 0 {
+				stateVersions.bump(meta.stateTraits.Writes)
+			}
+			if meta.cacheKey == "" {
+				continue
+			}
+
+			cached := ToolResult{Content: r.Content, IsError: false, Images: r.Images}
+			if len(cached.Images) == 0 {
+				cached.Content = sanitizeResult(cached.Content)
+			}
+			prevIterResults[meta.cacheKey] = cached
+		}
+
+		if toolSearchFired && worstAction == LoopContinue {
+			reanchorActiveTask(MetaBoundaryToolSearchLoaded)
 		}
 
 		// One-shot cloud delegation nudge when struggling with web tasks
@@ -2257,30 +2297,6 @@ func hasNativeToolIDs(toolCalls []client.FunctionCall) bool {
 		}
 	}
 	return true
-}
-
-var containedBrowserReadTools = map[string]bool{
-	"browser_snapshot":        true,
-	"browser_take_screenshot": true,
-	"browser_tabs":            true,
-}
-
-func isContainedBrowserMutationTool(name string) bool {
-	return strings.HasPrefix(name, "browser_") && !containedBrowserReadTools[name]
-}
-
-func evictContainedBrowserReadCache(prevIterResults map[string]ToolResult) {
-	if len(prevIterResults) == 0 {
-		return
-	}
-	for key := range prevIterResults {
-		for name := range containedBrowserReadTools {
-			if strings.HasPrefix(key, name+"\x00") {
-				delete(prevIterResults, key)
-				break
-			}
-		}
-	}
 }
 
 // effectiveMaxIter returns a dynamic iteration limit based on tools used so far.

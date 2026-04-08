@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"testing"
 
@@ -182,6 +183,30 @@ func TestToolSearchTool_RequiresApproval(t *testing.T) {
 	ts := newTestToolSearchAgent()
 	if ts.RequiresApproval() {
 		t.Error("tool_search should not require approval")
+	}
+}
+
+func TestExpandDeferredFamilyCore_LoadsBrowserCore(t *testing.T) {
+	reg := NewToolRegistry()
+	deferred := make(map[string]bool)
+	for _, name := range FamilyRegistry["browser"].Core {
+		reg.Register(&mockMCPTool{name: name})
+		deferred[name] = true
+	}
+	reg.Register(&mockMCPTool{name: "mock_extra"})
+	deferred["mock_extra"] = true
+
+	expanded := expandDeferredFamilyCore(reg, deferred, []string{"browser_navigate"})
+
+	if len(expanded) != len(FamilyRegistry["browser"].Core) {
+		t.Fatalf("expected browser family core only, got %v", expanded)
+	}
+	expected := append([]string(nil), FamilyRegistry["browser"].Core...)
+	sort.Strings(expected)
+	for i, name := range expected {
+		if expanded[i] != name {
+			t.Fatalf("index %d: expected %q, got %q", i, name, expanded[i])
+		}
 	}
 }
 

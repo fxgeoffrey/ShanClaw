@@ -8,18 +8,48 @@ import (
 	"unicode"
 )
 
+type FamilySpec struct {
+	Core     []string
+	Extended []string
+}
+
 // ToolFamilies maps tool names to their logical family for grouping
 // related tools in loop detection (e.g., web_search + web_fetch = "web").
 var ToolFamilies = map[string]string{
 	"web_search":    "web",
 	"web_fetch":     "web",
-	"browser":       "web",
+	"browser":       "browser",
 	"accessibility": "gui",
 	"screenshot":    "gui",
 	"computer":      "gui",
 	"applescript":   "gui",
 	"grep":          "search",
 	"glob":          "search",
+}
+
+var FamilyRegistry = map[string]FamilySpec{
+	"browser": {
+		Core: []string{
+			"browser_navigate",
+			"browser_snapshot",
+			"browser_click",
+			"browser_type",
+			"browser_press_key",
+			"browser_take_screenshot",
+			"browser_tabs",
+		},
+		Extended: []string{
+			"browser_drag",
+			"browser_select_option",
+		},
+	},
+}
+
+func toolFamily(name string) string {
+	if strings.HasPrefix(name, "browser_") {
+		return "browser"
+	}
+	return ToolFamilies[name]
 }
 
 // fillerWords are common query padding that don't affect semantic meaning.
@@ -164,7 +194,7 @@ func extractResultSignature(content string) string {
 // that don't help the model make progress: no matches, binary-only matches,
 // or errors. Productive searches (actual source code hits) return false.
 func isNonActionableSearch(toolName string, result ToolResult) bool {
-	if ToolFamilies[toolName] != "search" {
+	if toolFamily(toolName) != "search" {
 		return false
 	}
 	if result.IsError {

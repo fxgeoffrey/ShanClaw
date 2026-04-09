@@ -149,6 +149,16 @@ func (s *Store) Save(sess *Session) error {
 	return nil
 }
 
+// PatchTitle 从磁盘重新读取 session，仅更新标题后写回。
+func (s *Store) PatchTitle(id, title string) error {
+	sess, err := s.Load(id)
+	if err != nil {
+		return err
+	}
+	sess.Title = title
+	return s.Save(sess)
+}
+
 // PatchSummaryCache 从磁盘重新读取 session 的最新版本，仅更新摘要缓存字段后写回。
 // 避免覆盖在初次 Load 和写入之间被 agent loop 追加的新消息。
 // 不更新 UpdatedAt，不影响 session 排序。

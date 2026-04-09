@@ -1467,6 +1467,18 @@ func (m *Model) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 		} else {
 			m.appendOutput("No messages in session")
 		}
+	case "/rename":
+		if len(parts) < 2 {
+			m.appendOutput("Usage: /rename <new title>")
+		} else {
+			newTitle := strings.TrimSpace(strings.TrimPrefix(input, "/rename "))
+			sess := m.sessions.Current()
+			if sess != nil {
+				sess.Title = newTitle
+				m.sessions.Save()
+				m.appendOutput(fmt.Sprintf("Session renamed: %s", newTitle))
+			}
+		}
 	case "/research":
 		return m.handleResearch(parts[1:])
 	case "/swarm":
@@ -1787,6 +1799,7 @@ Commands:
   /session new                   Start new session
   /session resume <id>           Resume a saved session
   /model [small|medium|large]    Switch model tier
+  /rename <title>                Rename current session
   /copy                          Copy last response to clipboard
   /clear                         Clear screen
   /quit                          Exit`

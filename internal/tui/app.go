@@ -269,18 +269,6 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	ta.BlurredStyle.CursorLine = lipgloss.NewStyle()
 
-	var llmClient client.LLMClient
-	var gateway *client.GatewayClient
-	if cfg.Provider == "ollama" {
-		model := cfg.Ollama.Model
-		if cfg.Agent.Model != "" {
-			model = cfg.Agent.Model
-		}
-		llmClient = client.NewOllamaClient(cfg.Ollama.Endpoint, model)
-	} else {
-		gateway = client.NewGatewayClient(cfg.Endpoint, cfg.APIKey)
-		llmClient = gateway
-	}
 	shannonDir := config.ShannonDir()
 	agentsDir := filepath.Join(shannonDir, "agents")
 	if err := agents.EnsureBuiltins(agentsDir, version); err != nil {
@@ -310,6 +298,21 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 	if err != nil {
 		log.Printf("WARNING: failed to load runtime config for %q: %v", initialCWD, err)
 		runtimeCfg = config.Clone(cfg)
+	}
+
+	// Create LLM client from runtimeCfg (after project-level overlay) so
+	// project-local provider overrides take effect.
+	var llmClient client.LLMClient
+	var gateway *client.GatewayClient
+	if runtimeCfg.Provider == "ollama" {
+		model := runtimeCfg.Ollama.Model
+		if runtimeCfg.Agent.Model != "" {
+			model = runtimeCfg.Agent.Model
+		}
+		llmClient = client.NewOllamaClient(runtimeCfg.Ollama.Endpoint, model)
+	} else {
+		gateway = client.NewGatewayClient(runtimeCfg.Endpoint, runtimeCfg.APIKey)
+		llmClient = gateway
 	}
 
 	// Create audit logger (best-effort)
@@ -472,6 +475,8 @@ func (m *Model) rebuildAgentLoop() {
 	loop.SetContextWindow(m.cfg.Agent.ContextWindow)
 	if m.cfg.Agent.Model != "" {
 		loop.SetSpecificModel(m.cfg.Agent.Model)
+	} else if m.cfg.Provider == "ollama" && m.cfg.Ollama.Model != "" {
+		loop.SetSpecificModel(m.cfg.Ollama.Model)
 	}
 	if m.cfg.Agent.Thinking && m.cfg.Provider != "ollama" {
 		if m.cfg.Agent.ThinkingMode == "enabled" {

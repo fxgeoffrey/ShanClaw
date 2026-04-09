@@ -350,6 +350,7 @@ func (c *OllamaClient) CompleteStream(ctx context.Context, req CompletionRequest
 	var finishReason string
 	var model string
 	var usage Usage
+	var toolCalls []FunctionCall
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -370,6 +371,14 @@ func (c *OllamaClient) CompleteStream(ctx context.Context, req CompletionRequest
 				Delta struct {
 					Content   string `json:"content"`
 					Reasoning string `json:"reasoning"`
+					ToolCalls []struct {
+						ID       string `json:"id"`
+						Type     string `json:"type"`
+						Function struct {
+							Name      string          `json:"name"`
+							Arguments json.RawMessage `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
 				} `json:"delta"`
 				FinishReason *string `json:"finish_reason"`
 			} `json:"choices"`
@@ -399,6 +408,19 @@ func (c *OllamaClient) CompleteStream(ctx context.Context, req CompletionRequest
 			if delta.Reasoning != "" {
 				reasoningText.WriteString(delta.Reasoning)
 			}
+			// Ollama sends tool calls as a complete chunk (not delta-split like OpenAI)
+			for _, tc := range delta.ToolCalls {
+				args := tc.Function.Arguments
+				var argsStr string
+				if err := json.Unmarshal(args, &argsStr); err == nil {
+					args = json.RawMessage(argsStr)
+				}
+				toolCalls = append(toolCalls, FunctionCall{
+					ID:        tc.ID,
+					Name:      tc.Function.Name,
+					Arguments: args,
+				})
+			}
 			if chunk.Choices[0].FinishReason != nil {
 				finishReason = *chunk.Choices[0].FinishReason
 			}
@@ -427,6 +449,7 @@ func (c *OllamaClient) CompleteStream(ctx context.Context, req CompletionRequest
 		Model:        model,
 		OutputText:   output,
 		FinishReason: mapFinishReason(finishReason),
+		ToolCalls:    toolCalls,
 		Usage:        usage,
 	}, nil
 }

@@ -24,7 +24,11 @@ const (
 
 // NeedsSetup returns true if the config has no API key and the endpoint
 // is not a local address (localhost/127.0.0.1 bypass auth).
+// Ollama provider never needs gateway setup.
 func NeedsSetup(cfg *Config) bool {
+	if cfg.Provider == "ollama" {
+		return cfg.Ollama.Model == "" // model required for ollama to be usable
+	}
 	if cfg.APIKey != "" {
 		return false
 	}
@@ -274,10 +278,13 @@ func fetchOllamaModels(endpoint string) ([]ollamaModelInfo, error) {
 // where no real shannon dir exists) by printing a warning instead of failing.
 func saveSetup(cfg *Config, out io.Writer) error {
 	if err := Save(cfg); err != nil {
+		// Save may fail in test environments (no real config dir) or due to
+		// permission issues. Print a warning so the user knows, but don't
+		// block setup — the in-memory config is still correct for this session.
 		fmt.Fprintf(out, "Warning: could not save config: %v\n", err)
-		return nil
+	} else if dir := ShannonDir(); dir != "" {
+		fmt.Fprintf(out, "Config saved to %s/config.yaml\n", dir)
 	}
-	fmt.Fprintf(out, "Config saved to %s/config.yaml\n", ShannonDir())
 	fmt.Fprintln(out)
 	return nil
 }

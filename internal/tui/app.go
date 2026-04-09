@@ -27,9 +27,11 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/audit"
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
 	"github.com/Kocoro-lab/ShanClaw/internal/config"
+	ctxwin "github.com/Kocoro-lab/ShanClaw/internal/context"
 	"github.com/Kocoro-lab/ShanClaw/internal/cwdctx"
 	"github.com/Kocoro-lab/ShanClaw/internal/hooks"
 	"github.com/Kocoro-lab/ShanClaw/internal/instructions"
+	"github.com/Kocoro-lab/ShanClaw/internal/permissions"
 	"github.com/Kocoro-lab/ShanClaw/internal/session"
 	"github.com/Kocoro-lab/ShanClaw/internal/skills"
 	"github.com/Kocoro-lab/ShanClaw/internal/tools"
@@ -169,6 +171,13 @@ type Model struct {
 	headerCWD       string                   // cached working directory
 	markdownCacheMu sync.RWMutex
 	markdownCache   map[string]string
+	// Input history
+	inputHistory []string // past submitted inputs (oldest first)
+	historyIdx   int      // -1 = current input, 0..len-1 = history position (from end)
+	historySaved string   // current input saved when entering history
+	lastEscTime  time.Time // for double-escape detection
+	sessionAllowed      map[string]bool // tools always-allowed for this session
+	pendingApprovalTool string          // tool name awaiting approval
 }
 
 type slashCmd struct {
@@ -390,6 +399,7 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 		skillsPtr:      skillsPtr,
 		markdownCache:  make(map[string]string),
 		slashCommands:  instanceCmds,
+		sessionAllowed: make(map[string]bool),
 	}
 
 	return m
@@ -656,6 +666,17 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.menuVisible = false
 				return m, nil
 			}
+			if m.state == stateInput && m.textarea.Value() != "" {
+				now := time.Now()
+				if !m.lastEscTime.IsZero() && now.Sub(m.lastEscTime) < 800*time.Millisecond {
+					m.textarea.SetValue("")
+					m.textarea.SetHeight(1)
+					m.lastEscTime = time.Time{}
+					return m, nil
+				}
+				m.lastEscTime = now
+				return m, nil
+			}
 		case tea.KeyTab:
 			if m.menuVisible && len(m.menuItems) > 0 {
 				selected := m.menuItems[m.menuIndex]
@@ -689,6 +710,23 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+			if m.state == stateInput && !m.menuVisible && len(m.inputHistory) > 0 {
+				taLines := strings.Count(m.textarea.Value(), "\n") + 1
+				if taLines <= 1 { // only navigate history when single-line
+					if m.historyIdx == -1 {
+						m.historySaved = m.textarea.Value()
+					}
+					newIdx := m.historyIdx + 1
+					histLen := len(m.inputHistory)
+					if newIdx >= histLen {
+						newIdx = histLen - 1
+					}
+					m.historyIdx = newIdx
+					m.textarea.SetValue(m.inputHistory[histLen-1-newIdx])
+					m.textarea.CursorEnd()
+					return m, nil
+				}
+			}
 		case tea.KeyDown:
 			if m.state == stateInput && m.menuVisible && len(m.menuItems) > 0 {
 				m.menuIndex++
@@ -696,6 +734,20 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.menuIndex = 0
 				}
 				return m, nil
+			}
+			if m.state == stateInput && !m.menuVisible && m.historyIdx >= 0 {
+				taLines := strings.Count(m.textarea.Value(), "\n") + 1
+				if taLines <= 1 {
+					m.historyIdx--
+					if m.historyIdx < 0 {
+						m.textarea.SetValue(m.historySaved)
+					} else {
+						histLen := len(m.inputHistory)
+						m.textarea.SetValue(m.inputHistory[histLen-1-m.historyIdx])
+					}
+					m.textarea.CursorEnd()
+					return m, nil
+				}
 			}
 		}
 
@@ -706,6 +758,49 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.toolExpandLevel = 1
 			return m, m.flushPrints()
+		}
+
+		// Readline shortcuts (only in stateInput, not during menus)
+		if m.state == stateInput && !m.menuVisible {
+			switch msg.Type {
+			case tea.KeyCtrlK: // Delete to end of line
+				val := m.textarea.Value()
+				pos := m.textarea.LineInfo().CharOffset
+				runes := []rune(val)
+				if pos < len(runes) {
+					m.textarea.SetValue(string(runes[:pos]))
+				}
+				return m, nil
+			case tea.KeyCtrlU: // Delete to start of line
+				val := m.textarea.Value()
+				pos := m.textarea.LineInfo().CharOffset
+				runes := []rune(val)
+				if pos > 0 && pos <= len(runes) {
+					m.textarea.SetValue(string(runes[pos:]))
+					m.textarea.CursorStart()
+				}
+				return m, nil
+			case tea.KeyCtrlW: // Delete word backward
+				val := m.textarea.Value()
+				pos := m.textarea.LineInfo().CharOffset
+				runes := []rune(val)
+				if pos > 0 && pos <= len(runes) {
+					i := pos - 1
+					for i > 0 && runes[i] == ' ' {
+						i--
+					}
+					for i > 0 && runes[i-1] != ' ' {
+						i--
+					}
+					newVal := string(runes[:i]) + string(runes[pos:])
+					m.textarea.SetValue(newVal)
+					m.textarea.SetCursor(i)
+				}
+				return m, nil
+			case tea.KeyCtrlL: // Clear screen
+				m.output = nil
+				return m, m.rerenderOutput()
+			}
 		}
 
 		if m.state == stateSessionPicker {
@@ -755,6 +850,14 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "n", "N":
 				select {
 				case m.approvalCh <- false:
+				default:
+				}
+				m.state = stateProcessing
+				return m, nil
+			case "a", "A":
+				m.sessionAllowed[m.pendingApprovalTool] = true
+				select {
+				case m.approvalCh <- true:
 				default:
 				}
 				m.state = stateProcessing
@@ -832,11 +935,20 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.rerenderOutput()
 
 	case approvalRequestMsg:
+		m.pendingApprovalTool = msg.tool
+		// Check session-level auto-approve
+		if m.sessionAllowed[msg.tool] {
+			select {
+			case m.approvalCh <- true:
+			default:
+			}
+			return m, nil
+		}
 		m.state = stateApproval
 		dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 		warnIcon := lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("?")
 		keyArg := toolKeyArg(msg.tool, msg.args)
-		m.appendOutput(dimStyle.Render(fmt.Sprintf("⏵ %s(%s)  %s  Allow?", msg.tool, keyArg, warnIcon)))
+		m.appendOutput(dimStyle.Render(fmt.Sprintf("⏵ %s(%s)  %s  Allow? [y/n/a]", msg.tool, keyArg, warnIcon)))
 		// Full repaint on state transition to avoid cursor mis-positioning
 		// (same race as agentDoneMsg — view changes before pending Println arrives).
 		return m, m.rerenderOutput()
@@ -917,6 +1029,20 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.toolExpandLevel = 0
 		return m, nil
 
+	case doctorDoneMsg:
+		m.state = stateInput
+		m.appendOutput(formatDoctorResults(msg.checks))
+		return m, m.rerenderOutput()
+
+	case compactDoneMsg:
+		m.state = stateInput
+		if msg.err != nil {
+			m.appendOutput(fmt.Sprintf("Compact failed: %v", msg.err))
+		} else {
+			m.appendOutput(formatCompactResult(msg))
+		}
+		return m, m.rerenderOutput()
+
 	case clipboardResultMsg:
 		if msg.err != nil {
 			m.appendOutput(fmt.Sprintf("Copy failed: %v", msg.err))
@@ -987,7 +1113,7 @@ func (m *Model) View() string {
 	case stateApproval:
 		sb.WriteString(bar)
 		sb.WriteString("\n")
-		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("  [y/n] "))
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("  [y/n/a] "))
 		sb.WriteString("\n")
 		sb.WriteString(bar)
 	case stateSessionPicker:
@@ -1022,6 +1148,16 @@ func (m *Model) handleSubmit() (tea.Model, tea.Cmd) {
 	if input == "" {
 		return m, nil
 	}
+
+	// Record in history (skip duplicates of last entry)
+	if len(m.inputHistory) == 0 || m.inputHistory[len(m.inputHistory)-1] != input {
+		m.inputHistory = append(m.inputHistory, input)
+		if len(m.inputHistory) > 200 {
+			m.inputHistory = m.inputHistory[len(m.inputHistory)-200:]
+		}
+	}
+	m.historyIdx = -1
+	m.historySaved = ""
 
 	promptMark := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("252")).Render(">")
 	m.appendOutput(fmt.Sprintf("%s %s", promptMark, input))
@@ -1386,6 +1522,10 @@ func (m *Model) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 		m.appendOutput(helpText())
 	case "/clear":
 		m.output = nil
+		sess := m.sessions.NewSession()
+		m.resumedSession = false
+		m.applyRuntimeContext(sess)
+		return m, m.rerenderOutput()
 	case "/sessions":
 		sessions, err := m.sessions.List()
 		if err != nil {
@@ -1489,6 +1629,115 @@ func (m *Model) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+	case "/status":
+		sess := m.sessions.Current()
+		agentName := "default"
+		if m.agentOverride != nil {
+			agentName = m.agentOverride.Name
+		}
+		sessID := "(none)"
+		msgCount := 0
+		tokenEst := 0
+		if sess != nil {
+			sessID = sess.ID
+			msgCount = len(sess.Messages)
+			tokenEst = ctxwin.EstimateTokens(sess.Messages)
+		}
+		ctxWindow := m.cfg.Agent.ContextWindow
+		if ctxWindow <= 0 {
+			ctxWindow = 128000
+		}
+		pct := float64(tokenEst) / float64(ctxWindow) * 100
+		toolCount := 0
+		if m.toolRegistry != nil {
+			toolCount = m.toolRegistry.Len()
+		}
+		dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+		m.appendOutput(dimStyle.Render(fmt.Sprintf(
+			"  Version:     %s\n"+
+				"  Model:       %s\n"+
+				"  Endpoint:    %s\n"+
+				"  Agent:       %s\n"+
+				"  Session:     %s (%d messages)\n"+
+				"  Context:     ~%s / %s tokens (%.1f%%)\n"+
+				"  Tools:       %d registered",
+			m.version, m.cfg.ModelTier, m.cfg.Endpoint, agentName,
+			sessID, msgCount,
+			formatTokenCount(tokenEst), formatTokenCount(ctxWindow), pct,
+			toolCount,
+		)))
+	case "/doctor":
+		m.appendOutput("Running diagnostics...")
+		m.state = stateProcessing
+		m.processingStartTime = time.Now()
+		return m, tea.Batch(m.runDoctor(), spinnerTick(), spinnerFrameTick())
+	case "/permissions":
+		if len(parts) == 1 {
+			m.appendOutput(formatPermissions(&m.cfg.Permissions))
+		} else {
+			sub := parts[1]
+			if len(parts) < 3 {
+				m.appendOutput("Usage: /permissions allow|deny|remove <pattern>")
+				break
+			}
+			pattern := strings.Join(parts[2:], " ")
+			switch sub {
+			case "allow":
+				m.cfg.Permissions.AllowedCommands = append(m.cfg.Permissions.AllowedCommands, pattern)
+				if m.baseCfg != nil {
+					m.baseCfg.Permissions.AllowedCommands = append(m.baseCfg.Permissions.AllowedCommands, pattern)
+				}
+				if err := config.Save(m.baseCfg); err != nil {
+					m.appendOutput(fmt.Sprintf("Allowed %q (save failed: %v)", pattern, err))
+				} else {
+					m.appendOutput(fmt.Sprintf("Allowed: %s (saved)", pattern))
+				}
+			case "deny":
+				m.cfg.Permissions.DeniedCommands = append(m.cfg.Permissions.DeniedCommands, pattern)
+				if m.baseCfg != nil {
+					m.baseCfg.Permissions.DeniedCommands = append(m.baseCfg.Permissions.DeniedCommands, pattern)
+				}
+				if err := config.Save(m.baseCfg); err != nil {
+					m.appendOutput(fmt.Sprintf("Denied %q (save failed: %v)", pattern, err))
+				} else {
+					m.appendOutput(fmt.Sprintf("Denied: %s (saved)", pattern))
+				}
+			case "remove":
+				removed := false
+				m.cfg.Permissions.AllowedCommands = removePattern(m.cfg.Permissions.AllowedCommands, pattern)
+				m.cfg.Permissions.DeniedCommands = removePattern(m.cfg.Permissions.DeniedCommands, pattern)
+				if m.baseCfg != nil {
+					before := len(m.baseCfg.Permissions.AllowedCommands) + len(m.baseCfg.Permissions.DeniedCommands)
+					m.baseCfg.Permissions.AllowedCommands = removePattern(m.baseCfg.Permissions.AllowedCommands, pattern)
+					m.baseCfg.Permissions.DeniedCommands = removePattern(m.baseCfg.Permissions.DeniedCommands, pattern)
+					after := len(m.baseCfg.Permissions.AllowedCommands) + len(m.baseCfg.Permissions.DeniedCommands)
+					removed = before != after
+				}
+				if removed {
+					config.Save(m.baseCfg)
+					m.appendOutput(fmt.Sprintf("Removed: %s", pattern))
+				} else {
+					m.appendOutput(fmt.Sprintf("Pattern not found: %s", pattern))
+				}
+			default:
+				m.appendOutput("Usage: /permissions allow|deny|remove <pattern>")
+			}
+		}
+	case "/compact":
+		sess := m.sessions.Current()
+		if sess == nil || len(sess.Messages) < ctxwin.MinShapeable() {
+			m.appendOutput(fmt.Sprintf("Conversation too short to compact (need %d+ messages)", ctxwin.MinShapeable()))
+			break
+		}
+		customInstructions := ""
+		if len(parts) > 1 {
+			customInstructions = strings.Join(parts[1:], " ")
+		}
+		m.appendOutput("Compacting context...")
+		m.state = stateProcessing
+		m.processingStartTime = time.Now()
+		compactFn := m.runCompact(customInstructions)
+		return m, tea.Batch(func() tea.Msg { return compactFn() }, spinnerTick(), spinnerFrameTick())
 	default:
 		// Check custom commands
 		cmdName := strings.TrimPrefix(cmd, "/")
@@ -1516,6 +1765,17 @@ func (m *Model) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m *Model) runDoctor() tea.Cmd {
+	return func() tea.Msg {
+		toolCount := 0
+		if m.toolRegistry != nil {
+			toolCount = m.toolRegistry.Len()
+		}
+		checks := runDoctorWithHealth(m.shannonDir, m.cfg.APIKey, m.cfg.Endpoint, m.gateway, &m.cfg.Permissions, m.cfg.MCPServers, toolCount)
+		return doctorDoneMsg{checks: checks}
+	}
 }
 
 func (m *Model) handleResearch(args []string) (tea.Model, tea.Cmd) {
@@ -1775,6 +2035,13 @@ func helpText() string {
 	return `Keys:
   Alt+Enter                      Insert newline (multi-line input)
   Enter                          Submit message
+  Up/Down                        Navigate input history
+  Esc Esc                        Clear input
+  Ctrl+K                         Delete to end of line
+  Ctrl+U                         Delete to start of line
+  Ctrl+W                         Delete word backward
+  Ctrl+L                         Clear screen
+  Ctrl+O                         Expand last tool results
 
 Commands:
   /help                          Show this help
@@ -1788,7 +2055,11 @@ Commands:
   /session resume <id>           Resume a saved session
   /model [small|medium|large]    Switch model tier
   /copy                          Copy last response to clipboard
-  /clear                         Clear screen
+  /clear                         New session + clear screen
+  /compact [instructions]        Compress context, keep summary
+  /status                        Show session status
+  /doctor                        Run diagnostic checks
+  /permissions                   Show/manage tool permissions
   /quit                          Exit`
 }
 
@@ -1911,7 +2182,11 @@ var baseSlashCommands = []slashCmd{
 	{"/sessions", "List saved sessions"},
 	{"/search", "Search session history"},
 	{"/session", "new | resume <n>"},
-	{"/clear", "Clear screen"},
+	{"/clear", "New session + clear screen"},
+	{"/compact", "Compress context (keep summary)"},
+	{"/status", "Show session status"},
+	{"/doctor", "Run diagnostic checks"},
+	{"/permissions", "Manage tool permissions"},
 	{"/update", "Check for updates"},
 	{"/quit", "Exit"},
 }
@@ -1977,13 +2252,21 @@ func renderDropList(maxVisible, total, selected int, item func(i int) (label, de
 	var sb strings.Builder
 	for i := start; i < start+visible; i++ {
 		label, desc := item(i)
+		labelWidth := lipgloss.Width(label)
+		padWidth := 16 - labelWidth
+		if padWidth < 1 {
+			padWidth = 1
+		}
+		padding := strings.Repeat(" ", padWidth)
 		if i == selected {
-			sb.WriteString(fmt.Sprintf("  > %s  %s\n",
-				highlightLabel.Render(fmt.Sprintf("%-14s", label)),
+			sb.WriteString(fmt.Sprintf("  > %s%s%s\n",
+				highlightLabel.Render(label),
+				padding,
 				highlightDesc.Render(desc)))
 		} else {
-			sb.WriteString(fmt.Sprintf("    %s  %s\n",
-				dimStyle.Render(fmt.Sprintf("%-14s", label)),
+			sb.WriteString(fmt.Sprintf("    %s%s%s\n",
+				dimStyle.Render(label),
+				padding,
 				dimStyle.Render(desc)))
 		}
 	}
@@ -2087,10 +2370,59 @@ func formatConfigDisplay(cfg *config.Config) string {
 	return sb.String()
 }
 
+func formatTokenCount(n int) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	return fmt.Sprintf("%d,%03d", n/1000, n%1000)
+}
+
 func truncate(s string, max int) string {
 	r := []rune(s)
 	if len(r) <= max {
 		return s
 	}
 	return string(r[:max]) + "..."
+}
+
+func formatPermissions(p *permissions.PermissionsConfig) string {
+	var sb strings.Builder
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+
+	sb.WriteString(dimStyle.Render("  Allowed commands:") + "\n")
+	if len(p.AllowedCommands) == 0 {
+		sb.WriteString(dimStyle.Render("    (none)") + "\n")
+	} else {
+		for _, c := range p.AllowedCommands {
+			sb.WriteString(dimStyle.Render(fmt.Sprintf("    - %s", c)) + "\n")
+		}
+	}
+
+	sb.WriteString(dimStyle.Render("  Denied commands:") + "\n")
+	if len(p.DeniedCommands) == 0 {
+		sb.WriteString(dimStyle.Render("    (none)") + "\n")
+	} else {
+		for _, c := range p.DeniedCommands {
+			sb.WriteString(dimStyle.Render(fmt.Sprintf("    - %s", c)) + "\n")
+		}
+	}
+
+	if len(p.AllowedDirs) > 0 {
+		sb.WriteString(dimStyle.Render("  Allowed dirs:") + "\n")
+		for _, d := range p.AllowedDirs {
+			sb.WriteString(dimStyle.Render(fmt.Sprintf("    - %s", d)) + "\n")
+		}
+	}
+
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+func removePattern(list []string, pattern string) []string {
+	result := make([]string, 0, len(list))
+	for _, item := range list {
+		if item != pattern {
+			result = append(result, item)
+		}
+	}
+	return result
 }

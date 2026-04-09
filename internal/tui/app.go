@@ -83,6 +83,14 @@ type outputBlock struct {
 	rerender func(width int) string // optional: re-render at new width (e.g. startup header)
 }
 
+// rerenderDoneMsg signals that the ClearScreen→Println sequence from
+// rerenderOutput has completed, so incremental flushPrints can resume.
+type rerenderDoneMsg struct{}
+
+// historyLoadedMsg is sent after session history finishes loading in a
+// goroutine, so we can re-render at the current terminal width.
+type historyLoadedMsg struct{}
+
 // spinnerTickMsg is a slow fallback that advances spinner phrase text
 type spinnerTickMsg struct{}
 
@@ -178,6 +186,7 @@ type Model struct {
 	lastEscTime  time.Time // for double-escape detection
 	sessionAllowed      map[string]bool // tools always-allowed for this session
 	pendingApprovalTool string          // tool name awaiting approval
+	rerenderPending     bool            // true while rerenderOutput sequence is in flight
 }
 
 type slashCmd struct {
@@ -606,13 +615,16 @@ func (m *Model) checkHealth() tea.Cmd {
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	model, cmd := m.update(msg)
-	// Note: when cmd is rerenderOutput (e.g. agentDoneMsg, approvalRequestMsg),
-	// it already drained pendingPrints, so flushPrints returns nil here.
-	if flush := m.flushPrints(); flush != nil {
-		if cmd != nil {
-			cmd = tea.Sequence(flush, cmd)
-		} else {
-			cmd = flush
+	// Suppress incremental flushes while a rerenderOutput sequence is in
+	// flight — prevents streamOutputMsg from interleaving between
+	// ClearScreen and Println (Bug #3 fix).
+	if !m.rerenderPending {
+		if flush := m.flushPrints(); flush != nil {
+			if cmd != nil {
+				cmd = tea.Sequence(flush, cmd)
+			} else {
+				cmd = flush
+			}
 		}
 	}
 	return model, cmd
@@ -1043,6 +1055,18 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.rerenderOutput()
 
+	case rerenderDoneMsg:
+		m.rerenderPending = false
+		// Flush any output that arrived during the rerender sequence
+		if flush := m.flushPrints(); flush != nil {
+			return m, flush
+		}
+		return m, nil
+
+	case historyLoadedMsg:
+		// Re-render at current width in case terminal was resized during load
+		return m, m.rerenderOutput()
+
 	case clipboardResultMsg:
 		if msg.err != nil {
 			m.appendOutput(fmt.Sprintf("Copy failed: %v", msg.err))
@@ -1330,6 +1354,12 @@ func (m *Model) loadSessionHistory(sess *session.Session) {
 				m.sendOutput("")
 			}
 		}
+		// Trigger a re-render after load completes so content uses the
+		// current terminal width (fixes stale-width if resize happened
+		// during history loading — Bug #4).
+		if m.program != nil {
+			m.program.Send(historyLoadedMsg{})
+		}
 	}()
 }
 
@@ -1369,34 +1399,34 @@ func (m *Model) flushPrints() tea.Cmd {
 // rerenderOutput re-renders all output blocks at the current width and reprints them.
 // Used when the terminal is resized and when handing off from the startup
 // animation to scrollback-backed output.
+//
+// Sets rerenderPending to suppress flushPrints during the ClearScreen→Println
+// sequence, preventing streamOutputMsg from interleaving (fixes resize race).
 func (m *Model) rerenderOutput() tea.Cmd {
 	width := m.width
-	blocks := make([]outputBlock, len(m.output))
-	copy(blocks, m.output)
 
-	// Re-render blocks at new width (always, so future output uses new width).
-	for i, b := range blocks {
+	// Re-render blocks at new width.
+	for i, b := range m.output {
 		if b.rerender != nil {
-			blocks[i].rendered = b.rerender(width)
-			m.output[i].rendered = blocks[i].rendered
+			m.output[i].rendered = b.rerender(width)
 		} else if b.raw != "" {
-			blocks[i].rendered = m.renderMarkdownCached(b.raw, width)
-			m.output[i].rendered = blocks[i].rendered
+			m.output[i].rendered = m.renderMarkdownCached(b.raw, width)
 		}
 	}
 
-	lines := make([]string, 0, len(blocks))
-	for _, b := range blocks {
+	lines := make([]string, 0, len(m.output))
+	for _, b := range m.output {
 		lines = append(lines, b.rendered)
 	}
 
-	// The full repaint includes the latest output snapshot, so suppress any
-	// queued incremental prints from this update to avoid duplicate lines.
+	// Suppress incremental prints until the full repaint completes.
 	m.pendingPrints = m.pendingPrints[:0]
+	m.rerenderPending = true
 
 	return tea.Sequence(
 		tea.ClearScreen,
 		tea.Println(strings.Join(lines, "\n")),
+		func() tea.Msg { return rerenderDoneMsg{} },
 	)
 }
 

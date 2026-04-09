@@ -10,17 +10,17 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/permissions"
 )
 
-func TestResolveOneShotCWD_DefaultsToProcessCWD(t *testing.T) {
+func TestResolveOneShotCWD_DefaultsToHome(t *testing.T) {
 	got, err := resolveOneShotCWD(nil)
 	if err != nil {
 		t.Fatalf("resolveOneShotCWD error: %v", err)
 	}
-	want, err := os.Getwd()
+	want, err := os.UserHomeDir()
 	if err != nil {
-		t.Fatalf("Getwd error: %v", err)
+		t.Fatalf("UserHomeDir error: %v", err)
 	}
 	if got != want {
-		t.Fatalf("expected process cwd %q, got %q", want, got)
+		t.Fatalf("expected home dir %q, got %q", want, got)
 	}
 }
 

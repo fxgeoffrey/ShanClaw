@@ -275,10 +275,17 @@ func migrateOldConfig() {
 }
 
 func Save(cfg *Config) error {
+	viper.Set("provider", cfg.Provider)
 	viper.Set("endpoint", cfg.Endpoint)
 	viper.Set("api_key", strings.TrimSpace(cfg.APIKey))
 	viper.Set("model_tier", cfg.ModelTier)
 	viper.Set("auto_update_check", cfg.AutoUpdateCheck)
+	if cfg.Ollama.Endpoint != "" {
+		viper.Set("ollama.endpoint", cfg.Ollama.Endpoint)
+	}
+	if cfg.Ollama.Model != "" {
+		viper.Set("ollama.model", cfg.Ollama.Model)
+	}
 	return viper.WriteConfig()
 }
 

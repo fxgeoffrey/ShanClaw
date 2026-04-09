@@ -643,12 +643,10 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					default:
 					}
 				}
-				// Roll back the user message added in handleSubmit
-				sess := m.sessions.Current()
-				if len(sess.Messages) > 0 && sess.Messages[len(sess.Messages)-1].Role == "user" {
-					sess.Messages = sess.Messages[:len(sess.Messages)-1]
-				}
-				m.sessions.Save()
+				// Don't roll back the user message — let the agent loop's
+				// RunMessages be saved by runAgentLoop when it completes.
+				// This preserves tool calls and partial responses so the
+				// next run has full context of what happened before cancel.
 				cancelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 				m.appendOutput(cancelStyle.Render("  [Cancelled]"))
 				m.state = stateInput
@@ -1115,10 +1113,43 @@ func (m *Model) runAgentLoop(query string, history []client.Message) tea.Cmd {
 			m.agentLoop.SetWorkingSet(nil)
 		}
 		result, usage, err := m.agentLoop.Run(ctx, query, history)
-		if result != "" && (err == nil || errors.Is(err, agent.ErrMaxIterReached)) {
-			sess := m.sessions.Current()
+
+		// Persist the run's messages to session. Use RunMessages() for
+		// rich history (tool_use/tool_result blocks) so resumed sessions
+		// give the LLM full context — including cancelled runs.
+		sess := m.sessions.Current()
+		isCancelled := errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+		runMsgs := m.agentLoop.RunMessages()
+		runInjected := m.agentLoop.RunMessageInjected()
+		runTimestamps := m.agentLoop.RunMessageTimestamps()
+		if len(runMsgs) > 0 {
+			// RunMessages includes the user prompt as first entry;
+			// skip it since handleSubmit already appended it.
+			startIdx := 0
+			if len(runMsgs) > 0 && runMsgs[0].Role == "user" {
+				startIdx = 1
+			}
+			fallbackTime := time.Now()
+			for i, msg := range runMsgs[startIdx:] {
+				idx := i + startIdx
+				ts := fallbackTime
+				if idx < len(runTimestamps) && !runTimestamps[idx].IsZero() {
+					ts = runTimestamps[idx]
+				}
+				sess.Messages = append(sess.Messages, msg)
+				meta := session.MessageMeta{Source: "local", Timestamp: session.TimePtr(ts)}
+				if idx < len(runInjected) && runInjected[idx] {
+					meta.SystemInjected = true
+				}
+				sess.MessageMeta = append(sess.MessageMeta, meta)
+			}
+		} else if result != "" && (err == nil || errors.Is(err, agent.ErrMaxIterReached)) {
+			// Fallback: flat text (no RunMessages, e.g. early error).
 			sess.Messages = append(sess.Messages, client.Message{Role: "assistant", Content: client.NewTextContent(result)})
 			sess.MessageMeta = append(sess.MessageMeta, session.MessageMeta{Source: "local", Timestamp: session.TimePtr(time.Now())})
+		}
+		if isCancelled || err == nil || errors.Is(err, agent.ErrMaxIterReached) {
+			m.sessions.Save()
 		}
 		return agentDoneMsg{result: result, usage: usage, err: err}
 	}

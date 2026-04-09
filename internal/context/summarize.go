@@ -36,27 +36,28 @@ type Completer interface {
 	Complete(ctx context.Context, req client.CompletionRequest) (*client.CompletionResponse, error)
 }
 
-// GenerateSummary calls the LLM (small tier) to summarize a conversation.
-// It strips the system message from the input to avoid wasting tokens.
-// Serializes both plain text and block content (tool_use, tool_result).
-func GenerateSummary(ctx context.Context, c Completer, messages []client.Message) (string, error) {
-	// Build conversation transcript, skipping system messages
-	var transcript strings.Builder
+// buildTranscript 将消息序列化为文本 transcript，跳过 system 消息。
+func buildTranscript(messages []client.Message) string {
+	var sb strings.Builder
 	for _, m := range messages {
 		if m.Role == "system" {
 			continue
 		}
-		text := messageText(m)
-		if text == "" {
-			continue
+		if t := messageText(m); t != "" {
+			fmt.Fprintf(&sb, "[%s]: %s\n\n", m.Role, t)
 		}
-		fmt.Fprintf(&transcript, "[%s]: %s\n\n", m.Role, text)
 	}
+	return sb.String()
+}
 
+// GenerateSummary calls the LLM (small tier) to summarize a conversation.
+// It strips the system message from the input to avoid wasting tokens.
+// Serializes both plain text and block content (tool_use, tool_result).
+func GenerateSummary(ctx context.Context, c Completer, messages []client.Message) (string, error) {
 	req := client.CompletionRequest{
 		Messages: []client.Message{
 			{Role: "system", Content: client.NewTextContent(summarizePrompt)},
-			{Role: "user", Content: client.NewTextContent(transcript.String())},
+			{Role: "user", Content: client.NewTextContent(buildTranscript(messages))},
 		},
 		ModelTier:   "small",
 		Temperature: 0.2,
@@ -69,6 +70,36 @@ func GenerateSummary(ctx context.Context, c Completer, messages []client.Message
 	}
 
 	return extractSummary(resp.OutputText), nil
+}
+
+const userSummarizePrompt = `You are a conversation summarizer. Read the following conversation and produce a clear, well-structured Markdown summary for a human reader.
+
+Requirements:
+- Write in the SAME LANGUAGE as the conversation (if the conversation is in Chinese, write in Chinese; if in English, write in English, etc.)
+- Use Markdown formatting with headers and bullet points
+- Focus on: what was discussed, key decisions made, work completed, and remaining action items
+- Be concise but comprehensive — a reader should understand the conversation's outcome without reading the full transcript
+- Do NOT include internal LLM terminology (tool_call, context window, tokens, etc.)
+- Do NOT wrap the output in code fences — output raw Markdown directly`
+
+// SummarizeForUser 调用 LLM 生成面向人类阅读的会话摘要。
+func SummarizeForUser(ctx context.Context, c Completer, messages []client.Message) (string, error) {
+	req := client.CompletionRequest{
+		Messages: []client.Message{
+			{Role: "system", Content: client.NewTextContent(userSummarizePrompt)},
+			{Role: "user", Content: client.NewTextContent(buildTranscript(messages))},
+		},
+		ModelTier:   "small",
+		Temperature: 0.2,
+		MaxTokens:   2000,
+	}
+
+	resp, err := c.Complete(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("user summarization failed: %w", err)
+	}
+
+	return strings.TrimSpace(resp.OutputText), nil
 }
 
 // extractSummary extracts the <summary> content from a two-phase response.

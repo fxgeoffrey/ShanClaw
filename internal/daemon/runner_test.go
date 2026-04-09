@@ -1,9 +1,12 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
+	"github.com/Kocoro-lab/ShanClaw/internal/agent"
 	"github.com/Kocoro-lab/ShanClaw/internal/session"
 )
 
@@ -166,6 +169,33 @@ func TestRunAgentRequestSource(t *testing.T) {
 	json.Unmarshal(data, &decoded)
 	if decoded.Source != "slack" {
 		t.Fatalf("expected source 'slack', got %q", decoded.Source)
+	}
+}
+
+// context.Canceled and context.DeadlineExceeded must be treated as soft errors
+// (like ErrMaxIterReached) so the full conversation from RunMessages() is
+// persisted, not just a friendly error stub.
+func TestIsSoftRunError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"context.Canceled", context.Canceled, true},
+		{"context.DeadlineExceeded", context.DeadlineExceeded, true},
+		{"ErrMaxIterReached", agent.ErrMaxIterReached, true},
+		{"wrapped Canceled", errors.Join(errors.New("loop"), context.Canceled), true},
+		{"random error", errors.New("something broke"), false},
+		{"API error", errors.New("429 rate limited"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isSoftRunError(tt.err)
+			if got != tt.want {
+				t.Errorf("isSoftRunError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }
 

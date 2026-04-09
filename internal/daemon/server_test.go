@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -992,6 +993,159 @@ func TestEventsSSEEndpoint(t *testing.T) {
 	}
 	if !strings.Contains(dataLine, `"agent":"test"`) {
 		t.Fatalf("expected agent in data, got %q", dataLine)
+	}
+}
+
+// SSE endpoint must replay missed events when last_event_id is provided,
+// then switch to live events. This is the core of Desktop reconnection.
+func TestEventsSSEReplay(t *testing.T) {
+	bus := NewEventBus()
+	s := &Server{eventBus: bus}
+
+	// Pre-emit 5 events into ring buffer (IDs 1..5) before any client connects.
+	for i := 0; i < 5; i++ {
+		bus.Emit(Event{Type: "test", Payload: json.RawMessage(`{"seq":` + strconv.Itoa(i+1) + `}`)})
+	}
+
+	handler := http.HandlerFunc(s.handleEvents)
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	// Connect with last_event_id=3 → expect replay of IDs 4, 5
+	resp, err := http.Get(srv.URL + "?last_event_id=3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	scanner := bufio.NewScanner(resp.Body)
+	var replayed []uint64
+	deadline := time.After(2 * time.Second)
+
+	for len(replayed) < 2 {
+		lineCh := make(chan string, 1)
+		go func() {
+			if scanner.Scan() {
+				lineCh <- scanner.Text()
+			}
+		}()
+		select {
+		case line := <-lineCh:
+			if strings.HasPrefix(line, "id: ") {
+				id, _ := strconv.ParseUint(strings.TrimPrefix(line, "id: "), 10, 64)
+				replayed = append(replayed, id)
+			}
+		case <-deadline:
+			t.Fatalf("timeout waiting for replayed events, got %d so far: %v", len(replayed), replayed)
+		}
+	}
+
+	if replayed[0] != 4 || replayed[1] != 5 {
+		t.Fatalf("expected replayed IDs [4, 5], got %v", replayed)
+	}
+}
+
+// SSE endpoint must also support the standard Last-Event-ID header
+// (used by browser EventSource on reconnect).
+func TestEventsSSEReplayViaHeader(t *testing.T) {
+	bus := NewEventBus()
+	s := &Server{eventBus: bus}
+
+	for i := 0; i < 5; i++ {
+		bus.Emit(Event{Type: "test", Payload: json.RawMessage(`{"seq":` + strconv.Itoa(i+1) + `}`)})
+	}
+
+	handler := http.HandlerFunc(s.handleEvents)
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	// Use Last-Event-ID header instead of query param
+	req, _ := http.NewRequest("GET", srv.URL, nil)
+	req.Header.Set("Last-Event-ID", "3")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	scanner := bufio.NewScanner(resp.Body)
+	var replayed []uint64
+	deadline := time.After(2 * time.Second)
+
+	for len(replayed) < 2 {
+		lineCh := make(chan string, 1)
+		go func() {
+			if scanner.Scan() {
+				lineCh <- scanner.Text()
+			}
+		}()
+		select {
+		case line := <-lineCh:
+			if strings.HasPrefix(line, "id: ") {
+				id, _ := strconv.ParseUint(strings.TrimPrefix(line, "id: "), 10, 64)
+				replayed = append(replayed, id)
+			}
+		case <-deadline:
+			t.Fatalf("timeout waiting for replayed events via header, got %d so far: %v", len(replayed), replayed)
+		}
+	}
+
+	if replayed[0] != 4 || replayed[1] != 5 {
+		t.Fatalf("expected replayed IDs [4, 5], got %v", replayed)
+	}
+}
+
+// SSE endpoint without last_event_id must behave identically to before
+// (backward compatible — no replay, live events only).
+func TestEventsSSENoReplayWithoutParam(t *testing.T) {
+	bus := NewEventBus()
+	s := &Server{eventBus: bus}
+
+	// Pre-emit events
+	for i := 0; i < 3; i++ {
+		bus.Emit(Event{Type: "old", Payload: json.RawMessage(`{}`)})
+	}
+
+	handler := http.HandlerFunc(s.handleEvents)
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL) // no last_event_id
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// Wait for handler to subscribe
+	time.Sleep(50 * time.Millisecond)
+
+	// Emit a live event
+	bus.Emit(Event{Type: "live", Payload: json.RawMessage(`{"new":true}`)})
+
+	scanner := bufio.NewScanner(resp.Body)
+	deadline := time.After(2 * time.Second)
+	var firstEventType string
+
+	for firstEventType == "" {
+		lineCh := make(chan string, 1)
+		go func() {
+			if scanner.Scan() {
+				lineCh <- scanner.Text()
+			}
+		}()
+		select {
+		case line := <-lineCh:
+			if strings.HasPrefix(line, "event: ") {
+				firstEventType = strings.TrimPrefix(line, "event: ")
+			}
+		case <-deadline:
+			t.Fatal("timeout waiting for live event")
+		}
+	}
+
+	// Must receive the live event, not the old pre-emitted ones
+	if firstEventType != "live" {
+		t.Fatalf("expected first event type 'live', got %q (old events leaked without last_event_id)", firstEventType)
 	}
 }
 

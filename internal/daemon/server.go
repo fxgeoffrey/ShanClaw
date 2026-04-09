@@ -356,7 +356,27 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	flusher.Flush()
 
-	ch := s.eventBus.Subscribe()
+	// Subscribe with atomic replay if client provides a last event ID.
+	// Check both query param (custom clients) and Last-Event-ID header
+	// (standard SSE EventSource reconnection per spec).
+	var ch <-chan Event
+	lastIDStr := r.URL.Query().Get("last_event_id")
+	if lastIDStr == "" {
+		lastIDStr = r.Header.Get("Last-Event-ID")
+	}
+	if lastIDStr != "" {
+		if lastID, err := strconv.ParseUint(lastIDStr, 10, 64); err == nil {
+			var missed []Event
+			missed, ch = s.eventBus.SubscribeWithReplay(lastID)
+			for _, evt := range missed {
+				fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", evt.ID, evt.Type, string(evt.Payload))
+			}
+			flusher.Flush()
+		}
+	}
+	if ch == nil {
+		ch = s.eventBus.Subscribe()
+	}
 	defer s.eventBus.Unsubscribe(ch)
 
 	ticker := time.NewTicker(30 * time.Second)
@@ -365,7 +385,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case evt := <-ch:
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", evt.Type, string(evt.Payload))
+			fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", evt.ID, evt.Type, string(evt.Payload))
 			flusher.Flush()
 		case <-ticker.C:
 			fmt.Fprintf(w, ": keepalive\n\n")

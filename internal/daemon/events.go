@@ -124,6 +124,7 @@ func (b *EventBus) EmitTo(evt Event) int {
 func (b *EventBus) SubscribeWithReplay(lastID uint64) ([]Event, <-chan Event) {
 	ch := make(chan Event, 64)
 	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.subscribers[ch] = ch
 	var missed []Event
 	if b.ringLen > 0 && lastID < b.nextID {
@@ -135,7 +136,6 @@ func (b *EventBus) SubscribeWithReplay(lastID uint64) ([]Event, <-chan Event) {
 			}
 		}
 	}
-	b.mu.Unlock()
 	return missed, ch
 }
 

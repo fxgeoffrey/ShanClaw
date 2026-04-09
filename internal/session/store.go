@@ -149,22 +149,24 @@ func (s *Store) Save(sess *Session) error {
 	return nil
 }
 
-// SaveCacheOnly 持久化 session 但不更新 UpdatedAt，用于写入摘要缓存等不影响排序的场景。
-func (s *Store) SaveCacheOnly(sess *Session) error {
+// PatchSummaryCache 从磁盘重新读取 session 的最新版本，仅更新摘要缓存字段后写回。
+// 避免覆盖在初次 Load 和写入之间被 agent loop 追加的新消息。
+// 不更新 UpdatedAt，不影响 session 排序。
+func (s *Store) PatchSummaryCache(id, summary, cacheKey string) error {
+	sess, err := s.Load(id)
+	if err != nil {
+		return err
+	}
+	sess.SummaryCache = summary
+	sess.SummaryCacheKey = cacheKey
+
 	data, err := json.MarshalIndent(sess, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal session: %w", err)
 	}
 
 	path := filepath.Join(s.dir, sess.ID+".json")
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		return err
-	}
-
-	if s.index != nil {
-		s.index.UpsertSession(sess)
-	}
-	return nil
+	return os.WriteFile(path, data, 0600)
 }
 
 func (s *Store) Load(id string) (*Session, error) {

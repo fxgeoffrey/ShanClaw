@@ -724,10 +724,8 @@ func (s *Server) handleSessionSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 更新缓存并持久化（不更新 UpdatedAt）
-	sess.SummaryCache = summary
-	sess.SummaryCacheKey = cacheKey
-	if saveErr := mgr.SaveCacheOnly(sess); saveErr != nil {
+	// 从磁盘重新读取最新 session 后仅 patch 缓存字段，避免覆盖 agent 期间追加的新消息
+	if saveErr := mgr.PatchSummaryCache(id, summary, cacheKey); saveErr != nil {
 		log.Printf("daemon: failed to save summary cache for session %s: %v", id, saveErr)
 	}
 

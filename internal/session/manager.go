@@ -96,9 +96,9 @@ func (m *Manager) Save() error {
 	return m.store.Save(m.current)
 }
 
-// SaveCacheOnly 持久化 session 但不更新 UpdatedAt，用于摘要缓存等不影响排序的写入。
-func (m *Manager) SaveCacheOnly(sess *Session) error {
-	return m.store.SaveCacheOnly(sess)
+// PatchSummaryCache 从磁盘重新读取最新 session，仅更新摘要缓存字段后写回。
+func (m *Manager) PatchSummaryCache(id, summary, cacheKey string) error {
+	return m.store.PatchSummaryCache(id, summary, cacheKey)
 }
 
 func (m *Manager) List() ([]SessionSummary, error) {

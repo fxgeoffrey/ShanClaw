@@ -118,6 +118,7 @@ type Model struct {
 	baseCfg             *config.Config
 	cfg                 *config.Config
 	gateway             *client.GatewayClient
+	llmClient           client.LLMClient
 	sessions            *session.Manager
 	toolRegistry        *agent.ToolRegistry
 	toolCleanup         func()
@@ -189,6 +190,13 @@ func (m *Model) SetBypassPermissions(bypass bool) {
 	}
 }
 
+func (m *Model) modelDisplayLabel() string {
+	if m.cfg.Provider == "ollama" {
+		return "ollama/" + m.cfg.Ollama.Model
+	}
+	return m.cfg.ModelTier
+}
+
 func (m *Model) cwd() string {
 	if m.sessions != nil {
 		if sess := m.sessions.Current(); sess != nil && sess.CWD != "" {
@@ -202,10 +210,10 @@ func (m *Model) cwd() string {
 // finishHeaderAnimation completes the startup animation, flushes the final
 // header to scrollback, and transitions to stateInput.
 func (m *Model) finishHeaderAnimation() tea.Cmd {
-	finalHeader := renderStartupHeader(headerTotalFrames-1, m.width, m.version, m.cfg.ModelTier, m.cfg.Endpoint, m.headerCWD, m.headerSessions, m.headerTipIdx)
+	finalHeader := renderStartupHeader(headerTotalFrames-1, m.width, m.version, m.modelDisplayLabel(), m.cfg.Endpoint, m.headerCWD, m.headerSessions, m.headerTipIdx)
 	// Capture stable values for the rerender closure so the header can be
 	// re-rendered at a new width on terminal resize.
-	version, tier, ep, cwd := m.version, m.cfg.ModelTier, m.cfg.Endpoint, m.headerCWD
+	version, tier, ep, cwd := m.version, m.modelDisplayLabel(), m.cfg.Endpoint, m.headerCWD
 	sessions, tipIdx := m.headerSessions, m.headerTipIdx
 	m.output = append(m.output, outputBlock{
 		rendered: finalHeader,
@@ -218,10 +226,14 @@ func (m *Model) finishHeaderAnimation() tea.Cmd {
 	m.state = stateInput
 
 	if m.headerHealth != nil {
+		ep := m.cfg.Endpoint
+		if m.cfg.Provider == "ollama" {
+			ep = m.cfg.Ollama.Endpoint
+		}
 		if m.headerHealth.gatewayOK {
-			m.appendOutput(fmt.Sprintf("  Connected to %s", m.cfg.Endpoint))
+			m.appendOutput(fmt.Sprintf("  Connected to %s", ep))
 		} else {
-			m.appendOutput(fmt.Sprintf("  Warning: API unreachable at %s", m.cfg.Endpoint))
+			m.appendOutput(fmt.Sprintf("  Warning: API unreachable at %s", ep))
 		}
 		if m.headerHealth.updateMsg != "" {
 			m.appendOutput(fmt.Sprintf("  %s", m.headerHealth.updateMsg))
@@ -257,7 +269,18 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	ta.BlurredStyle.CursorLine = lipgloss.NewStyle()
 
-	gateway := client.NewGatewayClient(cfg.Endpoint, cfg.APIKey)
+	var llmClient client.LLMClient
+	var gateway *client.GatewayClient
+	if cfg.Provider == "ollama" {
+		model := cfg.Ollama.Model
+		if cfg.Agent.Model != "" {
+			model = cfg.Agent.Model
+		}
+		llmClient = client.NewOllamaClient(cfg.Ollama.Endpoint, model)
+	} else {
+		gateway = client.NewGatewayClient(cfg.Endpoint, cfg.APIKey)
+		llmClient = gateway
+	}
 	shannonDir := config.ShannonDir()
 	agentsDir := filepath.Join(shannonDir, "agents")
 	if err := agents.EnsureBuiltins(agentsDir, version); err != nil {
@@ -303,14 +326,14 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 	tools.RegisterSessionSearch(reg, sessMgr)
 
 	hookRunner := hooks.NewHookRunner(runtimeCfg.Hooks)
-	loop := agent.NewAgentLoop(gateway, reg, runtimeCfg.ModelTier, shannonDir, runtimeCfg.Agent.MaxIterations, runtimeCfg.Tools.ResultTruncation, runtimeCfg.Tools.ArgsTruncation, &runtimeCfg.Permissions, auditor, hookRunner)
+	loop := agent.NewAgentLoop(llmClient, reg, runtimeCfg.ModelTier, shannonDir, runtimeCfg.Agent.MaxIterations, runtimeCfg.Tools.ResultTruncation, runtimeCfg.Tools.ArgsTruncation, &runtimeCfg.Permissions, auditor, hookRunner)
 	loop.SetMaxTokens(runtimeCfg.Agent.MaxTokens)
 	loop.SetTemperature(runtimeCfg.Agent.Temperature)
 	loop.SetContextWindow(runtimeCfg.Agent.ContextWindow)
 	if runtimeCfg.Agent.Model != "" {
 		loop.SetSpecificModel(runtimeCfg.Agent.Model)
 	}
-	if runtimeCfg.Agent.Thinking {
+	if runtimeCfg.Agent.Thinking && runtimeCfg.Provider != "ollama" {
 		if runtimeCfg.Agent.ThinkingMode == "enabled" {
 			loop.SetThinking(&client.ThinkingConfig{Type: "enabled", BudgetTokens: runtimeCfg.Agent.ThinkingBudget})
 		} else {
@@ -372,6 +395,7 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 		baseCfg:        cfg,
 		cfg:            runtimeCfg,
 		gateway:        gateway,
+		llmClient:      llmClient,
 		sessions:       sessMgr,
 		agentLoop:      loop,
 		textarea:       ta,
@@ -442,14 +466,14 @@ func (m *Model) rebuildAgentLoop() {
 	}
 
 	m.hookRunner = hooks.NewHookRunner(m.cfg.Hooks)
-	loop := agent.NewAgentLoop(m.gateway, m.toolRegistry, m.cfg.ModelTier, m.shannonDir, m.cfg.Agent.MaxIterations, m.cfg.Tools.ResultTruncation, m.cfg.Tools.ArgsTruncation, &m.cfg.Permissions, m.auditor, m.hookRunner)
+	loop := agent.NewAgentLoop(m.llmClient, m.toolRegistry, m.cfg.ModelTier, m.shannonDir, m.cfg.Agent.MaxIterations, m.cfg.Tools.ResultTruncation, m.cfg.Tools.ArgsTruncation, &m.cfg.Permissions, m.auditor, m.hookRunner)
 	loop.SetMaxTokens(m.cfg.Agent.MaxTokens)
 	loop.SetTemperature(m.cfg.Agent.Temperature)
 	loop.SetContextWindow(m.cfg.Agent.ContextWindow)
 	if m.cfg.Agent.Model != "" {
 		loop.SetSpecificModel(m.cfg.Agent.Model)
 	}
-	if m.cfg.Agent.Thinking {
+	if m.cfg.Agent.Thinking && m.cfg.Provider != "ollama" {
 		if m.cfg.Agent.ThinkingMode == "enabled" {
 			loop.SetThinking(&client.ThinkingConfig{Type: "enabled", BudgetTokens: m.cfg.Agent.ThinkingBudget})
 		} else {
@@ -560,13 +584,15 @@ func (m *Model) loadServerTools() tea.Cmd {
 
 		reg, _, cleanup, err := tools.CompleteRegistration(ctx, m.gateway, m.cfg, m.toolRegistry, m.agentOverride)
 
-		// Cloud delegation tool
-		var cloudAgentName, cloudAgentPrompt string
-		if m.agentOverride != nil {
-			cloudAgentName = m.agentOverride.Name
-			cloudAgentPrompt = m.agentOverride.Prompt
+		// Cloud delegation tool (gateway only)
+		if m.gateway != nil {
+			var cloudAgentName, cloudAgentPrompt string
+			if m.agentOverride != nil {
+				cloudAgentName = m.agentOverride.Name
+				cloudAgentPrompt = m.agentOverride.Prompt
+			}
+			tools.RegisterCloudDelegate(reg, m.gateway, m.cfg, nil, cloudAgentName, cloudAgentPrompt)
 		}
-		tools.RegisterCloudDelegate(reg, m.gateway, m.cfg, nil, cloudAgentName, cloudAgentPrompt)
 
 		return serverToolsLoadedMsg{
 			registry: reg,
@@ -582,7 +608,13 @@ func (m *Model) checkHealth() tea.Cmd {
 		defer cancel()
 
 		msg := healthCheckMsg{}
-		msg.gatewayOK = m.gateway.Health(ctx) == nil
+		if m.gateway != nil {
+			msg.gatewayOK = m.gateway.Health(ctx) == nil
+		} else if oc, ok := m.llmClient.(*client.OllamaClient); ok {
+			msg.gatewayOK = oc.CheckHealth(ctx) == nil
+		} else {
+			msg.gatewayOK = true
+		}
 
 		if m.cfg.AutoUpdateCheck {
 			shannonDir := config.ShannonDir()
@@ -945,7 +977,7 @@ func (m *Model) View() string {
 	// --- Input / status line ---
 	switch m.state {
 	case stateStartup:
-		sb.WriteString(renderStartupHeader(m.headerFrame, m.width, m.version, m.cfg.ModelTier, m.cfg.Endpoint, m.headerCWD, m.headerSessions, m.headerTipIdx))
+		sb.WriteString(renderStartupHeader(m.headerFrame, m.width, m.version, m.modelDisplayLabel(), m.cfg.Endpoint, m.headerCWD, m.headerSessions, m.headerTipIdx))
 	case stateInput:
 		sb.WriteString(bar)
 		sb.WriteString("\n")
@@ -953,7 +985,7 @@ func (m *Model) View() string {
 		sb.WriteString("\n")
 		// Bottom bar with right-aligned model tier
 		tierDim := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
-		rightInfo := tierDim.Render(m.cfg.ModelTier)
+		rightInfo := tierDim.Render(m.modelDisplayLabel())
 		barWidth := m.width - lipgloss.Width(rightInfo)
 		if barWidth < 0 {
 			barWidth = 0
@@ -978,7 +1010,7 @@ func (m *Model) View() string {
 		// Bottom status bar with model tier + execution timer (like Claude Code)
 		elapsed := formatElapsed(time.Since(m.processingStartTime))
 		tierDim := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
-		rightInfo := tierDim.Render(m.cfg.ModelTier + " " + elapsed)
+		rightInfo := tierDim.Render(m.modelDisplayLabel() + " " + elapsed)
 		statusBarWidth := m.width - lipgloss.Width(rightInfo)
 		if statusBarWidth < 0 {
 			statusBarWidth = 0
@@ -1426,21 +1458,66 @@ func (m *Model) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 			}
 		}
 	case "/model":
-		if len(parts) > 1 {
-			saveCfg := m.cfg
-			if m.baseCfg != nil {
-				m.baseCfg.ModelTier = parts[1]
-				saveCfg = m.baseCfg
-			}
-			m.cfg.ModelTier = parts[1]
-			m.agentLoop.SetModelTier(parts[1])
-			if err := config.Save(saveCfg); err != nil {
-				m.appendOutput(fmt.Sprintf("Model tier: %s (failed to save: %v)", parts[1], err))
+		if m.cfg.Provider == "ollama" {
+			if len(parts) > 1 {
+				newModel := parts[1]
+				m.cfg.Ollama.Model = newModel
+				if m.baseCfg != nil {
+					m.baseCfg.Ollama.Model = newModel
+				}
+				m.agentLoop.SetSpecificModel(newModel)
+				saveCfg := m.cfg
+				if m.baseCfg != nil {
+					saveCfg = m.baseCfg
+				}
+				if err := config.Save(saveCfg); err != nil {
+					m.appendOutput(fmt.Sprintf("Model: %s (failed to save: %v)", newModel, err))
+				} else {
+					m.appendOutput(fmt.Sprintf("Model: %s (saved)", newModel))
+				}
 			} else {
-				m.appendOutput(fmt.Sprintf("Model tier: %s (saved)", parts[1]))
+				oc, ok := m.llmClient.(*client.OllamaClient)
+				if !ok {
+					m.appendOutput(fmt.Sprintf("Current model: %s", m.cfg.Ollama.Model))
+					break
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				models, err := oc.ListModels(ctx)
+				cancel()
+				if err != nil {
+					m.appendOutput(fmt.Sprintf("Current model: %s (could not list: %v)", m.cfg.Ollama.Model, err))
+					break
+				}
+				var sb strings.Builder
+				sb.WriteString("Available models:\n")
+				for _, mdl := range models {
+					marker := "  "
+					if mdl.Name == m.cfg.Ollama.Model {
+						marker = "→ "
+					}
+					sizeGB := float64(mdl.Size) / 1e9
+					sb.WriteString(fmt.Sprintf("  %s%s (%.1f GB)\n", marker, mdl.Name, sizeGB))
+				}
+				sb.WriteString("\nUse /model <name> to switch")
+				m.appendOutput(sb.String())
 			}
 		} else {
-			m.appendOutput(fmt.Sprintf("Current model tier: %s", m.cfg.ModelTier))
+			if len(parts) > 1 {
+				saveCfg := m.cfg
+				if m.baseCfg != nil {
+					m.baseCfg.ModelTier = parts[1]
+					saveCfg = m.baseCfg
+				}
+				m.cfg.ModelTier = parts[1]
+				m.agentLoop.SetModelTier(parts[1])
+				if err := config.Save(saveCfg); err != nil {
+					m.appendOutput(fmt.Sprintf("Model tier: %s (failed to save: %v)", parts[1], err))
+				} else {
+					m.appendOutput(fmt.Sprintf("Model tier: %s (saved)", parts[1]))
+				}
+			} else {
+				m.appendOutput(fmt.Sprintf("Current model tier: %s", m.cfg.ModelTier))
+			}
 		}
 	case "/config":
 		m.appendOutput(formatConfigDisplay(m.cfg))
@@ -1563,6 +1640,11 @@ func (m *Model) handleSwarm(args []string) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) runRemote(query string, ctx map[string]any, strategy string) tea.Cmd {
+	if m.gateway == nil {
+		return func() tea.Msg {
+			return agentDoneMsg{err: fmt.Errorf("remote tasks require gateway provider (not available with ollama)")}
+		}
+	}
 	// Set title from query if still default
 	sess := m.sessions.Current()
 	if sess.Title == "New session" {
@@ -2008,6 +2090,13 @@ func statusMessage(msg, fallback string) string {
 func formatConfigDisplay(cfg *config.Config) string {
 	var sb strings.Builder
 	sb.WriteString("Shannon CLI Configuration\n")
+
+	if cfg.Provider == "ollama" {
+		sb.WriteString(fmt.Sprintf("  provider: ollama\n"))
+		sb.WriteString(fmt.Sprintf("  ollama.endpoint: %s\n", cfg.Ollama.Endpoint))
+		sb.WriteString(fmt.Sprintf("  ollama.model: %s\n", cfg.Ollama.Model))
+		sb.WriteString("\n")
+	}
 
 	srcLabel := func(key string) string {
 		if cfg.Sources == nil {

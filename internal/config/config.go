@@ -21,9 +21,11 @@ type ConfigSource struct {
 }
 
 type Config struct {
+	Provider        string                         `mapstructure:"provider"          yaml:"provider"          json:"provider"` // "gateway" (default) or "ollama"
 	Endpoint        string                         `mapstructure:"endpoint"          yaml:"endpoint"          json:"endpoint"`
 	APIKey          string                         `mapstructure:"api_key"           yaml:"api_key"           json:"api_key"`
 	ModelTier       string                         `mapstructure:"model_tier"        yaml:"model_tier"        json:"model_tier"`
+	Ollama          OllamaConfig                   `mapstructure:"ollama"            yaml:"ollama"            json:"ollama"`
 	AutoUpdateCheck bool                           `mapstructure:"auto_update_check" yaml:"auto_update_check" json:"auto_update_check"`
 	Permissions     permissions.PermissionsConfig  `mapstructure:"permissions"       yaml:"permissions"       json:"permissions"`
 	Agent           AgentConfig                    `mapstructure:"agent"             yaml:"agent"             json:"agent"`
@@ -60,6 +62,11 @@ type ToolsConfig struct {
 type CloudConfig struct {
 	Enabled bool `mapstructure:"enabled" yaml:"enabled" json:"enabled"`
 	Timeout int  `mapstructure:"timeout" yaml:"timeout" json:"timeout"` // seconds
+}
+
+type OllamaConfig struct {
+	Endpoint string `mapstructure:"endpoint" yaml:"endpoint" json:"endpoint"`
+	Model    string `mapstructure:"model"    yaml:"model"    json:"model"`
 }
 
 type DaemonConfig struct {
@@ -102,7 +109,10 @@ func Load() (*Config, error) {
 	viper.SetConfigType("yaml")
 	viper.AddConfigPath(dir)
 
+	viper.SetDefault("provider", "gateway")
 	viper.SetDefault("endpoint", "https://api-dev.shannon.run")
+	viper.SetDefault("ollama.endpoint", "http://localhost:11434")
+	viper.SetDefault("ollama.model", "")
 	viper.SetDefault("api_key", "")
 	viper.SetDefault("model_tier", "medium")
 	viper.SetDefault("auto_update_check", true)
@@ -275,15 +285,22 @@ func Save(cfg *Config) error {
 // overlayConfig is a partial config used for YAML overlay merging.
 // Pointer fields distinguish "not set" (nil) from "set to zero value".
 type overlayConfig struct {
+	Provider        *string                        `yaml:"provider"`
 	Endpoint        *string                        `yaml:"endpoint"`
 	APIKey          *string                        `yaml:"api_key"`
 	ModelTier       *string                        `yaml:"model_tier"`
 	AutoUpdateCheck *bool                          `yaml:"auto_update_check"`
+	Ollama          *overlayOllamaConfig           `yaml:"ollama"`
 	Permissions     *permissions.PermissionsConfig `yaml:"permissions"`
 	Agent           *overlayAgentConfig            `yaml:"agent"`
 	Tools           *overlayToolsConfig            `yaml:"tools"`
 	Daemon          *overlayDaemonConfig           `yaml:"daemon"`
 	MCPServers      map[string]mcp.MCPServerConfig `yaml:"mcp_servers"`
+}
+
+type overlayOllamaConfig struct {
+	Endpoint *string `yaml:"endpoint"`
+	Model    *string `yaml:"model"`
 }
 
 type overlayDaemonConfig struct {
@@ -436,10 +453,24 @@ func mergeRuntimeOverlayFile(cfg *Config, file string, level string) {
 
 	src := ConfigSource{File: file, Level: level}
 
-	// Scalar overrides (session-safe fields only)
+	// Scalar overrides
+	if overlay.Provider != nil {
+		cfg.Provider = *overlay.Provider
+		cfg.Sources["provider"] = src
+	}
 	if overlay.ModelTier != nil {
 		cfg.ModelTier = *overlay.ModelTier
 		cfg.Sources["model_tier"] = src
+	}
+
+	// Ollama field-level merge
+	if overlay.Ollama != nil {
+		if overlay.Ollama.Endpoint != nil {
+			cfg.Ollama.Endpoint = *overlay.Ollama.Endpoint
+		}
+		if overlay.Ollama.Model != nil {
+			cfg.Ollama.Model = *overlay.Ollama.Model
+		}
 	}
 
 	// Agent field-level merge

@@ -220,6 +220,19 @@ func filterToolsForOpenAI(tools []Tool) []Tool {
 }
 
 // ---------------------------------------------------------------------------
+// OllamaModel — model metadata from /api/tags
+// ---------------------------------------------------------------------------
+
+// OllamaModel represents a model available in the local Ollama instance.
+type OllamaModel struct {
+	Name    string `json:"name"`
+	Size    int64  `json:"size"`
+	Details struct {
+		ParameterSize string `json:"parameter_size"`
+	} `json:"details"`
+}
+
+// ---------------------------------------------------------------------------
 // OllamaClient
 // ---------------------------------------------------------------------------
 
@@ -418,4 +431,44 @@ func (c *OllamaClient) CompleteStream(ctx context.Context, req CompletionRequest
 		FinishReason: mapFinishReason(finishReason),
 		Usage:        usage,
 	}, nil
+}
+
+// ListModels queries the Ollama instance for available models via /api/tags.
+func (c *OllamaClient) ListModels(ctx context.Context) ([]OllamaModel, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint+"/api/tags", nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ollama returned %d", resp.StatusCode)
+	}
+	var result struct {
+		Models []OllamaModel `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return result.Models, nil
+}
+
+// CheckHealth checks if the Ollama instance is reachable.
+func (c *OllamaClient) CheckHealth(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint+"/", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("ollama not reachable: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("ollama returned %d", resp.StatusCode)
+	}
+	return nil
 }

@@ -949,7 +949,85 @@ func TestOllamaClient_Complete_NoToolsSendsNoToolsField(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 9. LLMClient interface satisfaction
+// 9. OllamaClient.ListModels() and CheckHealth()
+// ---------------------------------------------------------------------------
+
+func TestOllamaClient_ListModels(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/tags" {
+			t.Errorf("expected /api/tags, got %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"models":[
+			{"name":"qwen3:4b","size":2500000000,"details":{"parameter_size":"4B"}},
+			{"name":"llama3.1:8b","size":5200000000,"details":{"parameter_size":"8B"}}
+		]}`)
+	}))
+	defer server.Close()
+
+	oc := NewOllamaClient(server.URL, "qwen3:4b")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	models, err := oc.ListModels(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(models) != 2 {
+		t.Fatalf("expected 2 models, got %d", len(models))
+	}
+	if models[0].Name != "qwen3:4b" {
+		t.Errorf("first model name: %q", models[0].Name)
+	}
+	if models[1].Name != "llama3.1:8b" {
+		t.Errorf("second model name: %q", models[1].Name)
+	}
+	if models[0].Size != 2500000000 {
+		t.Errorf("first model size: %d", models[0].Size)
+	}
+}
+
+func TestOllamaClient_ListModels_ConnectionRefused(t *testing.T) {
+	oc := NewOllamaClient("http://127.0.0.1:1", "m")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err := oc.ListModels(ctx)
+	if err == nil {
+		t.Fatal("expected error for connection refused")
+	}
+}
+
+func TestOllamaClient_CheckHealth(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			t.Errorf("expected /, got %s", r.URL.Path)
+		}
+		fmt.Fprint(w, "Ollama is running")
+	}))
+	defer server.Close()
+
+	oc := NewOllamaClient(server.URL, "m")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := oc.CheckHealth(ctx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestOllamaClient_CheckHealth_NotRunning(t *testing.T) {
+	oc := NewOllamaClient("http://127.0.0.1:1", "m")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := oc.CheckHealth(ctx); err == nil {
+		t.Fatal("expected error when Ollama is not running")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 10. LLMClient interface satisfaction
 // ---------------------------------------------------------------------------
 
 func TestOllamaClient_ImplementsLLMClient(t *testing.T) {

@@ -297,7 +297,6 @@ func (c *OllamaClient) Complete(ctx context.Context, req CompletionRequest) (*Co
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer ollama")
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -332,7 +331,6 @@ func (c *OllamaClient) CompleteStream(ctx context.Context, req CompletionRequest
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream")
-	httpReq.Header.Set("Authorization", "Bearer ollama")
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {

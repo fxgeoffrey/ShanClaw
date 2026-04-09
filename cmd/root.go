@@ -303,15 +303,22 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 }
 
 func resolveOneShotCWD(agentOverride *agents.Agent) (string, error) {
-	var agentCWD string
-	if agentOverride != nil && agentOverride.Config != nil {
-		agentCWD = agentOverride.Config.CWD
+	// Priority: agent CWD > shell CWD > $HOME
+	if agentOverride != nil && agentOverride.Config != nil && agentOverride.Config.CWD != "" {
+		if err := cwdctx.ValidateCWD(agentOverride.Config.CWD); err != nil {
+			return "", fmt.Errorf("invalid cwd: %w", err)
+		}
+		return agentOverride.Config.CWD, nil
 	}
-	effectiveCWD := cwdctx.ResolveEffectiveCWD("", "", agentCWD)
-	if err := cwdctx.ValidateCWD(effectiveCWD); err != nil {
-		return "", fmt.Errorf("invalid cwd: %w", err)
+	// One-shot runs in the user's shell — use process CWD so project-level
+	// .shannon/config.yaml is picked up by RuntimeConfigForCWD.
+	if cwd, err := os.Getwd(); err == nil {
+		if cwdctx.ValidateCWD(cwd) == nil {
+			return cwd, nil
+		}
 	}
-	return effectiveCWD, nil
+	home, _ := os.UserHomeDir()
+	return home, nil
 }
 
 // cliEventHandler prompts for approval on stdout/stdin in one-shot mode

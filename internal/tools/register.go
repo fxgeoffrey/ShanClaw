@@ -261,7 +261,10 @@ func CompleteRegistration(ctx context.Context, gw *client.GatewayClient, cfg *co
 		}
 	}
 
-	err := RegisterServerTools(ctx, gw, reg)
+	var err error
+	if gw != nil {
+		err = RegisterServerTools(ctx, gw, reg)
+	}
 
 	// Apply tool filter AFTER all sources are registered
 	reg = ApplyToolFilter(reg, agentDef...)

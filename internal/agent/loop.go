@@ -277,7 +277,7 @@ type InjectedMessage struct {
 }
 
 type AgentLoop struct {
-	client            *client.GatewayClient
+	client            client.LLMClient
 	tools             *ToolRegistry
 	modelTier         string
 	handler           EventHandler
@@ -313,7 +313,7 @@ type AgentLoop struct {
 	runMsgTimestamps  []time.Time      // parallel to runMessages: when each message was created
 }
 
-func NewAgentLoop(gw *client.GatewayClient, tools *ToolRegistry, modelTier string, shannonDir string, maxIter int, resultTrunc int, argsTrunc int, perms *permissions.PermissionsConfig, auditor *audit.AuditLogger, hookRunner *hooks.HookRunner) *AgentLoop {
+func NewAgentLoop(gw client.LLMClient, tools *ToolRegistry, modelTier string, shannonDir string, maxIter int, resultTrunc int, argsTrunc int, perms *permissions.PermissionsConfig, auditor *audit.AuditLogger, hookRunner *hooks.HookRunner) *AgentLoop {
 	if maxIter <= 0 {
 		maxIter = 25
 	}

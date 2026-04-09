@@ -140,19 +140,37 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 		return fmt.Errorf("runtime config: %w", err)
 	}
 
-	gw := client.NewGatewayClient(runCfg.Endpoint, runCfg.APIKey)
+	// Select LLM client based on provider config
+	var llmClient client.LLMClient
+	var gw *client.GatewayClient // non-nil only for gateway provider (server tools, cloud delegate)
+	if runCfg.Provider == "ollama" {
+		model := runCfg.Ollama.Model
+		if runCfg.Agent.Model != "" {
+			model = runCfg.Agent.Model
+		}
+		if model == "" {
+			return fmt.Errorf("ollama provider requires a model — set ollama.model or agent.model in config")
+		}
+		llmClient = client.NewOllamaClient(runCfg.Ollama.Endpoint, model)
+	} else {
+		gw = client.NewGatewayClient(runCfg.Endpoint, runCfg.APIKey)
+		llmClient = gw
+	}
+
 	reg, skillsPtr, _, cleanup, serverErr := tools.RegisterAll(gw, runCfg, agentOverride)
 	defer cleanup()
 	if serverErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: %v\n", serverErr)
 	}
 
-	// Cloud delegation tool (uses same gateway client)
-	var cloudAgentPrompt string
-	if agentOverride != nil {
-		cloudAgentPrompt = agentOverride.Prompt
+	// Cloud delegation tool (gateway only)
+	if gw != nil {
+		var cloudAgentPrompt string
+		if agentOverride != nil {
+			cloudAgentPrompt = agentOverride.Prompt
+		}
+		tools.RegisterCloudDelegate(reg, gw, runCfg, nil, agentName, cloudAgentPrompt)
 	}
-	tools.RegisterCloudDelegate(reg, gw, runCfg, nil, agentName, cloudAgentPrompt) // handler set later via loop.SetHandler
 
 	shannonDir := config.ShannonDir()
 
@@ -174,14 +192,14 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 	scopedMCPCtx := tools.ResolveMCPContext(runCfg, agentOverride)
 
 	hookRunner := hooks.NewHookRunner(runCfg.Hooks)
-	loop := agent.NewAgentLoop(gw, reg, runCfg.ModelTier, shannonDir, runCfg.Agent.MaxIterations, runCfg.Tools.ResultTruncation, runCfg.Tools.ArgsTruncation, &runCfg.Permissions, auditor, hookRunner)
+	loop := agent.NewAgentLoop(llmClient, reg, runCfg.ModelTier, shannonDir, runCfg.Agent.MaxIterations, runCfg.Tools.ResultTruncation, runCfg.Tools.ArgsTruncation, &runCfg.Permissions, auditor, hookRunner)
 	loop.SetMaxTokens(runCfg.Agent.MaxTokens)
 	loop.SetTemperature(runCfg.Agent.Temperature)
 	loop.SetContextWindow(runCfg.Agent.ContextWindow)
 	if runCfg.Agent.Model != "" {
 		loop.SetSpecificModel(runCfg.Agent.Model)
 	}
-	if runCfg.Agent.Thinking {
+	if runCfg.Agent.Thinking && runCfg.Provider != "ollama" {
 		if runCfg.Agent.ThinkingMode == "enabled" {
 			loop.SetThinking(&client.ThinkingConfig{Type: "enabled", BudgetTokens: runCfg.Agent.ThinkingBudget})
 		} else {
@@ -285,15 +303,22 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 }
 
 func resolveOneShotCWD(agentOverride *agents.Agent) (string, error) {
-	var agentCWD string
-	if agentOverride != nil && agentOverride.Config != nil {
-		agentCWD = agentOverride.Config.CWD
+	// Priority: agent CWD > shell CWD > $HOME
+	if agentOverride != nil && agentOverride.Config != nil && agentOverride.Config.CWD != "" {
+		if err := cwdctx.ValidateCWD(agentOverride.Config.CWD); err != nil {
+			return "", fmt.Errorf("invalid cwd: %w", err)
+		}
+		return agentOverride.Config.CWD, nil
 	}
-	effectiveCWD := cwdctx.ResolveEffectiveCWD("", "", agentCWD)
-	if err := cwdctx.ValidateCWD(effectiveCWD); err != nil {
-		return "", fmt.Errorf("invalid cwd: %w", err)
+	// One-shot runs in the user's shell — use process CWD so project-level
+	// .shannon/config.yaml is picked up by RuntimeConfigForCWD.
+	if cwd, err := os.Getwd(); err == nil {
+		if cwdctx.ValidateCWD(cwd) == nil {
+			return cwd, nil
+		}
 	}
-	return effectiveCWD, nil
+	home, _ := os.UserHomeDir()
+	return home, nil
 }
 
 // cliEventHandler prompts for approval on stdout/stdin in one-shot mode

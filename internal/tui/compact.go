@@ -10,6 +10,7 @@ import (
 
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
 	ctxwin "github.com/Kocoro-lab/ShanClaw/internal/context"
+	"github.com/Kocoro-lab/ShanClaw/internal/session"
 )
 
 type compactDoneMsg struct {
@@ -57,15 +58,33 @@ func (m *Model) runCompact(customInstructions string) func() compactDoneMsg {
 			return compactDoneMsg{err: fmt.Errorf("summarization failed: %w", err)}
 		}
 
-		// Step 3: shape history
+		// Step 3: shape history.
+		// ShapeHistory expects [system] + [first user] + ... but TUI sessions
+		// don't persist the system prompt. Prepend a placeholder so the array
+		// layout matches, then strip it from the result.
 		ctxWindow := m.cfg.Agent.ContextWindow
 		if ctxWindow <= 0 {
 			ctxWindow = 128000
 		}
-		shaped := ctxwin.ShapeHistory(messages, summary, ctxWindow)
+		withSystem := make([]client.Message, 0, 1+len(messages))
+		withSystem = append(withSystem, client.Message{Role: "system", Content: client.NewTextContent("(compaction placeholder)")})
+		withSystem = append(withSystem, messages...)
+		shaped := ctxwin.ShapeHistory(withSystem, summary, ctxWindow)
+
+		// Strip the placeholder system message from shaped result
+		if len(shaped) > 0 && shaped[0].Role == "system" {
+			shaped = shaped[1:]
+		}
+
+		// Rebuild MessageMeta to stay index-aligned with the new Messages.
+		newMeta := make([]session.MessageMeta, len(shaped))
+		for i := range newMeta {
+			newMeta[i] = session.MessageMeta{Source: "local", Timestamp: session.TimePtr(time.Now())}
+		}
 
 		// Update session
 		sess.Messages = shaped
+		sess.MessageMeta = newMeta
 		m.sessions.Save()
 
 		afterTokens := ctxwin.EstimateTokens(shaped)

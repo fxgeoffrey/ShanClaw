@@ -409,6 +409,7 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 		markdownCache:  make(map[string]string),
 		slashCommands:  instanceCmds,
 		sessionAllowed: make(map[string]bool),
+		historyIdx:     -1,
 	}
 
 	return m
@@ -772,8 +773,11 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.flushPrints()
 		}
 
-		// Readline shortcuts (only in stateInput, not during menus)
-		if m.state == stateInput && !m.menuVisible {
+		// Readline shortcuts (only in stateInput, single-line, not during menus).
+		// CharOffset is relative to the current wrapped line, so these shortcuts
+		// would slice the wrong position in multi-line input.
+		taLines := strings.Count(m.textarea.Value(), "\n") + 1
+		if m.state == stateInput && !m.menuVisible && taLines <= 1 {
 			switch msg.Type {
 			case tea.KeyCtrlK: // Delete to end of line
 				val := m.textarea.Value()
@@ -837,6 +841,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.appendOutput(fmt.Sprintf("Error: %v", err))
 					} else {
 						m.resumedSession = true
+						m.sessionAllowed = make(map[string]bool)
 						m.applyRuntimeContext(sess)
 						m.loadSessionHistory(sess)
 					}
@@ -1554,6 +1559,7 @@ func (m *Model) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 		m.output = nil
 		sess := m.sessions.NewSession()
 		m.resumedSession = false
+		m.sessionAllowed = make(map[string]bool)
 		m.applyRuntimeContext(sess)
 		return m, m.rerenderOutput()
 	case "/sessions":
@@ -1573,6 +1579,7 @@ func (m *Model) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 			case "new":
 				sess := m.sessions.NewSession()
 				m.resumedSession = false
+				m.sessionAllowed = make(map[string]bool)
 				m.applyRuntimeContext(sess)
 				m.appendOutput("Started new session")
 			case "resume":
@@ -1589,6 +1596,7 @@ func (m *Model) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 						m.appendOutput(fmt.Sprintf("Error: %v", err))
 					} else {
 						m.resumedSession = true
+						m.sessionAllowed = make(map[string]bool)
 						m.applyRuntimeContext(sess)
 						m.loadSessionHistory(sess)
 					}

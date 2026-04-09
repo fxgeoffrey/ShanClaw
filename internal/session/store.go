@@ -150,13 +150,28 @@ func (s *Store) Save(sess *Session) error {
 }
 
 // PatchTitle 从磁盘重新读取 session，仅更新标题后写回。
+// 不更新 UpdatedAt，不影响 session 排序。
 func (s *Store) PatchTitle(id, title string) error {
 	sess, err := s.Load(id)
 	if err != nil {
 		return err
 	}
 	sess.Title = title
-	return s.Save(sess)
+
+	data, err := json.MarshalIndent(sess, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal session: %w", err)
+	}
+
+	path := filepath.Join(s.dir, sess.ID+".json")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return err
+	}
+
+	if s.index != nil {
+		s.index.UpsertSession(sess)
+	}
+	return nil
 }
 
 // PatchSummaryCache 从磁盘重新读取 session 的最新版本，仅更新摘要缓存字段后写回。

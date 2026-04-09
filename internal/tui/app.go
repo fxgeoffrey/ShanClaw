@@ -1468,12 +1468,14 @@ func (m *Model) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 			m.appendOutput("No messages in session")
 		}
 	case "/rename":
-		if len(parts) < 2 {
+		newTitle := strings.TrimSpace(strings.TrimPrefix(input, "/rename "))
+		if newTitle == "" {
 			m.appendOutput("Usage: /rename <new title>")
 		} else {
-			newTitle := strings.TrimSpace(strings.TrimPrefix(input, "/rename "))
 			sess := m.sessions.Current()
-			if sess != nil {
+			if sess == nil {
+				m.appendOutput("No active session to rename")
+			} else {
 				sess.Title = newTitle
 				m.sessions.Save()
 				m.appendOutput(fmt.Sprintf("Session renamed: %s", newTitle))

@@ -585,29 +585,31 @@ func (s *Server) handlePatchSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "session id required")
 		return
 	}
+	// 防止路径穿越 — session ID 必须是安全的文件名。
 	if id != filepath.Base(id) || strings.ContainsAny(id, `/\`) {
 		writeError(w, http.StatusBadRequest, "invalid session id")
 		return
 	}
 	var body struct {
 		Title string `json:"title"`
-		Agent string `json:"agent,omitempty"`
 	}
 	if !decodeBody(w, r, &body) {
 		return
 	}
-	if strings.TrimSpace(body.Title) == "" {
+	title := strings.TrimSpace(body.Title)
+	if title == "" {
 		writeError(w, http.StatusBadRequest, "title cannot be empty")
 		return
 	}
-	if body.Agent != "" {
-		if err := agents.ValidateAgentName(body.Agent); err != nil {
+	agentName := r.URL.Query().Get("agent")
+	if agentName != "" {
+		if err := agents.ValidateAgentName(agentName); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 	}
-	mgr := s.deps.SessionCache.GetOrCreateManager(s.deps.SessionCache.SessionsDir(body.Agent))
-	if err := mgr.PatchTitle(id, strings.TrimSpace(body.Title)); err != nil {
+	mgr := s.deps.SessionCache.GetOrCreateManager(s.deps.SessionCache.SessionsDir(agentName))
+	if err := mgr.PatchTitle(id, title); err != nil {
 		if os.IsNotExist(err) {
 			writeError(w, http.StatusNotFound, fmt.Sprintf("session %q not found", id))
 			return
@@ -615,7 +617,7 @@ func (s *Server) handlePatchSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "updated", "title": strings.TrimSpace(body.Title)})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "updated", "title": title})
 }
 
 func (s *Server) handleSessionSearch(w http.ResponseWriter, r *http.Request) {

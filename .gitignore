@@ -6,6 +6,8 @@ shannon
 .DS_Store
 .shannon/
 .claude/
+.worktrees/
+CLAUDE.local.md
 *.env
 .env*
 *.pem

@@ -906,7 +906,11 @@ func TestAgentLoop_StateAwareCache_UnknownWriteClearsReadCache(t *testing.T) {
 }
 
 func TestAgentLoop_ToolSearchLoadsBrowserFamilyCoreAndReanchorsTask(t *testing.T) {
-	var secondReq client.CompletionRequest
+	// Reanchor should only fire when the model stops with text after tool_search
+	// (i.e., fails to use loaded tools), not on the happy path.
+	// Flow: call 1 = tool_search → call 2 = text "Thinking..." (model stops) →
+	// reanchor injected + continue → call 3 = text "Done." (model proceeds).
+	var secondReq, thirdReq client.CompletionRequest
 
 	callCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -920,12 +924,19 @@ func TestAgentLoop_ToolSearchLoadsBrowserFamilyCoreAndReanchorsTask(t *testing.T
 		if callCount == 2 {
 			secondReq = req
 		}
+		if callCount == 3 {
+			thirdReq = req
+		}
 
 		switch callCount {
 		case 1:
 			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
 				toolCall("tool_search", `{"query":"select:browser_navigate"}`), 10, 5))
 		case 2:
+			// Model stops with text instead of calling loaded tools — triggers reanchor.
+			json.NewEncoder(w).Encode(nativeResponse("Thinking...", "end_turn", nil, 10, 5))
+		case 3:
+			// After reanchor nudge, model completes.
 			json.NewEncoder(w).Encode(nativeResponse("Done.", "end_turn", nil, 10, 5))
 		default:
 			t.Errorf("unexpected LLM call %d", callCount)
@@ -949,6 +960,7 @@ func TestAgentLoop_ToolSearchLoadsBrowserFamilyCoreAndReanchorsTask(t *testing.T
 		t.Fatalf("expected Done., got %q", result)
 	}
 
+	// Second request should have warmed browser core tools.
 	toolNames := make(map[string]bool, len(secondReq.Tools))
 	for _, tool := range secondReq.Tools {
 		toolNames[schemaName(tool)] = true
@@ -959,8 +971,9 @@ func TestAgentLoop_ToolSearchLoadsBrowserFamilyCoreAndReanchorsTask(t *testing.T
 		}
 	}
 
+	// Reanchor should appear in the THIRD request (after model stopped with text).
 	foundReanchor := false
-	for _, msg := range secondReq.Messages {
+	for _, msg := range thirdReq.Messages {
 		if msg.Role != "user" || msg.Content.HasBlocks() {
 			continue
 		}
@@ -972,7 +985,7 @@ func TestAgentLoop_ToolSearchLoadsBrowserFamilyCoreAndReanchorsTask(t *testing.T
 		}
 	}
 	if !foundReanchor {
-		t.Fatal("expected second request to include a deferred-tool reanchor message")
+		t.Fatal("expected third request to include a deferred-tool reanchor message")
 	}
 }
 

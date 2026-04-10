@@ -1422,6 +1422,19 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				continue
 			}
 
+			// tool_search loaded schemas but the model stopped with text instead
+			// of calling the loaded tools — nudge it to continue.
+			if toolSearchFired {
+				toolSearchFired = false
+				reanchorActiveTask(MetaBoundaryToolSearchLoaded)
+				messages = append(messages, client.Message{
+					Role:    "assistant",
+					Content: client.NewTextContent(resp.OutputText),
+				})
+				stampMessage()
+				continue
+			}
+
 			// Only render text for the final response — intermediate text
 			// from checkpoint/hallucination paths must not leak to the user.
 			// If earlier iterations were truncated, prepend the accumulated text.
@@ -1443,7 +1456,11 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			return fullText, usage, nil
 		}
 
-		// Model made tool calls — partial recovery for hallucination counter.
+		// Model made tool calls — it's using the loaded tools correctly.
+		// Clear toolSearchFired so we don't nudge unnecessarily.
+		toolSearchFired = false
+
+		// Partial recovery for hallucination counter.
 		// Don't fully reset (allows alternating hallucinate→tools to accumulate),
 		// but forgive one nudge per real tool use to avoid permanent disabling.
 		if hallucinationNudges > 0 {
@@ -1649,7 +1666,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		}
 
 		// Deferred mode: check if tool_search loaded new tools, rebuild schemas.
-		toolSearchFired = false
+		// toolSearchFired persists across iterations — consumed in text-only path.
 		if deferredMode {
 			for _, ac := range approved {
 				if ac.fc.Name == "tool_search" {
@@ -1968,9 +1985,8 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			prevIterResults[meta.cacheKey] = cached
 		}
 
-		if toolSearchFired && worstAction == LoopContinue {
-			reanchorActiveTask(MetaBoundaryToolSearchLoaded)
-		}
+		// toolSearchFired is consumed in the text-only path (next iteration)
+		// to nudge only when the model stops instead of using loaded tools.
 
 		// One-shot cloud delegation nudge when struggling with web tasks
 		if !cloudNudgeFired && worstAction >= LoopNudge {

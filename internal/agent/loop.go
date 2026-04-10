@@ -2211,10 +2211,12 @@ func formatToolExec(toolName, args, callID, output string, isError bool) string 
 
 // normalizeJSON re-marshals raw JSON to compact canonical form so that
 // semantically identical arguments with different whitespace or key order
-// produce the same string for dedup comparison.
+// produce the same string for dedup comparison. Literal `null` and empty
+// inputs are canonicalized to `{}` so dedup/cache keys don't diverge between
+// the two representations of "no arguments" (see issue #45).
 func normalizeJSON(raw json.RawMessage) string {
 	trimmed := strings.TrimSpace(string(raw))
-	if trimmed == "" {
+	if trimmed == "" || trimmed == "null" {
 		return "{}"
 	}
 

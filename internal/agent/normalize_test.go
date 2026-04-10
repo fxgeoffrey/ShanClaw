@@ -34,6 +34,25 @@ func TestNormalizeJSON_EmptyAndWhitespaceInputs(t *testing.T) {
 	}
 }
 
+// TestNormalizeJSON_NullBecomesEmptyObject verifies that literal `null`
+// arguments (emitted by providers when a tool is called with no args) are
+// canonicalized to `{}` so dedup/cache keys don't diverge between null and
+// empty-object representations of the same semantic "no arguments". See
+// issue #45.
+func TestNormalizeJSON_NullBecomesEmptyObject(t *testing.T) {
+	cases := []json.RawMessage{
+		json.RawMessage("null"),
+		json.RawMessage(" null "),
+		json.RawMessage("\tnull\n"),
+	}
+	for i, tc := range cases {
+		got := normalizeJSON(tc)
+		if got != "{}" {
+			t.Fatalf("case %d: expected {}, got %q", i, got)
+		}
+	}
+}
+
 func TestNormalizeJSON_InvalidJSONFallsBackToTrimmedRaw(t *testing.T) {
 	raw := json.RawMessage(`{ "command": "date",`)
 	expected := strings.TrimSpace(string(raw))

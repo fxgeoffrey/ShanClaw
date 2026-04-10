@@ -44,7 +44,9 @@ type ContentBlock struct {
 	ToolContent any    `json:"-"` // string or []ContentBlock; serialized as "content" for tool_result
 }
 
-// MarshalJSON handles the polymorphic "content" field for tool_result blocks.
+// MarshalJSON handles the polymorphic "content" field for tool_result blocks
+// and guarantees tool_use.input is always a concrete JSON object (never null
+// or missing), which is required by Anthropic's schema validator. See issue #45.
 func (cb ContentBlock) MarshalJSON() ([]byte, error) {
 	type plain ContentBlock // avoid infinite recursion
 	m := make(map[string]any)
@@ -63,7 +65,32 @@ func (cb ContentBlock) MarshalJSON() ([]byte, error) {
 		m["content"] = cb.ToolContent
 	}
 
+	// For tool_use blocks, force-write a concrete input object. The base
+	// field has `omitempty` so a nil/empty RawMessage is dropped by the
+	// initial marshal; we reinject a normalized value here so every tool_use
+	// block always carries a valid `input` field on the wire.
+	if cb.Type == "tool_use" {
+		normalized := normalizeToolInput(cb.Input)
+		var inputVal any
+		if err := json.Unmarshal(normalized, &inputVal); err != nil {
+			// Fallback: preserve raw bytes as a JSON Number/string via RawMessage.
+			inputVal = normalized
+		}
+		m["input"] = inputVal
+	}
+
 	return json.Marshal(m)
+}
+
+// normalizeToolInput coerces a null/empty/whitespace RawMessage to an empty
+// JSON object so that tool_use.input always serializes as a valid dictionary.
+// Populated inputs are returned unchanged. See issue #45.
+func normalizeToolInput(raw json.RawMessage) json.RawMessage {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return json.RawMessage("{}")
+	}
+	return raw
 }
 
 // UnmarshalJSON handles the polymorphic "content" field for tool_result blocks.
@@ -95,9 +122,11 @@ func (cb *ContentBlock) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// NewToolUseBlock creates a tool_use content block.
+// NewToolUseBlock creates a tool_use content block. Input is normalized via
+// normalizeToolInput so in-memory consumers (e.g. ollama.go's string(b.Input))
+// never observe a literal "null" or empty bytes.
 func NewToolUseBlock(id, name string, input json.RawMessage) ContentBlock {
-	return ContentBlock{Type: "tool_use", ID: id, Name: name, Input: input}
+	return ContentBlock{Type: "tool_use", ID: id, Name: name, Input: normalizeToolInput(input)}
 }
 
 // NewToolResultBlock creates a tool_result content block with string content.
@@ -266,16 +295,16 @@ type FunctionCall struct {
 }
 
 // ArgumentsString returns arguments as a JSON string regardless of
-// whether the server sent a string or an object.
+// whether the server sent a string or an object. Null/empty arguments are
+// coerced to "{}" via normalizeToolInput (see issue #45) so downstream
+// consumers (logging, XML fallback, audit) never see literal "null".
 func (fc *FunctionCall) ArgumentsString() string {
-	if len(fc.Arguments) == 0 {
-		return "{}"
-	}
+	normalized := normalizeToolInput(fc.Arguments)
 	var s string
-	if err := json.Unmarshal(fc.Arguments, &s); err == nil {
+	if err := json.Unmarshal(normalized, &s); err == nil {
 		return s
 	}
-	return string(fc.Arguments)
+	return string(normalized)
 }
 
 type Usage struct {

@@ -1,6 +1,8 @@
 package context
 
 import (
+	"bytes"
+	"encoding/json"
 	"strings"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
@@ -13,6 +15,8 @@ import (
 //   - consecutive assistant messages without intervening user → merged into one
 //   - assistant error messages (FriendlyAgentError output) → dropped
 //   - orphaned tool_use blocks (no matching tool_result follows) → stripped
+//   - stale tool_use blocks with null/empty Input (from sessions persisted
+//     before the issue #45 fix) → Input rewritten to "{}"
 //
 // Returns a new slice; the original is not modified.
 func SanitizeHistory(messages []client.Message) []client.Message {
@@ -39,11 +43,69 @@ func SanitizeHistory(messages []client.Message) []client.Message {
 	// blocks lack their matching counterpart.
 	stripped := stripOrphanedToolPairs(merged)
 
+	// Fourth pass: normalize stale tool_use Input fields. Protects users
+	// resuming sessions persisted before the issue #45 fix from replaying a
+	// poisoned "input":null into the next Anthropic request.
+	normalized := normalizeStaleToolUseInputs(stripped)
+
 	// Final pass: stripping may create new consecutive same-role sequences
 	// (e.g. dropping an empty assistant leaves two adjacent user messages).
-	result := mergeConsecutiveRoles(stripped)
+	result := mergeConsecutiveRoles(normalized)
 
 	return result
+}
+
+// normalizeStaleToolUseInputs rebuilds messages whose tool_use blocks carry
+// null/empty Input fields, replacing them with "{}". Non-mutating: messages
+// with no affected blocks are passed through unchanged, and messages that
+// require edits get a fresh block slice rather than an in-place rewrite.
+func normalizeStaleToolUseInputs(messages []client.Message) []client.Message {
+	if len(messages) == 0 {
+		return messages
+	}
+	out := make([]client.Message, len(messages))
+	for i, msg := range messages {
+		if !msg.Content.HasBlocks() {
+			out[i] = msg
+			continue
+		}
+		src := msg.Content.Blocks()
+		var rebuilt []client.ContentBlock
+		for j, b := range src {
+			if b.Type != "tool_use" || !isEmptyOrNullToolInput(b.Input) {
+				if rebuilt != nil {
+					rebuilt = append(rebuilt, b)
+				}
+				continue
+			}
+			if rebuilt == nil {
+				rebuilt = make([]client.ContentBlock, 0, len(src))
+				rebuilt = append(rebuilt, src[:j]...)
+			}
+			fixed := b
+			fixed.Input = json.RawMessage("{}")
+			rebuilt = append(rebuilt, fixed)
+		}
+		if rebuilt == nil {
+			out[i] = msg
+		} else {
+			out[i] = client.Message{
+				Role:       msg.Role,
+				Content:    client.NewBlockContent(rebuilt),
+				Name:       msg.Name,
+				ToolCallID: msg.ToolCallID,
+			}
+		}
+	}
+	return out
+}
+
+// isEmptyOrNullToolInput mirrors client.normalizeToolInput's detection logic:
+// treats nil, empty bytes, pure whitespace, and the literal token "null" as
+// invalid tool_use input that must be rewritten to "{}".
+func isEmptyOrNullToolInput(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null"))
 }
 
 // stripOrphanedToolPairs removes unpaired tool_use and tool_result blocks.

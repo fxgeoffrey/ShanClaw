@@ -1,6 +1,7 @@
 package context
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
@@ -482,4 +483,86 @@ func truncStr(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// TestSanitizeHistory_NormalizesStaleToolUseInput verifies that SanitizeHistory
+// rewrites any stale tool_use block whose Input is null/empty to "{}" so that
+// sessions persisted before the issue #45 fix can resume without replaying a
+// poisoned history that would trigger Anthropic's schema validator.
+func TestSanitizeHistory_NormalizesStaleToolUseInput(t *testing.T) {
+	msgs := []client.Message{
+		{Role: "user", Content: client.NewTextContent("take a snapshot")},
+		{Role: "assistant", Content: client.NewBlockContent([]client.ContentBlock{
+			// These represent poisoned history loaded from a session file
+			// written by a pre-fix version of ShanClaw.
+			{Type: "tool_use", ID: "tu_null", Name: "browser_snapshot", Input: json.RawMessage("null")},
+			{Type: "tool_use", ID: "tu_nil", Name: "browser_close"},
+			{Type: "tool_use", ID: "tu_ok", Name: "browser_navigate", Input: json.RawMessage(`{"url":"https://example.com"}`)},
+		})},
+		{Role: "user", Content: client.NewBlockContent([]client.ContentBlock{
+			client.NewToolResultBlock("tu_null", "ok", false),
+			client.NewToolResultBlock("tu_nil", "ok", false),
+			client.NewToolResultBlock("tu_ok", "ok", false),
+		})},
+	}
+
+	result := SanitizeHistory(msgs)
+
+	// Find the assistant message and inspect its tool_use blocks.
+	var asstBlocks []client.ContentBlock
+	for _, m := range result {
+		if m.Role == "assistant" && m.Content.HasBlocks() {
+			asstBlocks = m.Content.Blocks()
+			break
+		}
+	}
+	if len(asstBlocks) != 3 {
+		t.Fatalf("expected 3 assistant blocks, got %d", len(asstBlocks))
+	}
+	for _, b := range asstBlocks {
+		if b.Type != "tool_use" {
+			continue
+		}
+		switch b.ID {
+		case "tu_null", "tu_nil":
+			if string(b.Input) != "{}" {
+				t.Errorf("block %s: expected Input=\"{}\", got %q", b.ID, string(b.Input))
+			}
+		case "tu_ok":
+			if string(b.Input) != `{"url":"https://example.com"}` {
+				t.Errorf("block tu_ok: populated Input must be preserved, got %q", string(b.Input))
+			}
+		}
+	}
+}
+
+// TestSanitizeHistory_DoesNotMutateInput verifies the long-standing contract
+// of SanitizeHistory: it returns a new slice and must not mutate the caller's
+// messages or any nested block slices. This guards against a naive in-place
+// rewrite of the tool_use normalization pass.
+func TestSanitizeHistory_DoesNotMutateInput(t *testing.T) {
+	origInput := json.RawMessage("null")
+	origBlocks := []client.ContentBlock{
+		{Type: "tool_use", ID: "tu_1", Name: "browser_snapshot", Input: origInput},
+	}
+	origUserBlocks := []client.ContentBlock{
+		client.NewToolResultBlock("tu_1", "ok", false),
+	}
+	msgs := []client.Message{
+		{Role: "user", Content: client.NewTextContent("snap")},
+		{Role: "assistant", Content: client.NewBlockContent(origBlocks)},
+		{Role: "user", Content: client.NewBlockContent(origUserBlocks)},
+	}
+
+	_ = SanitizeHistory(msgs)
+
+	// The original tool_use block's Input must still be the stale "null"
+	// value — SanitizeHistory must have rebuilt a new slice, not mutated
+	// the caller's.
+	if string(origBlocks[0].Input) != "null" {
+		t.Errorf("SanitizeHistory mutated caller's block Input: got %q, want %q", string(origBlocks[0].Input), "null")
+	}
+	if string(origInput) != "null" {
+		t.Errorf("SanitizeHistory mutated caller's RawMessage: got %q, want %q", string(origInput), "null")
+	}
 }

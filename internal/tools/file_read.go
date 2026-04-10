@@ -178,8 +178,9 @@ for i in start..<(start + count) {
     guard let page = doc.page(at: i) else { continue }
     let bounds = page.bounds(for: .mediaBox)
     let scale: CGFloat = 2.0
-    let width = Int(bounds.width * scale)
-    let height = Int(bounds.height * scale)
+    let maxDim: CGFloat = 8192
+    let width = Int(min(bounds.width * scale, maxDim))
+    let height = Int(min(bounds.height * scale, maxDim))
 
     let image = NSImage(size: NSSize(width: width, height: height))
     image.lockFocus()
@@ -268,6 +269,9 @@ for i in start..<(start + count) {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "[PDF: %s — %d total pages, showing pages %d–%d]",
 		filepath.Base(path), totalPages, startPage+1, startPage+len(images))
+	if skipped := len(renderedPaths) - len(images); skipped > 0 {
+		fmt.Fprintf(&sb, "\n[Warning: %d page(s) failed to encode and were skipped]", skipped)
+	}
 	if startPage+len(images) < totalPages {
 		fmt.Fprintf(&sb, "\n[Use offset=%d to read the next pages]", startPage+len(images))
 	}

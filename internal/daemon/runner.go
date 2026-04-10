@@ -150,8 +150,25 @@ func resolveFileRef(b RequestContentBlock) client.ContentBlock {
 
 	// Images must be inline base64 — Claude vision requires image data in the request body.
 	if mimeType, ok := imageExtensions[ext]; ok {
+		info, err := os.Stat(b.FilePath)
+		if err != nil {
+			log.Printf("WARNING: failed to read attached image %s: %v", b.FilePath, err)
+			return client.ContentBlock{
+				Type: "text",
+				Text: fmt.Sprintf("[Error: unable to read image %s]", b.Filename),
+			}
+		}
+		const maxInlineImage = 20 * 1024 * 1024 // 20 MB
+		if info.Size() > maxInlineImage {
+			return client.ContentBlock{
+				Type: "text",
+				Text: fmt.Sprintf("[User attached image: %s (%d bytes) — too large for inline vision (max %d bytes). Use file_read tool to view it.]",
+					b.Filename, info.Size(), maxInlineImage),
+			}
+		}
 		data, err := os.ReadFile(b.FilePath)
 		if err != nil {
+			log.Printf("WARNING: failed to read attached image %s: %v", b.FilePath, err)
 			return client.ContentBlock{
 				Type: "text",
 				Text: fmt.Sprintf("[Error: unable to read image %s]", b.Filename),

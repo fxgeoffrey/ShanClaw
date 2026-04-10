@@ -116,7 +116,7 @@ func (idx *Index) UpsertSession(sess *Session) error {
 	}
 
 	for i, msg := range sess.Messages {
-		// 跳过 agent loop 内部注入的纠错/guardrail 消息，避免搜索结果暴露用户不可见内容
+		// Skip system-injected guardrail/nudge messages to keep them out of search results
 		if i < len(sess.MessageMeta) && sess.MessageMeta[i].SystemInjected {
 			continue
 		}

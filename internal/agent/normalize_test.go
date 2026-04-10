@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/Kocoro-lab/ShanClaw/internal/client"
 )
 
 func TestNormalizeJSON_IdenticalArgumentsAreCanonicalized(t *testing.T) {
@@ -50,3 +52,25 @@ func TestNormalizeWebQuery_BrowserURL(t *testing.T) {
 	}
 }
 
+func TestNormalizeStructuredToolCallPreamble_StripsDuplicateSerializedCalls(t *testing.T) {
+	text := "Tool calls:\nTool: browser_click, Args: {\"ref\":\"e12\"}\nTool: browser_type, Args: {\"ref\":\"e13\",\"text\":\"hello\"}"
+	toolCalls := []client.FunctionCall{
+		{Name: "browser_click", Arguments: json.RawMessage(`{"ref":"e12"}`)},
+		{Name: "browser_type", Arguments: json.RawMessage(`{"text":"hello","ref":"e13"}`)},
+	}
+
+	if got := normalizeStructuredToolCallPreamble(text, toolCalls); got != "" {
+		t.Fatalf("expected duplicate serialized tool-call text to be stripped, got %q", got)
+	}
+}
+
+func TestNormalizeStructuredToolCallPreamble_PreservesMeaningfulText(t *testing.T) {
+	text := "Let me check that file."
+	toolCalls := []client.FunctionCall{
+		{Name: "mock_tool", Arguments: json.RawMessage(`{}`)},
+	}
+
+	if got := normalizeStructuredToolCallPreamble(text, toolCalls); got != text {
+		t.Fatalf("expected meaningful text to be preserved, got %q", got)
+	}
+}

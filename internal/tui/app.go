@@ -32,6 +32,7 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/hooks"
 	"github.com/Kocoro-lab/ShanClaw/internal/instructions"
 	"github.com/Kocoro-lab/ShanClaw/internal/permissions"
+	"github.com/Kocoro-lab/ShanClaw/internal/runstatus"
 	"github.com/Kocoro-lab/ShanClaw/internal/session"
 	"github.com/Kocoro-lab/ShanClaw/internal/skills"
 	"github.com/Kocoro-lab/ShanClaw/internal/tools"
@@ -52,6 +53,7 @@ type agentDoneMsg struct {
 	result string
 	usage  *agent.TurnUsage
 	err    error
+	status agent.RunStatus
 }
 
 type approvalRequestMsg struct {
@@ -954,8 +956,12 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = stateInput
 		m.cancelRun = nil
 		m.injectCh = nil
-		if msg.err != nil && !errors.Is(msg.err, context.Canceled) {
-			m.appendOutput("Error: " + msg.err.Error())
+		if msg.err != nil && !errors.Is(msg.err, context.Canceled) && !errors.Is(msg.err, agent.ErrMaxIterReached) {
+			code := msg.status.FailureCode
+			if code == runstatus.CodeNone {
+				code = runstatus.CodeFromError(msg.err)
+			}
+			m.appendOutput("Error: " + runstatus.FriendlyMessage(code))
 		}
 		// Display the assistant response (rendered here instead of OnText to
 		// avoid a race where the Println Cmd arrives after state has changed).
@@ -1356,7 +1362,7 @@ func (m *Model) runAgentLoop(query string, history []client.Message) tea.Cmd {
 			}
 			m.sessions.Save()
 		}
-		return agentDoneMsg{result: result, usage: usage, err: err}
+		return agentDoneMsg{result: result, usage: usage, err: err, status: m.agentLoop.LastRunStatus()}
 	}
 }
 

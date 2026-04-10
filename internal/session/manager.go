@@ -41,10 +41,11 @@ func (m *Manager) NewSession() *Session {
 	}
 	id := generateID()
 	m.current = &Session{
-		ID:        id,
-		CreatedAt: time.Now(),
-		Title:     "New session",
-		CWD:       getCWD(),
+		SchemaVersion: 1,
+		ID:            id,
+		CreatedAt:     time.Now(),
+		Title:         "New session",
+		CWD:           getCWD(),
 	}
 	m.ensureRuntimeLocked(id)
 	sess := m.current

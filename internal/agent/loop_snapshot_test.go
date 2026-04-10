@@ -34,6 +34,9 @@ func (s *snapshotCapturingTool) Run(ctx context.Context, args string) (ToolResul
 }
 
 func (s *snapshotCapturingTool) RequiresApproval() bool { return false }
+func (s *snapshotCapturingTool) IsReadOnlyCall(string) bool {
+	return true
+}
 
 // TestAgentLoop_SnapshotStripsScaffolding verifies the fix for issue #24:
 // when a tool reads the conversation snapshot during the current turn, the

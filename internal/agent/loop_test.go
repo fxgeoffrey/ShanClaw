@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
+	"github.com/Kocoro-lab/ShanClaw/internal/runstatus"
 )
 
 // nativeResponse builds a /v1/completions response for tests.
@@ -123,11 +124,11 @@ type mockHandler struct {
 func (h *mockHandler) OnToolCall(name string, args string) {}
 func (h *mockHandler) OnToolResult(name string, args string, result ToolResult, elapsed time.Duration) {
 }
-func (h *mockHandler) OnText(text string)         { h.lastText = text }
-func (h *mockHandler) OnStreamDelta(delta string) {}
-func (h *mockHandler) OnUsage(usage TurnUsage)    {}
-func (h *mockHandler) OnCloudAgent(agentID, status, message string) {}
-func (h *mockHandler) OnCloudProgress(completed, total int)         {}
+func (h *mockHandler) OnText(text string)                                     { h.lastText = text }
+func (h *mockHandler) OnStreamDelta(delta string)                             {}
+func (h *mockHandler) OnUsage(usage TurnUsage)                                {}
+func (h *mockHandler) OnCloudAgent(agentID, status, message string)           {}
+func (h *mockHandler) OnCloudProgress(completed, total int)                   {}
 func (h *mockHandler) OnCloudPlan(planType, content string, needsReview bool) {}
 func (h *mockHandler) OnApprovalNeeded(tool string, args string) bool {
 	h.approvalRequested = true
@@ -451,6 +452,13 @@ func TestAgentLoop_GracefulMaxIterExit(t *testing.T) {
 	if result != "Step 3 done." {
 		t.Errorf("expected last text from graceful exit, got %q", result)
 	}
+	status := loop.LastRunStatus()
+	if !status.Partial {
+		t.Error("expected partial run status after graceful iteration-limit exit")
+	}
+	if status.FailureCode != runstatus.CodeIterationLimit {
+		t.Errorf("expected iteration-limit failure code, got %q", status.FailureCode)
+	}
 }
 
 func TestEffectiveMaxIter(t *testing.T) {
@@ -616,6 +624,56 @@ func (m *mockCountingTool) Run(ctx context.Context, args string) (ToolResult, er
 }
 
 func (m *mockCountingTool) RequiresApproval() bool { return false }
+func (m *mockCountingTool) IsReadOnlyCall(string) bool {
+	return true
+}
+
+type bulkyMockMCPTool struct {
+	name string
+}
+
+func (m *bulkyMockMCPTool) Info() ToolInfo {
+	return ToolInfo{
+		Name:        m.name,
+		Description: strings.Repeat("bulky browser schema ", 400),
+		Parameters: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"value": map[string]any{"type": "string", "description": strings.Repeat("payload ", 200)}},
+		},
+	}
+}
+
+func (m *bulkyMockMCPTool) Run(context.Context, string) (ToolResult, error) {
+	return ToolResult{Content: m.name + " ok"}, nil
+}
+
+func (m *bulkyMockMCPTool) RequiresApproval() bool { return false }
+func (m *bulkyMockMCPTool) ToolSource() ToolSource { return SourceMCP }
+func (m *bulkyMockMCPTool) IsReadOnlyCall(string) bool {
+	return false
+}
+
+type mockCloudTreeTool struct {
+	name    string
+	content string
+}
+
+func (m *mockCloudTreeTool) Info() ToolInfo {
+	return ToolInfo{
+		Name:        m.name,
+		Description: "mock cloud tree tool",
+		Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
+	}
+}
+
+func (m *mockCloudTreeTool) Run(context.Context, string) (ToolResult, error) {
+	return ToolResult{Content: m.content, CloudResult: true}, nil
+}
+
+func (m *mockCloudTreeTool) RequiresApproval() bool { return false }
+func (m *mockCloudTreeTool) IsReadOnlyCall(string) bool {
+	return true
+}
 
 // TestAgentLoop_CrossIterDedup_SanitizedReplay verifies that cached results
 // go through sanitizeResult before being stored, so replayed content doesn't
@@ -712,6 +770,222 @@ func TestAgentLoop_CrossIterDedup_PersistentAcrossIterations(t *testing.T) {
 	// tool_b should execute once (iter 2)
 	if toolB.runs != 1 {
 		t.Errorf("expected tool_b to execute 1 time, got %d", toolB.runs)
+	}
+}
+
+func TestAgentLoop_StateAwareCache_BrowserWriteInvalidatesSnapshot(t *testing.T) {
+	snapshotTool := &mockCountingTool{name: "browser_snapshot", content: "snapshot"}
+	navigateTool := &mockCountingTool{name: "browser_navigate", content: "navigated"}
+
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		switch callCount {
+		case 1:
+			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
+				toolCall("browser_snapshot", `{}`), 10, 5))
+		case 2:
+			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
+				toolCall("browser_navigate", `{"url":"https://example.com"}`), 10, 5))
+		case 3:
+			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
+				toolCall("browser_snapshot", `{}`), 10, 5))
+		default:
+			json.NewEncoder(w).Encode(nativeResponse("Done.", "end_turn", nil, 10, 5))
+		}
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(snapshotTool)
+	reg.Register(navigateTool)
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+
+	result, _, err := loop.Run(context.Background(), "test browser state cache", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "Done." {
+		t.Errorf("expected 'Done.', got %q", result)
+	}
+	if snapshotTool.runs != 2 {
+		t.Errorf("expected browser_snapshot to execute twice after navigation, got %d", snapshotTool.runs)
+	}
+	if navigateTool.runs != 1 {
+		t.Errorf("expected browser_navigate to execute once, got %d", navigateTool.runs)
+	}
+}
+
+func TestAgentLoop_StateAwareCache_FileWriteInvalidatesRead(t *testing.T) {
+	readTool := &mockCountingTool{name: "file_read", content: "contents"}
+	writeTool := &mockCountingTool{name: "file_write", content: "written"}
+
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		switch callCount {
+		case 1:
+			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
+				toolCall("file_read", `{"path":"/tmp/example.txt"}`), 10, 5))
+		case 2:
+			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
+				toolCall("file_write", `{"path":"/tmp/example.txt","content":"updated"}`), 10, 5))
+		case 3:
+			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
+				toolCall("file_read", `{"path":"/tmp/example.txt"}`), 10, 5))
+		default:
+			json.NewEncoder(w).Encode(nativeResponse("Done.", "end_turn", nil, 10, 5))
+		}
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(readTool)
+	reg.Register(writeTool)
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+
+	result, _, err := loop.Run(context.Background(), "test file state cache", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "Done." {
+		t.Errorf("expected 'Done.', got %q", result)
+	}
+	if readTool.runs != 2 {
+		t.Errorf("expected file_read to execute twice after file_write, got %d", readTool.runs)
+	}
+	if writeTool.runs != 1 {
+		t.Errorf("expected file_write to execute once, got %d", writeTool.runs)
+	}
+}
+
+func TestAgentLoop_StateAwareCache_UnknownWriteClearsReadCache(t *testing.T) {
+	readTool := &mockCountingTool{name: "file_read", content: "contents"}
+	bashTool := &mockCountingTool{name: "bash", content: "ok"}
+
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		switch callCount {
+		case 1:
+			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
+				toolCall("file_read", `{"path":"/tmp/example.txt"}`), 10, 5))
+		case 2:
+			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
+				toolCall("bash", `{"command":"echo updated"}`), 10, 5))
+		case 3:
+			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
+				toolCall("file_read", `{"path":"/tmp/example.txt"}`), 10, 5))
+		default:
+			json.NewEncoder(w).Encode(nativeResponse("Done.", "end_turn", nil, 10, 5))
+		}
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(readTool)
+	reg.Register(bashTool)
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+
+	result, _, err := loop.Run(context.Background(), "test unknown write invalidation", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "Done." {
+		t.Errorf("expected 'Done.', got %q", result)
+	}
+	if readTool.runs != 2 {
+		t.Errorf("expected file_read to execute twice after unknown write, got %d", readTool.runs)
+	}
+	if bashTool.runs != 1 {
+		t.Errorf("expected bash to execute once, got %d", bashTool.runs)
+	}
+}
+
+func TestAgentLoop_ToolSearchLoadsBrowserFamilyCoreAndReanchorsTask(t *testing.T) {
+	// Reanchor should only fire when the model stops with text after tool_search
+	// (i.e., fails to use loaded tools), not on the happy path.
+	// Flow: call 1 = tool_search → call 2 = text "Thinking..." (model stops) →
+	// reanchor injected + continue → call 3 = text "Done." (model proceeds).
+	var secondReq, thirdReq client.CompletionRequest
+
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		var req client.CompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if callCount == 2 {
+			secondReq = req
+		}
+		if callCount == 3 {
+			thirdReq = req
+		}
+
+		switch callCount {
+		case 1:
+			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
+				toolCall("tool_search", `{"query":"select:browser_navigate"}`), 10, 5))
+		case 2:
+			// Model stops with text instead of calling loaded tools — triggers reanchor.
+			json.NewEncoder(w).Encode(nativeResponse("Thinking...", "end_turn", nil, 10, 5))
+		case 3:
+			// After reanchor nudge, model completes.
+			json.NewEncoder(w).Encode(nativeResponse("Done.", "end_turn", nil, 10, 5))
+		default:
+			t.Errorf("unexpected LLM call %d", callCount)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	for _, name := range FamilyRegistry["browser"].Core {
+		reg.Register(&bulkyMockMCPTool{name: name})
+	}
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+
+	result, _, err := loop.Run(context.Background(), "open example.com and inspect the page", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "Done." {
+		t.Fatalf("expected Done., got %q", result)
+	}
+
+	// Second request should have warmed browser core tools.
+	toolNames := make(map[string]bool, len(secondReq.Tools))
+	for _, tool := range secondReq.Tools {
+		toolNames[schemaName(tool)] = true
+	}
+	for _, name := range FamilyRegistry["browser"].Core {
+		if !toolNames[name] {
+			t.Errorf("expected warmed browser core tool %q in second request", name)
+		}
+	}
+
+	// Reanchor should appear in the THIRD request (after model stopped with text).
+	foundReanchor := false
+	for _, msg := range thirdReq.Messages {
+		if msg.Role != "user" || msg.Content.HasBlocks() {
+			continue
+		}
+		text := msg.Content.Text()
+		if strings.Contains(text, "Deferred tool schemas are now loaded") &&
+			strings.Contains(text, "open example.com and inspect the page") {
+			foundReanchor = true
+			break
+		}
+	}
+	if !foundReanchor {
+		t.Fatal("expected third request to include a deferred-tool reanchor message")
 	}
 }
 
@@ -1049,7 +1323,7 @@ func TestAgentLoop_NativeToolUseBlocks(t *testing.T) {
 	}
 }
 
-func TestAgentLoop_NativeBlocks_IncludesPreamble(t *testing.T) {
+func TestAgentLoop_NativeBlocks_PreservesMeaningfulPreamble(t *testing.T) {
 	var lastMessages []client.Message
 	callCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1087,6 +1361,202 @@ func TestAgentLoop_NativeBlocks_IncludesPreamble(t *testing.T) {
 		}
 	}
 	t.Error("native path should include preamble text in assistant message")
+}
+
+func TestAgentLoop_NativeBlocks_StripsDuplicateToolCallPreamble(t *testing.T) {
+	var lastMessages []client.Message
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		var req client.CompletionRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		lastMessages = req.Messages
+		if callCount == 1 {
+			json.NewEncoder(w).Encode(nativeResponseWithID("Tool calls:\nTool: mock_tool, Args: {}", "tool_use",
+				toolCallWithID("mock_tool", `{}`, "toolu_dup_preamble"), 10, 5))
+		} else {
+			json.NewEncoder(w).Encode(nativeResponse("Done.", "end_turn", nil, 10, 5))
+		}
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&mockTool{name: "mock_tool"})
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+
+	_, _, err := loop.Run(context.Background(), "check file", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, msg := range lastMessages {
+		if msg.Role == "assistant" && msg.Content.HasBlocks() {
+			for _, b := range msg.Content.Blocks() {
+				if b.Type == "text" && strings.Contains(b.Text, "Tool calls:") {
+					t.Fatalf("duplicate serialized tool-call preamble should be stripped, found %q", b.Text)
+				}
+			}
+		}
+	}
+}
+
+func TestAgentLoop_TreeReadShaping_CollapsesRepeatedSnapshots(t *testing.T) {
+	tree := strings.Repeat("button ref=e1234 label=Open\n", 150)
+
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		switch callCount {
+		case 1:
+			json.NewEncoder(w).Encode(nativeResponseWithID("", "tool_use",
+				toolCallWithID("browser_snapshot", `{"step":1}`, "toolu_tree_1"), 10, 5))
+		case 2:
+			json.NewEncoder(w).Encode(nativeResponseWithID("", "tool_use",
+				toolCallWithID("browser_snapshot", `{"step":2}`, "toolu_tree_2"), 10, 5))
+		default:
+			json.NewEncoder(w).Encode(nativeResponse("Done.", "end_turn", nil, 10, 5))
+		}
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&mockCountingTool{name: "browser_snapshot", content: tree})
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+
+	result, _, err := loop.Run(context.Background(), "inspect the page twice", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "Done." {
+		t.Fatalf("unexpected result: %q", result)
+	}
+
+	var toolResults []string
+	for _, msg := range loop.RunMessages() {
+		if !msg.Content.HasBlocks() {
+			continue
+		}
+		for _, b := range msg.Content.Blocks() {
+			if b.Type == "tool_result" {
+				toolResults = append(toolResults, client.ToolResultText(b))
+			}
+		}
+	}
+	if len(toolResults) < 2 {
+		t.Fatalf("expected at least 2 tool results, got %d", len(toolResults))
+	}
+	if !strings.Contains(toolResults[0], "[tree snapshot summary;") {
+		t.Fatalf("expected first snapshot to be shaped, got %q", toolResults[0])
+	}
+	if !strings.Contains(toolResults[1], "unchanged since last read") {
+		t.Fatalf("expected second snapshot to collapse as unchanged, got %q", toolResults[1])
+	}
+}
+
+func TestAgentLoop_TreeReadShaping_WriteBoundaryPreventsUnchangedCarryover(t *testing.T) {
+	tree := strings.Repeat("button ref=e1234 label=Open\n", 150)
+
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		switch callCount {
+		case 1:
+			json.NewEncoder(w).Encode(nativeResponseWithID("", "tool_use",
+				toolCallWithID("browser_snapshot", `{}`, "toolu_tree_write_1"), 10, 5))
+		case 2:
+			json.NewEncoder(w).Encode(nativeResponseWithID("", "tool_use",
+				toolCallWithID("browser_navigate", `{"url":"https://example.com"}`, "toolu_tree_write_nav"), 10, 5))
+		case 3:
+			json.NewEncoder(w).Encode(nativeResponseWithID("", "tool_use",
+				toolCallWithID("browser_snapshot", `{}`, "toolu_tree_write_2"), 10, 5))
+		default:
+			json.NewEncoder(w).Encode(nativeResponse("Done.", "end_turn", nil, 10, 5))
+		}
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&mockCountingTool{name: "browser_snapshot", content: tree})
+	reg.Register(&mockCountingTool{name: "browser_navigate", content: "navigated"})
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+
+	result, _, err := loop.Run(context.Background(), "inspect, navigate, inspect again", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "Done." {
+		t.Fatalf("unexpected result: %q", result)
+	}
+
+	var snapshotResults []string
+	for _, msg := range loop.RunMessages() {
+		if !msg.Content.HasBlocks() {
+			continue
+		}
+		for _, b := range msg.Content.Blocks() {
+			if b.Type != "tool_result" {
+				continue
+			}
+			text := client.ToolResultText(b)
+			if strings.Contains(text, "tree snapshot") {
+				snapshotResults = append(snapshotResults, text)
+			}
+		}
+	}
+	if len(snapshotResults) < 2 {
+		t.Fatalf("expected at least 2 shaped snapshot results, got %d", len(snapshotResults))
+	}
+	if strings.Contains(snapshotResults[1], "unchanged since last read") {
+		t.Fatalf("snapshot after browser write should not reuse unchanged-collapse state, got %q", snapshotResults[1])
+	}
+}
+
+func TestAgentLoop_CloudResult_BypassesTreeShaping(t *testing.T) {
+	tree := strings.Repeat("button ref=e1234 label=Open\n", 120)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(nativeResponseWithID("", "tool_use",
+			toolCallWithID("browser_snapshot", `{}`, "toolu_cloud_tree"), 10, 5))
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&mockCloudTreeTool{name: "browser_snapshot", content: tree})
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+
+	result, _, err := loop.Run(context.Background(), "get cloud tree", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != tree {
+		t.Fatal("cloud result should bypass shaping and return the original deliverable")
+	}
+
+	var sawRaw bool
+	for _, msg := range loop.RunMessages() {
+		if !msg.Content.HasBlocks() {
+			continue
+		}
+		for _, b := range msg.Content.Blocks() {
+			if b.Type != "tool_result" {
+				continue
+			}
+			text := client.ToolResultText(b)
+			if strings.Contains(text, "[tree snapshot summary;") || strings.Contains(text, "unchanged since last read") {
+				t.Fatalf("cloud result should skip tree shaping, got %q", text)
+			}
+			if strings.Contains(text, "button ref=e1234 label=Open") {
+				sawRaw = true
+			}
+		}
+	}
+	if !sawRaw {
+		t.Fatal("expected raw cloud result content in recorded tool result")
+	}
 }
 
 func TestAgentLoop_FallbackToXML_NoID(t *testing.T) {
@@ -1241,10 +1711,10 @@ func TestAgentLoop_NativeBlocks_ImageResult(t *testing.T) {
 
 // mockSlowTool sleeps for a configurable duration and tracks concurrent executions.
 type mockSlowTool struct {
-	name     string
-	delay    time.Duration
-	maxConc  *atomic.Int32 // tracks peak concurrency
-	curConc  *atomic.Int32
+	name    string
+	delay   time.Duration
+	maxConc *atomic.Int32 // tracks peak concurrency
+	curConc *atomic.Int32
 }
 
 func newMockSlowTool(name string, delay time.Duration) *mockSlowTool {
@@ -1278,7 +1748,7 @@ func (m *mockSlowTool) Run(ctx context.Context, args string) (ToolResult, error)
 	return ToolResult{Content: fmt.Sprintf("result from %s", m.name)}, nil
 }
 
-func (m *mockSlowTool) RequiresApproval() bool  { return false }
+func (m *mockSlowTool) RequiresApproval() bool     { return false }
 func (m *mockSlowTool) IsReadOnlyCall(string) bool { return true }
 
 // mockPanicTool panics during Run.
@@ -1900,13 +2370,13 @@ func (h *cloudDelegateHandler) OnToolResult(name string, args string, result Too
 	defer h.mu.Unlock()
 	h.results = append(h.results, cloudDelegateResult{name: name, content: result.Content, isError: result.IsError})
 }
-func (h *cloudDelegateHandler) OnText(text string)                            {}
-func (h *cloudDelegateHandler) OnStreamDelta(delta string)                    {}
-func (h *cloudDelegateHandler) OnUsage(usage TurnUsage)                       {}
-func (h *cloudDelegateHandler) OnCloudAgent(agentID, status, message string)  {}
-func (h *cloudDelegateHandler) OnCloudProgress(completed, total int)          {}
+func (h *cloudDelegateHandler) OnText(text string)                                     {}
+func (h *cloudDelegateHandler) OnStreamDelta(delta string)                             {}
+func (h *cloudDelegateHandler) OnUsage(usage TurnUsage)                                {}
+func (h *cloudDelegateHandler) OnCloudAgent(agentID, status, message string)           {}
+func (h *cloudDelegateHandler) OnCloudProgress(completed, total int)                   {}
 func (h *cloudDelegateHandler) OnCloudPlan(planType, content string, needsReview bool) {}
-func (h *cloudDelegateHandler) OnApprovalNeeded(tool string, args string) bool { return true }
+func (h *cloudDelegateHandler) OnApprovalNeeded(tool string, args string) bool         { return true }
 
 func TestAgentLoop_CloudDelegateLock(t *testing.T) {
 	// Mock cloud_delegate tool: named "cloud_delegate", no approval needed for test (bypass).

@@ -1,0 +1,57 @@
+package agent
+
+import (
+	"encoding/json"
+	"testing"
+)
+
+func TestResolveCallStateTraits(t *testing.T) {
+	t.Run("browser read is cacheable", func(t *testing.T) {
+		traits := resolveCallStateTraits("browser_snapshot", `{}`)
+		if !traits.Cacheable {
+			t.Fatal("expected browser_snapshot to be cacheable")
+		}
+		if len(traits.Reads) != 1 || traits.Reads[0].Domain != StateDomainBrowser {
+			t.Fatalf("expected browser read traits, got %+v", traits)
+		}
+	})
+
+	t.Run("file write tracks filesystem scope", func(t *testing.T) {
+		traits := resolveCallStateTraits("file_write", `{"path":"/tmp/example.txt","content":"x"}`)
+		if len(traits.Writes) != 1 {
+			t.Fatalf("expected one filesystem write ref, got %+v", traits)
+		}
+		if traits.Writes[0].Domain != StateDomainFilesystem || traits.Writes[0].Scope != "/tmp/example.txt" {
+			t.Fatalf("unexpected file write traits: %+v", traits)
+		}
+	})
+
+	t.Run("bash is unknown write", func(t *testing.T) {
+		traits := resolveCallStateTraits("bash", `{"command":"pwd"}`)
+		if !traits.UnknownWrite {
+			t.Fatal("expected bash to be treated as an unknown write")
+		}
+		if len(traits.Writes) != 1 || traits.Writes[0].Domain != StateDomainProcess {
+			t.Fatalf("unexpected bash traits: %+v", traits)
+		}
+	})
+}
+
+func TestBuildStateAwareCacheKeyChangesAfterVersionBump(t *testing.T) {
+	tracker := newStateVersionTracker()
+	traits := resolveCallStateTraits("file_read", `{"path":"/tmp/example.txt"}`)
+
+	before := buildStateAwareCacheKey("file_read", json.RawMessage(`{"path":"/tmp/example.txt"}`), traits, tracker)
+	if before == "" {
+		t.Fatal("expected initial cache key")
+	}
+
+	tracker.bump([]StateRef{{Domain: StateDomainFilesystem, Scope: "/tmp/example.txt"}})
+	after := buildStateAwareCacheKey("file_read", json.RawMessage(`{"path":"/tmp/example.txt"}`), traits, tracker)
+	if after == "" {
+		t.Fatal("expected post-write cache key")
+	}
+	if before == after {
+		t.Fatalf("expected cache key to change after version bump, got %q", before)
+	}
+}

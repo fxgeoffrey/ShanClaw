@@ -78,6 +78,7 @@ func (t *toolSearchTool) Run(_ context.Context, argsJSON string) (ToolResult, er
 		}
 		sort.Strings(matched)
 	}
+	matched = expandDeferredFamilyCore(t.registry, t.deferred, matched)
 
 	var sb strings.Builder
 	sb.WriteString("LOADED:")
@@ -95,6 +96,37 @@ func (t *toolSearchTool) Run(_ context.Context, argsJSON string) (ToolResult, er
 	}
 
 	return ToolResult{Content: sb.String()}, nil
+}
+
+func expandDeferredFamilyCore(reg *ToolRegistry, deferred map[string]bool, matched []string) []string {
+	if len(matched) == 0 {
+		return nil
+	}
+
+	selected := make(map[string]bool, len(matched))
+	for _, name := range matched {
+		if name != "" && deferred[name] {
+			selected[name] = true
+		}
+		family := toolFamily(name)
+		spec, ok := FamilyRegistry[family]
+		if !ok {
+			continue
+		}
+		for _, coreName := range spec.Core {
+			if deferred[coreName] {
+				selected[coreName] = true
+			}
+		}
+	}
+
+	expanded := make([]string, 0, len(selected))
+	for _, name := range reg.SortedNames() {
+		if selected[name] {
+			expanded = append(expanded, name)
+		}
+	}
+	return expanded
 }
 
 // parseLoadedHeader extracts tool names from the LOADED: header line

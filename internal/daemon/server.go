@@ -189,6 +189,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("GET /sessions", s.handleSessions)
 	mux.HandleFunc("GET /sessions/{id}", s.handleGetSession)
 	mux.HandleFunc("DELETE /sessions/{id}", s.handleDeleteSession)
+	mux.HandleFunc("PATCH /sessions/{id}", s.handlePatchSession)
 	mux.HandleFunc("POST /sessions/{id}/edit", s.handleEditMessage)
 	mux.HandleFunc("GET /sessions/{id}/summary", s.handleSessionSummary)
 	mux.HandleFunc("GET /sessions/search", s.handleSessionSearch)
@@ -572,6 +573,51 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (s *Server) handlePatchSession(w http.ResponseWriter, r *http.Request) {
+	if s.deps == nil {
+		writeError(w, http.StatusInternalServerError, "daemon deps not configured")
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "session id required")
+		return
+	}
+	// 防止路径穿越 — session ID 必须是安全的文件名。
+	if id != filepath.Base(id) || strings.ContainsAny(id, `/\`) {
+		writeError(w, http.StatusBadRequest, "invalid session id")
+		return
+	}
+	var body struct {
+		Title string `json:"title"`
+	}
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	title := strings.TrimSpace(body.Title)
+	if title == "" {
+		writeError(w, http.StatusBadRequest, "title cannot be empty")
+		return
+	}
+	agentName := r.URL.Query().Get("agent")
+	if agentName != "" {
+		if err := agents.ValidateAgentName(agentName); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	mgr := s.deps.SessionCache.GetOrCreateManager(s.deps.SessionCache.SessionsDir(agentName))
+	if err := mgr.PatchTitle(id, title); err != nil {
+		if os.IsNotExist(err) {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("session %q not found", id))
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "updated", "title": title})
 }
 
 func (s *Server) handleSessionSearch(w http.ResponseWriter, r *http.Request) {

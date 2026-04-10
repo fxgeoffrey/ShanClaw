@@ -23,6 +23,7 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/instructions"
 	"github.com/Kocoro-lab/ShanClaw/internal/permissions"
 	"github.com/Kocoro-lab/ShanClaw/internal/prompt"
+	"github.com/Kocoro-lab/ShanClaw/internal/runstatus"
 	"github.com/Kocoro-lab/ShanClaw/internal/skills"
 )
 
@@ -30,6 +31,25 @@ import (
 // but has partial work to return. Callers can check errors.Is(err, ErrMaxIterReached)
 // to distinguish truncated results from hard failures.
 var ErrMaxIterReached = errors.New("agent loop reached iteration limit")
+
+type RunStatus struct {
+	// Partial reports that the run returned a usable partial result instead of a
+	// clean success. In that case FailureCode describes why the result is partial
+	// (for example iteration limit), not a separate hard-failure state.
+	Partial        bool
+	FailureCode    runstatus.Code
+	LastTool       string
+	RetryCount     int
+	IterationCount int
+}
+
+type MetaBoundary string
+
+const (
+	MetaBoundaryToolSearchLoaded MetaBoundary = "tool_search_loaded"
+	MetaBoundaryPostCompaction   MetaBoundary = "post_compaction"
+	MetaBoundaryRetryAfterError  MetaBoundary = "retry_after_error"
+)
 
 // defaultPersona is the identity line for the default (non-overridden) agent.
 // Named agents replace this with their AGENT.md content.
@@ -312,6 +332,7 @@ type AgentLoop struct {
 	runMessages       []client.Message // conversation messages accumulated during the last Run() (excludes system+history)
 	runMsgInjected    []bool           // parallel to runMessages: true = system-injected guardrail/nudge
 	runMsgTimestamps  []time.Time      // parallel to runMessages: when each message was created
+	lastRunStatus     RunStatus
 }
 
 func NewAgentLoop(gw client.LLMClient, tools *ToolRegistry, modelTier string, shannonDir string, maxIter int, resultTrunc int, argsTrunc int, perms *permissions.PermissionsConfig, auditor *audit.AuditLogger, hookRunner *hooks.HookRunner) *AgentLoop {
@@ -357,6 +378,13 @@ func (a *AgentLoop) SetBypassPermissions(bypass bool) {
 
 func (a *AgentLoop) SetMaxTokens(maxTokens int) {
 	a.maxTokens = maxTokens
+}
+
+// LastRunStatus returns the status from the most recent Run call.
+// Callers should read it in the same goroutine immediately after Run returns
+// and snapshot the value if they need to retain it.
+func (a *AgentLoop) LastRunStatus() RunStatus {
+	return a.lastRunStatus
 }
 
 func (a *AgentLoop) SetThinking(cfg *client.ThinkingConfig) {
@@ -610,6 +638,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	a.runMessages = nil      // reset for this run
 	a.runMsgInjected = nil   // reset for this run
 	a.runMsgTimestamps = nil // reset for this run
+	a.lastRunStatus = RunStatus{}
 
 	if a.workingSet == nil {
 		a.workingSet = NewWorkingSet()
@@ -906,17 +935,67 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		// Cross-iteration dedup: cache successful results from previous iteration
 		// to prevent re-execution of identical tool calls across consecutive iterations.
 		prevIterResults = make(map[string]ToolResult)
+		lastToolName    string
+		retryCount      int
+		iterationCount  int
+		stateVersions   = newStateVersionTracker()
+		lastShapedRead  = make(map[string]ShapedResult)
 
 		// Denied-call blocking: track tool+args denied by the user this turn
 		// to prevent re-prompting for the same call.
 		deniedCalls = make(map[string]bool)
 	)
 
+	setRunStatus := func(code runstatus.Code, partial bool) {
+		a.lastRunStatus = RunStatus{
+			Partial:        partial,
+			FailureCode:    code,
+			LastTool:       lastToolName,
+			RetryCount:     retryCount,
+			IterationCount: iterationCount,
+		}
+	}
+
+	boundaryText := func(boundary MetaBoundary) string {
+		switch boundary {
+		case MetaBoundaryToolSearchLoaded:
+			return "[system] Deferred tool schemas are now loaded. Continue working on the current request using those tools:\n\n" + latestUserText
+		case MetaBoundaryPostCompaction:
+			return "[system] Context was compacted. Stay focused on the current request and continue from there:\n\n" + latestUserText
+		case MetaBoundaryRetryAfterError:
+			return "[system] You are retrying after an interruption. Stay focused on the current request:\n\n" + latestUserText
+		default:
+			return ""
+		}
+	}
+
+	reanchorActiveTask := func(boundary MetaBoundary) {
+		if strings.TrimSpace(latestUserText) == "" {
+			return
+		}
+		text := boundaryText(boundary)
+		if text == "" {
+			return
+		}
+		if len(messages) > 0 {
+			lastIdx := len(messages) - 1
+			if injectedIndices[lastIdx] && messages[lastIdx].Role == "user" && !messages[lastIdx].Content.HasBlocks() && messages[lastIdx].Content.Text() == text {
+				return
+			}
+		}
+		messages = append(messages, client.Message{
+			Role:    "user",
+			Content: client.NewTextContent(text),
+		})
+		markInjected()
+	}
+
 	for i := 0; ; i++ {
 		effectiveMax := a.effectiveMaxIter(toolsUsed)
 		if i >= effectiveMax {
 			break
 		}
+		iterationCount = i + 1
 
 		// Check for context cancellation (e.g. user pressed Esc)
 		if ctx.Err() != nil {
@@ -937,6 +1016,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				stampMessage()
 			}
 			captureRunMessages()
+			setRunStatus(runstatus.CodeFromError(ctx.Err()), lastText != "")
 			return lastText, usage, ctx.Err()
 		}
 
@@ -1085,6 +1165,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 						msgTimestamps = rebasedTS
 					}
 					compactionApplied = true
+					reanchorActiveTask(MetaBoundaryPostCompaction)
 				}
 			}
 		}
@@ -1142,6 +1223,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 					stampMessage()
 				}
 				captureRunMessages()
+				setRunStatus(runstatus.CodeFromError(ctx.Err()), false)
 				return partial, usage, fmt.Errorf("LLM call cancelled: %w", ctx.Err())
 			}
 			// Reactive compaction: if the error is a context-length overflow,
@@ -1235,6 +1317,8 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 					msgTimestamps = rebasedTS
 				}
 
+				reanchorActiveTask(MetaBoundaryPostCompaction)
+
 				// Rebuild request with compacted messages.
 				req = client.CompletionRequest{
 					Messages:        messages,
@@ -1250,10 +1334,14 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			}
 			if !isRetryableLLMError(err) || attempt >= maxLLMRetries-1 {
 				captureRunMessages()
+				setRunStatus(runstatus.CodeFromError(err), false)
 				return "", usage, fmt.Errorf("LLM call failed: %w", err)
 			}
 			backoff := time.Duration(1<<attempt) * time.Second // 1s, 2s, 4s
 			reason := classifyLLMError(err)
+			retryCount++
+			reanchorActiveTask(MetaBoundaryRetryAfterError)
+			req.Messages = messages
 			fmt.Fprintf(os.Stderr, "[agent] LLM call failed (attempt %d/%d), retrying in %v: %v\n", attempt+1, maxLLMRetries, backoff, err)
 			if a.handler != nil {
 				a.handler.OnCloudAgent("", "retry", fmt.Sprintf("Retrying request (attempt %d/%d): %s", attempt+1, maxLLMRetries, reason))
@@ -1275,6 +1363,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				}
 				stampMessage()
 				captureRunMessages()
+				setRunStatus(runstatus.CodeFromError(ctx.Err()), false)
 				return partial, usage, fmt.Errorf("LLM call cancelled: %w", ctx.Err())
 			}
 		}
@@ -1400,23 +1489,16 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				continue
 			}
 
-			// Post-tool_search continuation nudge: tool_search loaded schemas
-			// but the model stopped with text instead of calling the loaded tools.
-			// Inject a nudge with the most recent user message and loop.
-			// Uses the latest user message (not the original run input) so that
-			// daemon mid-run injections are respected.
+			// tool_search loaded schemas but the model stopped with text instead
+			// of calling the loaded tools — nudge it to continue.
 			if toolSearchFired {
 				toolSearchFired = false
+				reanchorActiveTask(MetaBoundaryToolSearchLoaded)
 				messages = append(messages, client.Message{
 					Role:    "assistant",
 					Content: client.NewTextContent(resp.OutputText),
 				})
 				stampMessage()
-				messages = append(messages, client.Message{
-					Role:    "user",
-					Content: client.NewTextContent("[system] The deferred tool schemas are now loaded. Here is the current request — continue working on it now using the loaded tools:\n\n" + latestUserText),
-				})
-				markInjected()
 				continue
 			}
 
@@ -1434,13 +1516,18 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				Content: client.NewTextContent(fullText),
 			})
 			captureRunMessages()
+			setRunStatus(runstatus.CodeNone, false)
 			if a.handler != nil {
 				a.handler.OnText(fullText)
 			}
 			return fullText, usage, nil
 		}
 
-		// Model made tool calls — partial recovery for hallucination counter.
+		// Model made tool calls — it's using the loaded tools correctly.
+		// Clear toolSearchFired so we don't nudge unnecessarily.
+		toolSearchFired = false
+
+		// Partial recovery for hallucination counter.
 		// Don't fully reset (allows alternating hallucinate→tools to accumulate),
 		// but forgive one nudge per real tool use to avoid permanent disabling.
 		if hallucinationNudges > 0 {
@@ -1450,8 +1537,9 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 
 		// Execute all tool calls
 		toolCalls := resp.AllToolCalls()
-		if resp.OutputText != "" {
-			lastText = resp.OutputText
+		normalizedToolText := normalizeStructuredToolCallPreamble(resp.OutputText, toolCalls)
+		if normalizedToolText != "" {
+			lastText = normalizedToolText
 		}
 
 		useNative := hasNativeToolIDs(toolCalls)
@@ -1460,8 +1548,8 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		var resultBlocks []client.ContentBlock
 		if useNative {
 			var assistantBlocks []client.ContentBlock
-			if resp.OutputText != "" {
-				assistantBlocks = append(assistantBlocks, client.ContentBlock{Type: "text", Text: resp.OutputText})
+			if normalizedToolText != "" {
+				assistantBlocks = append(assistantBlocks, client.ContentBlock{Type: "text", Text: normalizedToolText})
 			}
 			for _, fc := range toolCalls {
 				assistantBlocks = append(assistantBlocks, client.NewToolUseBlock(fc.ID, fc.Name, fc.Arguments))
@@ -1487,6 +1575,8 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			decision    string
 			wasApproved bool
 			resolved    bool // true if already resolved (denied/unknown/hook-denied)
+			cacheKey    string
+			stateTraits CallStateTraits
 		}
 		callMeta := make([]perCallMeta, len(toolCalls))
 		execResults := make([]toolExecResult, len(toolCalls))
@@ -1528,22 +1618,6 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				continue
 			}
 
-			// Cross-iteration dedup: return cached result if identical call succeeded in previous iteration
-			if cached, ok := prevIterResults[dedupKey]; ok {
-				callMeta[idx].resolved = true
-				execResults[idx] = toolExecResult{
-					result: ToolResult{
-						Content: "Already called with identical arguments. Previous result:\n" + cached.Content,
-						IsError: cached.IsError,
-						Images:  cached.Images,
-					},
-				}
-				if a.handler != nil {
-					a.handler.OnToolResult(fc.Name, argsStr, execResults[idx].result, 0)
-				}
-				continue
-			}
-
 			// cloud_delegate: once-per-turn lock. The first call claims the lock;
 			// any subsequent call (same response or later iteration) is blocked.
 			// The lock resets if the call fails, allowing retry.
@@ -1574,6 +1648,32 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 					a.handler.OnToolResult(fc.Name, argsStr, execResults[idx].result, 0)
 				}
 				continue
+			}
+
+			stateTraits := resolveCallStateTraits(fc.Name, argsStr)
+			if !stateTraits.Cacheable && len(stateTraits.Reads) == 0 && len(stateTraits.Writes) == 0 && !stateTraits.UnknownWrite {
+				stateTraits = resolveFallbackReadStateTraits(tool, argsStr)
+			}
+			callMeta[idx].stateTraits = stateTraits
+			callMeta[idx].cacheKey = buildStateAwareCacheKey(fc.Name, fc.Arguments, stateTraits, stateVersions)
+
+			// Cross-iteration dedup: return cached result if identical call against the
+			// same tracked state succeeded in a previous iteration.
+			if callMeta[idx].cacheKey != "" {
+				if cached, ok := prevIterResults[callMeta[idx].cacheKey]; ok {
+					callMeta[idx].resolved = true
+					execResults[idx] = toolExecResult{
+						result: ToolResult{
+							Content: "Already called with identical arguments. Previous result:\n" + cached.Content,
+							IsError: cached.IsError,
+							Images:  cached.Images,
+						},
+					}
+					if a.handler != nil {
+						a.handler.OnToolResult(fc.Name, argsStr, execResults[idx].result, 0)
+					}
+					continue
+				}
 			}
 
 			// Permission check
@@ -1633,7 +1733,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		}
 
 		// Deferred mode: check if tool_search loaded new tools, rebuild schemas.
-		toolSearchFired = false
+		// toolSearchFired persists across iterations — consumed in text-only path.
 		if deferredMode {
 			for _, ac := range approved {
 				if ac.fc.Name == "tool_search" {
@@ -1664,6 +1764,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			argsStr := callMeta[idx].argsStr
 			decision := callMeta[idx].decision
 			wasApproved := callMeta[idx].wasApproved
+			lastToolName = fc.Name
 
 			er := execResults[idx]
 			result := er.result
@@ -1705,7 +1806,22 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			// Cloud deliverables use a higher context limit (60K chars ~15K tokens)
 			// to preserve detail for follow-up turns while still bounding context pressure.
 			cleanResult := stripLineNumbers(result.Content)
-			fullResult := cleanResult // preserved for cloud bypass (spill replaces cleanResult)
+			fullResult := cleanResult // preserved for cloud bypass (spill/shaping replace cleanResult)
+			if !result.CloudResult {
+				shapeKey := shapeContextKey(fc.Name, callMeta[idx].stateTraits, stateVersions)
+				var previous *ShapedResult
+				if shaped, ok := lastShapedRead[shapeKey]; ok {
+					copy := shaped
+					previous = &copy
+				}
+				shaped := shapeContextResult(fc.Name, cleanResult, previous)
+				if shaped.Text != "" {
+					cleanResult = shaped.Text
+				}
+				if shaped.Signature != "" {
+					lastShapedRead[shapeKey] = shaped
+				}
+			}
 
 			// Disk spill: results > 50K chars are saved to a temp file and
 			// replaced with a short preview so they don't blow up context.
@@ -1785,7 +1901,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				errMsg = result.Content
 			}
 			resultSig := ""
-			if ToolFamilies[fc.Name] != "" {
+			if toolFamily(fc.Name) != "" {
 				resultSig = extractResultSignature(result.Content)
 			}
 			nonActionable := isNonActionableSearch(fc.Name, result)
@@ -1831,6 +1947,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			})
 			stampMessage()
 			captureRunMessages()
+			setRunStatus(runstatus.CodeNone, false)
 			if a.handler != nil {
 				a.handler.OnText(cloudResultContent)
 			}
@@ -1851,6 +1968,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			})
 			if err != nil {
 				captureRunMessages()
+				setRunStatus(runstatus.CodeFromError(err), false)
 				return "", usage, err
 			}
 			usage.Add(finalResp.Usage)
@@ -1860,6 +1978,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			})
 			stampMessage()
 			captureRunMessages()
+			setRunStatus(runstatus.CodeNone, false)
 			if a.handler != nil {
 				a.handler.OnText(finalResp.OutputText)
 			}
@@ -1882,6 +2001,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				})
 				if err != nil {
 					captureRunMessages()
+					setRunStatus(runstatus.CodeFromError(err), false)
 					return "", usage, err
 				}
 				usage.Add(finalResp.Usage)
@@ -1891,6 +2011,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				})
 				stampMessage()
 				captureRunMessages()
+				setRunStatus(runstatus.CodeNone, false)
 				if a.handler != nil {
 					a.handler.OnText(finalResp.OutputText)
 				}
@@ -1904,27 +2025,35 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		}
 
 		// Accumulate cross-iteration result cache from this iteration's successful executions.
-		// Sanitize before caching to avoid re-injecting raw base64 blobs into context.
-		// Invalidate stale file_read entries when file_edit/file_write modifies a path.
+		// Cache keys are state-versioned, so writes advance tracked state before later
+		// iterations compute their read fingerprints. Unknown writes fail closed by
+		// clearing the cache because we cannot safely determine what changed.
 		for _, ac := range approved {
 			r := execResults[ac.index].result
-			if !r.IsError {
-				key := ac.fc.Name + "\x00" + normalizeJSON(ac.fc.Arguments)
-				cached := ToolResult{Content: r.Content, IsError: false, Images: r.Images}
-				if len(cached.Images) == 0 {
-					cached.Content = sanitizeResult(cached.Content)
-				}
-				prevIterResults[key] = cached
-
-				// Evict file_read cache when the same path is written/edited
-				if ac.fc.Name == "file_write" || ac.fc.Name == "file_edit" {
-					if p := extractPathArg(callMeta[ac.index].argsStr); p != "" {
-						readKey := "file_read" + "\x00" + normalizeJSON(json.RawMessage(`{"path":"`+p+`"}`))
-						delete(prevIterResults, readKey)
-					}
-				}
+			if r.IsError {
+				continue
 			}
+
+			meta := callMeta[ac.index]
+			if meta.stateTraits.UnknownWrite {
+				clear(prevIterResults)
+			}
+			if len(meta.stateTraits.Writes) > 0 {
+				stateVersions.bump(meta.stateTraits.Writes)
+			}
+			if meta.cacheKey == "" {
+				continue
+			}
+
+			cached := ToolResult{Content: r.Content, IsError: false, Images: r.Images}
+			if len(cached.Images) == 0 {
+				cached.Content = sanitizeResult(cached.Content)
+			}
+			prevIterResults[meta.cacheKey] = cached
 		}
+
+		// toolSearchFired is consumed in the text-only path (next iteration)
+		// to nudge only when the model stops instead of using loaded tools.
 
 		// One-shot cloud delegation nudge when struggling with web tasks
 		if !cloudNudgeFired && worstAction >= LoopNudge {
@@ -1948,9 +2077,11 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		})
 		stampMessage()
 		captureRunMessages()
+		setRunStatus(runstatus.CodeIterationLimit, true)
 		return lastText, usage, ErrMaxIterReached
 	}
 	captureRunMessages()
+	setRunStatus(runstatus.CodeIterationLimit, false)
 	return "", usage, fmt.Errorf("agent loop exceeded %d iterations", a.effectiveMaxIter(toolsUsed))
 }
 

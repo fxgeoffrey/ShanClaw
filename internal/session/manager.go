@@ -41,10 +41,11 @@ func (m *Manager) NewSession() *Session {
 	}
 	id := generateID()
 	m.current = &Session{
-		ID:        id,
-		CreatedAt: time.Now(),
-		Title:     "New session",
-		CWD:       getCWD(),
+		SchemaVersion: 1,
+		ID:            id,
+		CreatedAt:     time.Now(),
+		Title:         "New session",
+		CWD:           getCWD(),
 	}
 	m.ensureRuntimeLocked(id)
 	sess := m.current
@@ -94,6 +95,22 @@ func (m *Manager) Save() error {
 		return nil
 	}
 	return m.store.Save(m.current)
+}
+
+// PatchTitle 修改指定 session 的标题并持久化。
+// 如果修改的是当前活跃 session，同时更新内存中的 title。
+// 先写磁盘再更新内存，避免写入失败导致不一致。
+func (m *Manager) PatchTitle(id, title string) error {
+	err := m.store.PatchTitle(id, title)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	if m.current != nil && m.current.ID == id {
+		m.current.Title = title
+	}
+	m.mu.Unlock()
+	return nil
 }
 
 // PatchSummaryCache 从磁盘重新读取最新 session，仅更新摘要缓存字段后写回。

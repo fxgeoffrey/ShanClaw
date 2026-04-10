@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
+	"github.com/Kocoro-lab/ShanClaw/internal/runstatus"
 )
 
 // SanitizeHistory repairs malformed message history that would cause API errors.
@@ -11,7 +12,7 @@ import (
 //   - tool role messages with plain text (no tool_result blocks) → dropped
 //   - assistant messages that are just "[tool_call: ...]" placeholders → dropped
 //   - consecutive assistant messages without intervening user → merged into one
-//   - assistant error messages (FriendlyAgentError output) → dropped
+//   - assistant error messages (friendly run-failure output) → dropped
 //   - orphaned tool_use blocks (no matching tool_result follows) → stripped
 //
 // Returns a new slice; the original is not modified.
@@ -199,7 +200,7 @@ func shouldDrop(msg client.Message) bool {
 		if text == "[error: agent failed to respond]" {
 			return true
 		}
-		// Drop persisted FriendlyAgentError messages — they contain no useful
+		// Drop persisted friendly run-failure messages — they contain no useful
 		// context and just waste tokens.
 		if isFriendlyError(text) {
 			return true
@@ -209,16 +210,7 @@ func shouldDrop(msg client.Message) bool {
 	return false
 }
 
-// isFriendlyError returns true for messages produced by FriendlyAgentError.
+// isFriendlyError returns true for friendly run-failure messages.
 func isFriendlyError(text string) bool {
-	switch text {
-	case "The request was cancelled or timed out.",
-		"Sorry, the AI service is currently rate-limited. Please try again in a moment.",
-		"Sorry, the AI service is temporarily overloaded. Please try again shortly.",
-		"Sorry, the AI service encountered a temporary error. Please try again.",
-		"Sorry, the connection to the AI service was interrupted. Please try again.",
-		"Sorry, an unexpected error occurred. Please try again.":
-		return true
-	}
-	return false
+	return runstatus.IsFriendlyMessage(text)
 }

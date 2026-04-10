@@ -6,20 +6,52 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+
+	"github.com/Kocoro-lab/ShanClaw/internal/client"
 )
+
+type FamilySpec struct {
+	Core     []string
+	Extended []string
+}
 
 // ToolFamilies maps tool names to their logical family for grouping
 // related tools in loop detection (e.g., web_search + web_fetch = "web").
 var ToolFamilies = map[string]string{
 	"web_search":    "web",
 	"web_fetch":     "web",
-	"browser":       "web",
+	"browser":       "browser",
 	"accessibility": "gui",
 	"screenshot":    "gui",
 	"computer":      "gui",
 	"applescript":   "gui",
 	"grep":          "search",
 	"glob":          "search",
+}
+
+var FamilyRegistry = map[string]FamilySpec{
+	"browser": {
+		Core: []string{
+			"browser_navigate",
+			"browser_snapshot",
+			"browser_click",
+			"browser_type",
+			"browser_press_key",
+			"browser_take_screenshot",
+			"browser_tabs",
+		},
+		Extended: []string{
+			"browser_drag",
+			"browser_select_option",
+		},
+	},
+}
+
+func toolFamily(name string) string {
+	if strings.HasPrefix(name, "browser_") {
+		return "browser"
+	}
+	return ToolFamilies[name]
 }
 
 // fillerWords are common query padding that don't affect semantic meaning.
@@ -53,6 +85,8 @@ var standaloneYearPattern = regexp.MustCompile(`\b20\d{2}\b`)
 // urlPattern matches http/https URLs (domain + path, excluding query strings).
 // Captures the full URL minus trailing punctuation and query params.
 var urlPattern = regexp.MustCompile(`https?://[^\s"'<>\])\},]+`)
+
+var serializedToolCallLinePattern = regexp.MustCompile(`^Tool:\s*([^,]+),\s*Args:\s*(.+)$`)
 
 // normalizeWebQuery extracts a search query from JSON args, strips dates and
 // filler words, sorts remaining tokens, and returns a canonical form.
@@ -164,7 +198,7 @@ func extractResultSignature(content string) string {
 // that don't help the model make progress: no matches, binary-only matches,
 // or errors. Productive searches (actual source code hits) return false.
 func isNonActionableSearch(toolName string, result ToolResult) bool {
-	if ToolFamilies[toolName] != "search" {
+	if toolFamily(toolName) != "search" {
 		return false
 	}
 	if result.IsError {
@@ -191,4 +225,60 @@ func isNonActionableSearch(toolName string, result ToolResult) bool {
 		return true
 	}
 	return false
+}
+
+type serializedToolCall struct {
+	Name string
+	Args string
+}
+
+func normalizeStructuredToolCallPreamble(text string, toolCalls []client.FunctionCall) string {
+	if len(toolCalls) == 0 || strings.TrimSpace(text) == "" {
+		return text
+	}
+
+	parsed, ok := parseSerializedToolCallPreamble(text)
+	if !ok || len(parsed) != len(toolCalls) {
+		return text
+	}
+
+	for i, tc := range toolCalls {
+		if parsed[i].Name != tc.Name {
+			return text
+		}
+		if normalizeJSON(json.RawMessage(parsed[i].Args)) != normalizeJSON(tc.Arguments) {
+			return text
+		}
+	}
+
+	return ""
+}
+
+func parseSerializedToolCallPreamble(text string) ([]serializedToolCall, bool) {
+	lines := strings.Split(strings.TrimSpace(text), "\n")
+	parsed := make([]serializedToolCall, 0, len(lines))
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if line == "Tool calls:" || line == "Tool call:" {
+			continue
+		}
+
+		matches := serializedToolCallLinePattern.FindStringSubmatch(line)
+		if len(matches) != 3 {
+			return nil, false
+		}
+		parsed = append(parsed, serializedToolCall{
+			Name: strings.TrimSpace(matches[1]),
+			Args: strings.TrimSpace(matches[2]),
+		})
+	}
+
+	if len(parsed) == 0 {
+		return nil, false
+	}
+	return parsed, true
 }

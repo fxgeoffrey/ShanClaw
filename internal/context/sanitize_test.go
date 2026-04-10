@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
+	"github.com/Kocoro-lab/ShanClaw/internal/runstatus"
 )
 
 func TestSanitizeHistory_Empty(t *testing.T) {
@@ -72,11 +73,12 @@ func TestSanitizeHistory_DropsPlainTextToolMessages(t *testing.T) {
 }
 
 func TestSanitizeHistory_DropsErrorMessages(t *testing.T) {
+	friendlyErr := runstatus.FriendlyMessage(runstatus.CodeServiceTemporaryError)
 	msgs := []client.Message{
 		{Role: "user", Content: client.NewTextContent("hello")},
-		{Role: "assistant", Content: client.NewTextContent("Sorry, the AI service encountered a temporary error. Please try again.")},
+		{Role: "assistant", Content: client.NewTextContent(friendlyErr)},
 		{Role: "user", Content: client.NewTextContent("try again")},
-		{Role: "assistant", Content: client.NewTextContent("Sorry, the AI service encountered a temporary error. Please try again.")},
+		{Role: "assistant", Content: client.NewTextContent(friendlyErr)},
 	}
 	result := SanitizeHistory(msgs)
 	// Both error assistants dropped, consecutive users merged → keep last
@@ -141,7 +143,7 @@ func TestSanitizeHistory_FullCorruptionScenario(t *testing.T) {
 	// Reproduce the exact little-v corruption pattern
 	msgs := []client.Message{
 		{Role: "user", Content: client.NewTextContent("check rankings")},
-		{Role: "assistant", Content: client.NewTextContent("The request was cancelled or timed out.")},
+		{Role: "assistant", Content: client.NewTextContent(runstatus.FriendlyMessage(runstatus.CodeDeadlineExceeded))},
 		{Role: "user", Content: client.NewTextContent("heartbeat prompt")},
 		{Role: "assistant", Content: client.NewTextContent("I noticed the timeout")},
 		{Role: "assistant", Content: client.NewTextContent("urgent confirmation")},
@@ -153,9 +155,9 @@ func TestSanitizeHistory_FullCorruptionScenario(t *testing.T) {
 		{Role: "tool", Content: client.NewTextContent("Search results 3")},
 		{Role: "assistant", Content: client.NewTextContent("Here are the rankings")},
 		{Role: "user", Content: client.NewTextContent("你好呀！")},
-		{Role: "assistant", Content: client.NewTextContent("Sorry, the AI service encountered a temporary error. Please try again.")},
+		{Role: "assistant", Content: client.NewTextContent(runstatus.FriendlyMessage(runstatus.CodeServiceTemporaryError))},
 		{Role: "user", Content: client.NewTextContent("今天有没有什么更新")},
-		{Role: "assistant", Content: client.NewTextContent("Sorry, the AI service encountered a temporary error. Please try again.")},
+		{Role: "assistant", Content: client.NewTextContent(runstatus.FriendlyMessage(runstatus.CodeServiceTemporaryError))},
 	}
 
 	result := SanitizeHistory(msgs)
@@ -173,7 +175,7 @@ func TestSanitizeHistory_FullCorruptionScenario(t *testing.T) {
 		if m.Role == "tool" {
 			t.Errorf("tool message at %d should be dropped", i)
 		}
-		if text == "Sorry, the AI service encountered a temporary error. Please try again." {
+		if text == runstatus.FriendlyMessage(runstatus.CodeServiceTemporaryError) {
 			t.Errorf("error message at %d should be dropped", i)
 		}
 		if text == "[tool_call: web_search]" {

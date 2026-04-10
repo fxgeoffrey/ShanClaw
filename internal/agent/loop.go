@@ -653,11 +653,17 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	coldDeferred := remainingDeferredNames(deferred, loadedDeferred)
 	deferredMode := len(coldDeferred) > 0 && shouldDefer(a.tools, a.tools.SortedNames(), schemaTokenBudget)
 
+	// sessionCWD may legitimately be empty for daemon runs that arrive without
+	// a CWD (pure web / reasoning tasks). Do NOT fall back to os.Getwd() here:
+	// the daemon process cwd is the directory the user ran `shan daemon start`
+	// from and is never a correct substitute. Falling back to it is exactly
+	// the leak that used to poison the prompt with "Working directory: ..."
+	// and make tools resolve relative paths against $HOME / dev dirs.
 	cwd := a.sessionCWD
-	if cwd == "" {
-		cwd, _ = os.Getwd()
+	var projectDir string
+	if cwd != "" {
+		projectDir = filepath.Join(cwd, ".shannon")
 	}
-	projectDir := filepath.Join(cwd, ".shannon")
 	instrText, _ := instructions.LoadInstructions(a.shannonDir, projectDir, 4000)
 	if cwd != "" {
 		ctx = cwdctx.WithSessionCWD(ctx, cwd)
@@ -2637,11 +2643,26 @@ func toolContentLength(tc any) int {
 // tier2FloorTools are read/search/repo-inspection tools that never degrade to
 // Tier 1 (metadata-only stubs). When these would normally hit Tier 1, they stay
 // at Tier 2 (mechanical head+tail truncation) to preserve actual content excerpts.
+// Browser tools belong here for the same reason they belong in
+// microCompactSkipTools: the page snapshot IS the task payload.
 var tier2FloorTools = map[string]bool{
-	"file_read":      true,
-	"grep":           true,
-	"glob":           true,
-	"directory_list": true,
+	"file_read":             true,
+	"grep":                  true,
+	"glob":                  true,
+	"directory_list":        true,
+	"browser_navigate":      true,
+	"browser_navigate_back": true,
+	"browser_snapshot":      true,
+	"browser_click":         true,
+	"browser_type":          true,
+	"browser_wait_for":      true,
+	"browser_fill_form":     true,
+	"browser_hover":         true,
+	"browser_mouse_wheel":   true,
+	"browser_select_option": true,
+	"browser_press_key":     true,
+	"browser_tabs":          true,
+	"browser_evaluate":      true,
 }
 
 func compressOldToolResults(ctx context.Context, messages []client.Message, keepRecent int, maxChars int, completer ctxwin.Completer) {

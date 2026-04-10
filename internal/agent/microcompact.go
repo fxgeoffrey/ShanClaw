@@ -28,14 +28,29 @@ const (
 // cloud_delegate: deliverables for the user, not agent working memory.
 // file_read, grep, glob, directory_list: code/search/repo-inspection results where
 // the model needs actual content (paths, signatures, line numbers), not summaries.
+// browser_*: DOM snapshots and page state ARE the model's eyes for web tasks —
+// summarizing them into "the browser navigated to X" blinds the model mid-task.
 // These always get mechanical head+tail truncation in Tier 2.
 var microCompactSkipTools = map[string]bool{
-	"think":          true,
-	"cloud_delegate": true,
-	"file_read":      true,
-	"grep":           true,
-	"glob":           true,
-	"directory_list": true,
+	"think":                 true,
+	"cloud_delegate":        true,
+	"file_read":             true,
+	"grep":                  true,
+	"glob":                  true,
+	"directory_list":        true,
+	"browser_navigate":      true,
+	"browser_navigate_back": true,
+	"browser_snapshot":      true,
+	"browser_click":         true,
+	"browser_type":          true,
+	"browser_wait_for":      true,
+	"browser_fill_form":     true,
+	"browser_hover":         true,
+	"browser_mouse_wheel":   true,
+	"browser_select_option": true,
+	"browser_press_key":     true,
+	"browser_tabs":          true,
+	"browser_evaluate":      true,
 }
 
 const microCompactPrompt = `Summarize this tool result in 1-2 sentences. Preserve exact error strings, file paths, URLs, IDs, and numbers when present. Focus on the final outcome or conclusion.

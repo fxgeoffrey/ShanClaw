@@ -331,3 +331,87 @@ func TestMicroCompact_SkipsCloudDelegate(t *testing.T) {
 // Ensure the interface is satisfied
 var _ ctxwin.Completer = (*mockCompleter)(nil)
 var _ ctxwin.Completer = (*failingCompleter)(nil)
+
+// TestMicroCompact_SkipsBrowserSnapshot: browser_snapshot returns the DOM
+// tree — the model's "eyes" for web tasks. Summarizing it destroys the
+// structured page content the model needs to extract data. This regression
+// was observed in a real x.com search task where DOM snapshots were replaced
+// with meta-descriptions like "The browser navigated to X", blinding the
+// model mid-extraction.
+func TestMicroCompact_SkipsBrowserSnapshot(t *testing.T) {
+	mc := &mockCompleter{output: "The browser navigated to X and displayed results"}
+
+	var messages []client.Message
+	messages = append(messages, client.Message{Role: "system", Content: client.NewTextContent("system")})
+
+	// Inject tool_use for browser_snapshot with a large DOM payload.
+	messages = append(messages, client.Message{
+		Role: "assistant",
+		Content: client.NewBlockContent([]client.ContentBlock{
+			{Type: "tool_use", ID: "tc_snap", Name: "browser_snapshot", Input: json.RawMessage(`{}`)},
+		}),
+	})
+	content := strings.Repeat("<div class=\"tweet\">large DOM payload</div>\n", 200)
+	messages = append(messages, client.Message{
+		Role: "user",
+		Content: client.NewBlockContent([]client.ContentBlock{
+			client.NewToolResultBlock("tc_snap", content, false),
+		}),
+	})
+	messages = append(messages, client.Message{Role: "assistant", Content: client.NewTextContent("ok")})
+
+	// Pad to push the snapshot into Tier 2.
+	for i := 0; i < 5; i++ {
+		messages = append(messages, client.Message{
+			Role: "user",
+			Content: client.NewBlockContent([]client.ContentBlock{
+				client.NewToolResultBlock("tc"+string(rune('a'+i)), "short", false),
+			}),
+		})
+		messages = append(messages, client.Message{Role: "assistant", Content: client.NewTextContent("ok")})
+	}
+
+	compressOldToolResults(context.Background(), messages, 3, 300, mc)
+
+	if mc.calls != 0 {
+		t.Errorf("expected 0 LLM calls for browser_snapshot, got %d", mc.calls)
+	}
+}
+
+func TestMicroCompact_SkipsBrowserNavigate(t *testing.T) {
+	mc := &mockCompleter{output: "navigated to page"}
+
+	var messages []client.Message
+	messages = append(messages, client.Message{Role: "system", Content: client.NewTextContent("system")})
+
+	messages = append(messages, client.Message{
+		Role: "assistant",
+		Content: client.NewBlockContent([]client.ContentBlock{
+			{Type: "tool_use", ID: "tc_nav", Name: "browser_navigate", Input: json.RawMessage(`{"url":"https://x.com"}`)},
+		}),
+	})
+	content := strings.Repeat("<nav>page content</nav>\n", 200)
+	messages = append(messages, client.Message{
+		Role: "user",
+		Content: client.NewBlockContent([]client.ContentBlock{
+			client.NewToolResultBlock("tc_nav", content, false),
+		}),
+	})
+	messages = append(messages, client.Message{Role: "assistant", Content: client.NewTextContent("ok")})
+
+	for i := 0; i < 5; i++ {
+		messages = append(messages, client.Message{
+			Role: "user",
+			Content: client.NewBlockContent([]client.ContentBlock{
+				client.NewToolResultBlock("tc"+string(rune('a'+i)), "short", false),
+			}),
+		})
+		messages = append(messages, client.Message{Role: "assistant", Content: client.NewTextContent("ok")})
+	}
+
+	compressOldToolResults(context.Background(), messages, 3, 300, mc)
+
+	if mc.calls != 0 {
+		t.Errorf("expected 0 LLM calls for browser_navigate, got %d", mc.calls)
+	}
+}

@@ -2,11 +2,18 @@ package cwdctx
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+// ErrNoSessionCWD is returned by ResolveFilesystemPath when the caller passes
+// a relative path but no session CWD is set in the context. Filesystem tools
+// (glob, grep, file_read, directory_list) should treat this as a hard failure
+// and ask the model to supply an absolute path.
+var ErrNoSessionCWD = errors.New("no session working directory is set; specify an absolute path")
 
 type contextKey struct{}
 
@@ -91,19 +98,43 @@ func IsUnderSessionCWD(ctx context.Context, path string) bool {
 	return strings.HasPrefix(resolved, cwdClean+string(filepath.Separator))
 }
 
+// ResolveFilesystemPath resolves a path intended for filesystem access. Unlike
+// ResolvePath, it refuses to silently join against a fallback working directory:
+// if the path is relative (or empty/".") and no session CWD is set in the
+// context, it returns ErrNoSessionCWD. Absolute and ~ paths always work.
+//
+// Filesystem tools should use this instead of ResolvePath so that a session
+// with no declared working directory cannot accidentally operate on arbitrary
+// ancestor directories (e.g. $HOME).
+func ResolveFilesystemPath(ctx context.Context, path string) (string, error) {
+	if strings.HasPrefix(path, "~") {
+		return filepath.Clean(expandHome(path)), nil
+	}
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path), nil
+	}
+	sessionCWD := FromContext(ctx)
+	if sessionCWD == "" {
+		return "", ErrNoSessionCWD
+	}
+	if path == "" || path == "." {
+		return filepath.Clean(sessionCWD), nil
+	}
+	return filepath.Clean(filepath.Join(sessionCWD, path)), nil
+}
+
 // ResolveEffectiveCWD returns the first non-empty value among requestCWD,
-// sessionCWD, agentCWD, falling back to $HOME then os.Getwd().
+// sessionCWD, agentCWD. When all three are empty it returns the empty string:
+// the caller is responsible for deciding what "no working directory" means
+// in its context. Daemon-routed runs treat empty as "no filesystem scope";
+// local CLIs (one-shot, TUI) fall back to os.Getwd() explicitly.
 func ResolveEffectiveCWD(requestCWD, sessionCWD, agentCWD string) string {
 	for _, cwd := range []string{requestCWD, sessionCWD, agentCWD} {
 		if cwd != "" {
 			return cwd
 		}
 	}
-	if home, err := os.UserHomeDir(); err == nil {
-		return home
-	}
-	cwd, _ := os.Getwd()
-	return cwd
+	return ""
 }
 
 // ValidateCWD validates that cwd is an absolute path to an existing directory.

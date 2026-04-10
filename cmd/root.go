@@ -275,7 +275,7 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 	loop.SetSessionCWD(effectiveCWD)
 	sessMgr.OnSessionClose(sess.ID, loop.SpillCleanupFunc())
 
-	result, usage, err := loop.Run(context.Background(), query, nil)
+	result, usage, err := loop.Run(context.Background(), query, nil, nil)
 	if err != nil && !errors.Is(err, agent.ErrMaxIterReached) {
 		return err
 	}

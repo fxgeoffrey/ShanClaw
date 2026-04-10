@@ -87,15 +87,16 @@ type DaemonMessage struct {
 
 // MessagePayload is what the daemon's agent loop processes.
 type MessagePayload struct {
-	Channel   string `json:"channel"`
-	ThreadID  string `json:"thread_id"`
-	Sender    string `json:"sender"`
-	Text      string `json:"text"`
-	AgentName string `json:"agent_name,omitempty"`
-	MessageID string `json:"-"` // set locally from envelope, not from JSON
-	Timestamp string `json:"timestamp"`
-	Source    string `json:"source,omitempty"` // populated by Cloud; "slack", "line", "webhook"
-	CWD       string `json:"cwd,omitempty"`    // project path override from Cloud/Desktop
+	Channel   string               `json:"channel"`
+	ThreadID  string               `json:"thread_id"`
+	Sender    string               `json:"sender"`
+	Text      string               `json:"text"`
+	Content   []RequestContentBlock `json:"content,omitempty"` // multimodal content blocks (reserved for Cloud)
+	AgentName string               `json:"agent_name,omitempty"`
+	MessageID string               `json:"-"` // set locally from envelope, not from JSON
+	Timestamp string               `json:"timestamp"`
+	Source    string               `json:"source,omitempty"` // populated by Cloud; "slack", "line", "webhook"
+	CWD       string               `json:"cwd,omitempty"`    // project path override from Cloud/Desktop
 }
 
 // ReplyPayload is sent back after agent completes.

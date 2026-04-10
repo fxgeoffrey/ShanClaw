@@ -89,6 +89,7 @@ var DownloadableSkills = []struct {
 	Description string
 }{
 	// Formerly bundled — installed from embedded binary
+	{"pdf-reader", "Analyze PDF files using file_read's built-in PDF rendering and vision"},
 	{"algorithmic-art", "Create algorithmic art using p5.js with seeded randomness"},
 	{"brand-guidelines", "Apply brand colors and typography to artifacts"},
 	{"canvas-design", "Create visual art in PNG and PDF using design philosophy"},

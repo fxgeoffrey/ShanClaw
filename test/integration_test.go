@@ -48,7 +48,7 @@ func TestEndToEnd_FileReadAndAnalyze(t *testing.T) {
 	reg.Register(&tools.FileReadTool{})
 
 	loop := agent.NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
-	result, usage, err := loop.Run(context.Background(), "read go.mod", nil)
+	result, usage, err := loop.Run(context.Background(), "read go.mod", nil, nil)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

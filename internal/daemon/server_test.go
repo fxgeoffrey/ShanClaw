@@ -929,8 +929,8 @@ func TestServer_BodySizeLimit(t *testing.T) {
 
 	base := fmt.Sprintf("http://127.0.0.1:%d", srv.Port())
 
-	// Send a 2MB body to POST /agents — should be rejected
-	bigBody := bytes.Repeat([]byte("x"), 2*1024*1024)
+	// Send a body exceeding maxBodySize (50MB) to POST /agents — should be rejected
+	bigBody := bytes.Repeat([]byte("x"), 51*1024*1024)
 	payload := append([]byte(`{"name":"big","prompt":"`), bigBody...)
 	payload = append(payload, '"', '}')
 
@@ -942,7 +942,7 @@ func TestServer_BodySizeLimit(t *testing.T) {
 
 	// Should get 413 or 400 (body too large), not 201
 	if resp.StatusCode == http.StatusCreated {
-		t.Error("expected rejection for 2MB body, got 201 Created")
+		t.Error("expected rejection for oversized body, got 201 Created")
 	}
 	if resp.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Logf("status = %d (acceptable if 400, ideal is 413)", resp.StatusCode)

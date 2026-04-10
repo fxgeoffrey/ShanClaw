@@ -1320,7 +1320,7 @@ func (m *Model) runAgentLoop(query string, history []client.Message) tea.Cmd {
 			m.agentLoop.SetSessionID("")
 			m.agentLoop.SetWorkingSet(nil)
 		}
-		result, usage, err := m.agentLoop.Run(ctx, query, history)
+		result, usage, err := m.agentLoop.Run(ctx, query, nil, history)
 
 		// Persist the run's messages to session. Use RunMessages() for
 		// rich history (tool_use/tool_result blocks) so resumed sessions

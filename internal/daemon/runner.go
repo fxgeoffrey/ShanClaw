@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -30,23 +31,35 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/tools"
 )
 
+// RequestContentBlock represents a content block in the POST /message request.
+// Supported types: "text" and "image" (passed through to LLM), "file_ref" (resolved by daemon).
+type RequestContentBlock struct {
+	Type     string              `json:"type"`
+	Text     string              `json:"text,omitempty"`
+	Source   *client.ImageSource `json:"source,omitempty"`
+	FilePath string              `json:"file_path,omitempty"`
+	Filename string              `json:"filename,omitempty"`
+	ByteSize int64               `json:"byte_size,omitempty"`
+}
+
 // RunAgentRequest is the input for RunAgent.
 type RunAgentRequest struct {
-	Text           string           `json:"text"`
-	Agent          string           `json:"agent,omitempty"`
-	SessionID      string           `json:"session_id,omitempty"`
-	NewSession     bool             `json:"new_session,omitempty"`
-	Source         string           `json:"source,omitempty"`    // "slack", "line", "shanclaw", "webhook"
-	Sender         string           `json:"sender,omitempty"`    // user identifier from channel
-	Channel        string           `json:"channel,omitempty"`   // channel/thread source context
-	ThreadID       string           `json:"thread_id,omitempty"` // thread context for messaging platforms
-	CWD            string           `json:"cwd,omitempty"`       // absolute project path override
-	RouteKey       string           `json:"-"`                   // internal routing key
-	Ephemeral      bool             `json:"-"`                   // caller owns persistence + events
-	ModelOverride  string           `json:"-"`                   // overrides agent model tier
-	BypassRouting  bool             `json:"-"`                   // skip route lock (heartbeat runs)
-	SessionHistory []client.Message `json:"-"`                   // pre-loaded history for LLM context (BypassRouting runs)
-	StickyContext  string           `json:"-"`                   // 额外的 sticky context，注入系统提示（对用户不可见）
+	Text           string               `json:"text"`
+	Content        []RequestContentBlock `json:"content,omitempty"` // multimodal content blocks (optional)
+	Agent          string               `json:"agent,omitempty"`
+	SessionID      string               `json:"session_id,omitempty"`
+	NewSession     bool                 `json:"new_session,omitempty"`
+	Source         string               `json:"source,omitempty"`    // "slack", "line", "shanclaw", "webhook"
+	Sender         string               `json:"sender,omitempty"`    // user identifier from channel
+	Channel        string               `json:"channel,omitempty"`   // channel/thread source context
+	ThreadID       string               `json:"thread_id,omitempty"` // thread context for messaging platforms
+	CWD            string               `json:"cwd,omitempty"`       // absolute project path override
+	RouteKey       string               `json:"-"`                   // internal routing key
+	Ephemeral      bool                 `json:"-"`                   // caller owns persistence + events
+	ModelOverride  string               `json:"-"`                   // overrides agent model tier
+	BypassRouting  bool                 `json:"-"`                   // skip route lock (heartbeat runs)
+	SessionHistory []client.Message     `json:"-"`                   // pre-loaded history for LLM context (BypassRouting runs)
+	StickyContext  string               `json:"-"`                   // 额外的 sticky context，注入系统提示（对用户不可见）
 }
 
 // Validate checks that the request has the minimum required fields.
@@ -102,6 +115,171 @@ func sanitizeRouteValue(value string) string {
 		return ""
 	}
 	return url.PathEscape(trimmed)
+}
+
+// resolveContentBlocks converts request content blocks into client.ContentBlock
+// values suitable for the LLM. "text" and "image" blocks are passed through;
+// "file_ref" blocks are resolved by reading the referenced file from disk.
+func resolveContentBlocks(blocks []RequestContentBlock) []client.ContentBlock {
+	out := make([]client.ContentBlock, 0, len(blocks))
+	for _, b := range blocks {
+		switch b.Type {
+		case "text":
+			out = append(out, client.ContentBlock{Type: "text", Text: b.Text})
+		case "image":
+			out = append(out, client.ContentBlock{Type: "image", Source: b.Source})
+		case "document":
+			out = append(out, client.ContentBlock{Type: "document", Source: b.Source})
+		case "file_ref":
+			out = append(out, resolveFileRef(b))
+		}
+	}
+	return out
+}
+
+// imageExtensions are sent as base64 image content blocks to the LLM.
+var imageExtensions = map[string]string{
+	".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+	".png": "image/png", ".gif": "image/gif", ".webp": "image/webp",
+}
+
+// resolveFileRef returns the appropriate content block for a file_ref.
+// Images → base64 image block (vision API requires inline data).
+// All other files → text hint with path so the agent reads via file_read tool.
+func resolveFileRef(b RequestContentBlock) client.ContentBlock {
+	ext := strings.ToLower(filepath.Ext(b.Filename))
+
+	// Images must be inline base64 — Claude vision requires image data in the request body.
+	if mimeType, ok := imageExtensions[ext]; ok {
+		info, err := os.Stat(b.FilePath)
+		if err != nil {
+			log.Printf("WARNING: failed to read attached image %s: %v", b.FilePath, err)
+			return client.ContentBlock{
+				Type: "text",
+				Text: fmt.Sprintf("[Error: unable to read image %s]", b.Filename),
+			}
+		}
+		const maxInlineImage = 20 * 1024 * 1024 // 20 MB
+		if info.Size() > maxInlineImage {
+			return client.ContentBlock{
+				Type: "text",
+				Text: fmt.Sprintf("[User attached image: %s (%d bytes) — too large for inline vision (max %d bytes). Use file_read tool to view it.]",
+					b.Filename, info.Size(), maxInlineImage),
+			}
+		}
+		data, err := os.ReadFile(b.FilePath)
+		if err != nil {
+			log.Printf("WARNING: failed to read attached image %s: %v", b.FilePath, err)
+			return client.ContentBlock{
+				Type: "text",
+				Text: fmt.Sprintf("[Error: unable to read image %s]", b.Filename),
+			}
+		}
+		encoded := base64.StdEncoding.EncodeToString(data)
+		return client.ContentBlock{
+			Type:   "image",
+			Source: &client.ImageSource{Type: "base64", MediaType: mimeType, Data: encoded},
+		}
+	}
+
+	// PDF files: file_read natively renders PDF pages as images for vision.
+	if ext == ".pdf" {
+		return client.ContentBlock{
+			Type: "text",
+			Text: fmt.Sprintf("[User attached PDF: %s (%d bytes) at path: %s — use file_read to analyze (it renders PDF pages as images for vision). Use offset for start page, limit for max pages.]",
+				b.Filename, b.ByteSize, b.FilePath),
+		}
+	}
+
+	// All other files: let the agent use file_read to access content on demand.
+	return client.ContentBlock{
+		Type: "text",
+		Text: fmt.Sprintf("[User attached file: %s (%d bytes) at path: %s — use the file_read tool to read its contents]",
+			b.Filename, b.ByteSize, b.FilePath),
+	}
+}
+
+// extractUserFilePaths collects file paths from file_ref content blocks.
+// These paths represent files the user explicitly attached, so tool access
+// to them should be auto-approved without prompting.
+func extractUserFilePaths(blocks []RequestContentBlock) []string {
+	var paths []string
+	for _, b := range blocks {
+		if b.Type == "file_ref" && b.FilePath != "" {
+			paths = append(paths, b.FilePath)
+		}
+	}
+	return paths
+}
+
+// buildUserMsgContent creates the MessageContent for the user message.
+// If resolved content contains non-text blocks (images), uses block array format.
+// Otherwise, merges all text into a single string for maximum gateway compatibility.
+func buildUserMsgContent(prompt string, resolvedContent []client.ContentBlock) client.MessageContent {
+	if len(resolvedContent) == 0 {
+		return client.NewTextContent(prompt)
+	}
+
+	// Check if any block requires array format (images, documents).
+	needsBlocks := false
+	for _, b := range resolvedContent {
+		if b.Type != "text" {
+			needsBlocks = true
+			break
+		}
+	}
+
+	if needsBlocks {
+		blocks := resolvedContent
+		if prompt != "" {
+			blocks = append([]client.ContentBlock{{Type: "text", Text: prompt}}, blocks...)
+		}
+		return client.NewBlockContent(blocks)
+	}
+
+	// Text-only: merge into single string.
+	merged := prompt
+	for _, b := range resolvedContent {
+		if b.Text != "" {
+			merged += "\n\n" + b.Text
+		}
+	}
+	return client.NewTextContent(merged)
+}
+
+// hasPDFAttachment returns true if any file_ref block has a .pdf extension.
+func hasPDFAttachment(blocks []RequestContentBlock) bool {
+	for _, b := range blocks {
+		if b.Type == "file_ref" && strings.ToLower(filepath.Ext(b.Filename)) == ".pdf" {
+			return true
+		}
+	}
+	return false
+}
+
+// injectBundledSkill appends a bundled skill to the list if not already present.
+func injectBundledSkill(existing []*skills.Skill, shannonDir, name string) []*skills.Skill {
+	for _, s := range existing {
+		if s.Name == name {
+			return existing // already loaded
+		}
+	}
+	src, err := skills.BundledSkillSource(shannonDir)
+	if err != nil {
+		log.Printf("daemon: failed to load bundled skill source for %q: %v", name, err)
+		return existing
+	}
+	loaded, err := skills.LoadSkills(src)
+	if err != nil {
+		log.Printf("daemon: failed to load bundled skill %q: %v", name, err)
+		return existing
+	}
+	for _, s := range loaded {
+		if s.Name == name {
+			return append(existing, s)
+		}
+	}
+	return existing
 }
 
 // EnsureRouteKey computes and sets the route key if not already set.
@@ -267,6 +445,13 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 	}
 	agentName := req.Agent
 	prompt := req.Text
+
+	// Resolve multimodal content blocks (if present).
+	var resolvedContent []client.ContentBlock
+	if len(req.Content) > 0 {
+		resolvedContent = resolveContentBlocks(req.Content)
+	}
+
 	// "default" is not a real agent — it means "use base agent, no --agent flag".
 	if agentName == "default" {
 		agentName = ""
@@ -495,8 +680,9 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 			source = "unknown"
 		}
 		msgID := generateMessageID()
+		userMsgContent := buildUserMsgContent(prompt, resolvedContent)
 		sess.Messages = append(sess.Messages,
-			client.Message{Role: "user", Content: client.NewTextContent(prompt)},
+			client.Message{Role: "user", Content: userMsgContent},
 		)
 		sess.MessageMeta = append(sess.MessageMeta,
 			session.MessageMeta{Source: source, MessageID: msgID, Timestamp: session.TimePtr(userMsgTime)},
@@ -534,6 +720,12 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 			log.Printf("WARNING: failed to load global skills: %v", err)
 		}
 	}
+
+	// Auto-inject bundled skills based on attached file types.
+	if hasPDFAttachment(req.Content) {
+		loadedSkills = injectBundledSkill(loadedSkills, deps.ShannonDir, "pdf-reader")
+	}
+
 	tools.SetRegistrySkills(reg, loadedSkills)
 
 	// Always expose local session search for daemon-served agents.
@@ -645,9 +837,11 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 	loop.SetSessionID(sess.ID)
 	loop.SetSessionCWD(effectiveCWD)
 	loop.SetWorkingSet(sessMgr.WorkingSet(sess.ID))
+	// Always set (even nil) to clear paths from a previous run on a reused loop.
+	loop.SetUserFilePaths(extractUserFilePaths(req.Content))
 	sessMgr.OnSessionClose(sess.ID, loop.SpillCleanupFunc())
 
-	result, usage, runErr := loop.Run(ctx, prompt, history)
+	result, usage, runErr := loop.Run(ctx, prompt, resolvedContent, history)
 	status := loop.LastRunStatus()
 	if runErr != nil && !isSoftRunError(runErr) {
 		// Hard error — save a user-friendly error message so the session isn't
@@ -741,8 +935,9 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		} else {
 			// Fallback: flat text (early error or no messages accumulated).
 			if !preLoopUserAppended {
+				fallbackContent := buildUserMsgContent(prompt, resolvedContent)
 				sess.Messages = append(sess.Messages,
-					client.Message{Role: "user", Content: client.NewTextContent(prompt)},
+					client.Message{Role: "user", Content: fallbackContent},
 				)
 				sess.MessageMeta = append(sess.MessageMeta,
 					session.MessageMeta{Source: source, Timestamp: session.TimePtr(userMsgTime)},

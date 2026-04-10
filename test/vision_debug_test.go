@@ -57,7 +57,7 @@ func TestVisionLoop_FullPipeline(t *testing.T) {
 	loop := agent.NewAgentLoop(gw, reg, "medium", "", 10, 50000, 200, nil, nil, nil)
 	loop.SetBypassPermissions(true)
 
-	result, usage, err := loop.Run(context.Background(), "take a screenshot", nil)
+	result, usage, err := loop.Run(context.Background(), "take a screenshot", nil, nil)
 	if err != nil {
 		t.Fatalf("agent loop error: %v", err)
 	}

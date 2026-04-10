@@ -1733,6 +1733,20 @@ func (m *Model) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 		} else {
 			m.appendOutput("No messages in session")
 		}
+	case "/rename":
+		newTitle := strings.TrimSpace(strings.TrimPrefix(input, "/rename "))
+		if newTitle == "" {
+			m.appendOutput("Usage: /rename <new title>")
+		} else {
+			sess := m.sessions.Current()
+			if sess == nil {
+				m.appendOutput("No active session to rename")
+			} else {
+				sess.Title = newTitle
+				m.sessions.Save()
+				m.appendOutput(fmt.Sprintf("Session renamed: %s", newTitle))
+			}
+		}
 	case "/research":
 		return m.handleResearch(parts[1:])
 	case "/swarm":
@@ -2185,6 +2199,7 @@ Commands:
   /session new                   Start new session
   /session resume <id>           Resume a saved session
   /model [small|medium|large]    Switch model tier
+  /rename <title>                Rename current session
   /copy                          Copy last response to clipboard
   /clear                         New session + clear screen
   /compact [instructions]        Compress context, keep summary

@@ -219,6 +219,10 @@ func TestSplitAbsPattern(t *testing.T) {
 		{"/a/b/*/README.md", "/a/b", "*/README.md"},
 		{"/a/b/**/*.go", "/a/b", "**/*.go"},
 		{"/a/b/c/file.txt", "/a/b/c", "file.txt"},
+		// Root-adjacent edge cases — the prefix before the first meta char
+		// is just "/", so the split root should be the filesystem root.
+		{"/{a,b}", "/", "{a,b}"},
+		{"/*.go", "/", "*.go"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.pattern, func(t *testing.T) {
@@ -228,5 +232,75 @@ func TestSplitAbsPattern(t *testing.T) {
 					tt.pattern, gotRoot, gotRel, tt.wantRoot, tt.wantRel)
 			}
 		})
+	}
+}
+
+// TestGlob_AbsPatternInPatternFieldRejectedBySafeCheck is the regression for
+// the approval bypass where a malicious caller smuggles an absolute directory
+// into `pattern` while leaving `path` empty. Before the fix, the safe-check
+// only inspected args.Path, defaulted empty path to ".", and returned true
+// (under session CWD); Run then split the pattern and actually scanned the
+// smuggled root. Both entry points must now see the same (root, pattern)
+// pair.
+func TestGlob_AbsPatternInPatternFieldRejectedBySafeCheck(t *testing.T) {
+	sessionCWD := t.TempDir()
+	targetDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(targetDir, "secret.conf"), []byte("p"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := cwdctx.WithSessionCWD(context.Background(), sessionCWD)
+	tool := &GlobTool{}
+	argsJSON := fmt.Sprintf(`{"pattern":"%s/*.conf"}`, targetDir)
+
+	if tool.IsSafeArgsWithContext(ctx, argsJSON) {
+		t.Errorf("safe-check must reject an absolute pattern that points outside session CWD (sessionCWD=%s, target=%s)",
+			sessionCWD, targetDir)
+	}
+}
+
+func TestGlob_AbsPatternInSidePathFieldRejectedBySafeCheck(t *testing.T) {
+	sessionCWD := t.TempDir()
+	targetDir := t.TempDir()
+
+	ctx := cwdctx.WithSessionCWD(context.Background(), sessionCWD)
+	tool := &GlobTool{}
+	argsJSON := fmt.Sprintf(`{"pattern":"*.conf","path":%q}`, targetDir)
+
+	if tool.IsSafeArgsWithContext(ctx, argsJSON) {
+		t.Errorf("safe-check must reject an explicit absolute path outside session CWD (sessionCWD=%s, target=%s)",
+			sessionCWD, targetDir)
+	}
+}
+
+// TestGlob_AbsPatternUnderSessionCWDStillAllowed ensures the fix doesn't
+// break the legitimate case where a caller supplies an absolute pattern that
+// resolves to a directory inside the session CWD.
+func TestGlob_AbsPatternUnderSessionCWDStillAllowed(t *testing.T) {
+	sessionCWD := t.TempDir()
+	sub := filepath.Join(sessionCWD, "pkg")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "a.go"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := cwdctx.WithSessionCWD(context.Background(), sessionCWD)
+	tool := &GlobTool{}
+	argsJSON := fmt.Sprintf(`{"pattern":"%s/*.go"}`, sub)
+
+	if !tool.IsSafeArgsWithContext(ctx, argsJSON) {
+		t.Fatalf("absolute pattern under session CWD should be auto-approved (sessionCWD=%s, target=%s)", sessionCWD, sub)
+	}
+	result, err := tool.Run(ctx, argsJSON)
+	if err != nil {
+		t.Fatalf("Run transport error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("Run unexpectedly errored: %s", result.Content)
+	}
+	if !strings.Contains(result.Content, "a.go") {
+		t.Errorf("expected a.go in result, got: %s", result.Content)
 	}
 }

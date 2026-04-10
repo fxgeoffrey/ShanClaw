@@ -94,7 +94,10 @@ func (t *GrepTool) Run(ctx context.Context, argsJSON string) (agent.ToolResult, 
 	bin := "rg"
 	if _, err := exec.LookPath("rg"); err != nil {
 		bin = "grep"
-		cmdArgs = []string{"-rn", "-I", args.Pattern, path}
+		// -m caps matches per file; without it a pathological input could
+		// have CombinedOutput() buffer tens of MB before the scanner cap
+		// kicks in below. Both GNU and BSD grep accept -m.
+		cmdArgs = []string{"-rn", "-I", "-m", fmt.Sprintf("%d", grepPerFileMaxCount), args.Pattern, path}
 	}
 
 	cmd := exec.CommandContext(runCtx, bin, cmdArgs...)

@@ -104,8 +104,11 @@ func IsUnderSessionCWD(ctx context.Context, path string) bool {
 // context, it returns ErrNoSessionCWD. Absolute and ~ paths always work.
 //
 // Filesystem tools should use this instead of ResolvePath so that a session
-// with no declared working directory cannot accidentally operate on arbitrary
-// ancestor directories (e.g. $HOME).
+// with no declared working directory cannot accidentally operate on $HOME or
+// arbitrary ancestor directories via silent relative-path fallback. Note that
+// absolute paths are NOT sandboxed here — that is the job of the permissions
+// layer (SafeChecker, allowed/denied_commands). This function only eliminates
+// the "relative path joined against the wrong base" class of leak.
 func ResolveFilesystemPath(ctx context.Context, path string) (string, error) {
 	if strings.HasPrefix(path, "~") {
 		return filepath.Clean(expandHome(path)), nil

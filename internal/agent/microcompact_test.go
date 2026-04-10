@@ -378,6 +378,55 @@ func TestMicroCompact_SkipsBrowserSnapshot(t *testing.T) {
 	}
 }
 
+// TestIsMicroCompactSkipTool_BrowserPrefix locks in the prefix-based
+// matching for browser_* tools. Before the fix, the skip list was an
+// enumerated map that missed browser_drag and browser_take_screenshot —
+// two tools that were already referenced elsewhere in the repo
+// (internal/agent/normalize.go) but absent from this map. Now all browser_*
+// names should match via strings.HasPrefix.
+func TestIsMicroCompactSkipTool_BrowserPrefix(t *testing.T) {
+	// Previously-missed names — regression guard.
+	for _, name := range []string{"browser_drag", "browser_take_screenshot"} {
+		if !isMicroCompactSkipTool(name) {
+			t.Errorf("%s must be skipped (was missing from the old enumerated map)", name)
+		}
+	}
+	// Still covered after the refactor.
+	for _, name := range []string{"browser_navigate", "browser_snapshot", "browser_click"} {
+		if !isMicroCompactSkipTool(name) {
+			t.Errorf("%s must still be skipped after the prefix refactor", name)
+		}
+	}
+	// Non-browser tools keep their original behavior.
+	for _, name := range []string{"think", "file_read", "grep"} {
+		if !isMicroCompactSkipTool(name) {
+			t.Errorf("%s must still be skipped", name)
+		}
+	}
+	// Completely unrelated tools must NOT be skipped.
+	for _, name := range []string{"bash", "http", "memory_append"} {
+		if isMicroCompactSkipTool(name) {
+			t.Errorf("%s must not be skipped", name)
+		}
+	}
+}
+
+func TestIsTier2FloorTool_BrowserPrefix(t *testing.T) {
+	for _, name := range []string{"browser_drag", "browser_take_screenshot", "browser_snapshot"} {
+		if !isTier2FloorTool(name) {
+			t.Errorf("%s must be a tier-2 floor tool", name)
+		}
+	}
+	for _, name := range []string{"file_read", "grep", "glob", "directory_list"} {
+		if !isTier2FloorTool(name) {
+			t.Errorf("%s must remain a tier-2 floor tool", name)
+		}
+	}
+	if isTier2FloorTool("bash") {
+		t.Error("bash must not be a tier-2 floor tool")
+	}
+}
+
 func TestMicroCompact_SkipsBrowserNavigate(t *testing.T) {
 	mc := &mockCompleter{output: "navigated to page"}
 

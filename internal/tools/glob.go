@@ -45,30 +45,33 @@ func (t *GlobTool) Info() agent.ToolInfo {
 	}
 }
 
+// normalizeGlobTarget is the single source of truth for turning (pattern,
+// path) into the (root, relPattern) pair that the scanner will actually use.
+// Both Run and the approval safe-check call this so they can never see a
+// different "real target".
+//
+// When pattern is absolute and path is empty, the absolute directory prefix
+// of pattern is lifted into root. Otherwise (pattern, path) are returned as
+// given, with an empty path normalized to ".".
+func normalizeGlobTarget(pattern, path string) (root, relPattern string) {
+	if filepath.IsAbs(pattern) && path == "" {
+		if splitRoot, splitPat := splitAbsPattern(pattern); splitRoot != "" {
+			return splitRoot, splitPat
+		}
+	}
+	if path == "" {
+		path = "."
+	}
+	return path, pattern
+}
+
 func (t *GlobTool) Run(ctx context.Context, argsJSON string) (agent.ToolResult, error) {
 	var args globArgs
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return agent.ToolResult{Content: fmt.Sprintf("invalid arguments: %v", err), IsError: true}, nil
 	}
 
-	pattern := args.Pattern
-	root := args.Path
-
-	// When the model embeds an absolute path in the pattern (e.g.
-	// "/Users/hu/projects/repo/{README*,*.md}"), rg --glob and doublestar
-	// both expect a relative pattern. Split into root + relative pattern
-	// before attempting to resolve against session CWD.
-	if filepath.IsAbs(pattern) && root == "" {
-		splitRoot, splitPat := splitAbsPattern(pattern)
-		if splitRoot != "" {
-			root = splitRoot
-			pattern = splitPat
-		}
-	}
-
-	if root == "" {
-		root = "."
-	}
+	root, pattern := normalizeGlobTarget(args.Pattern, args.Path)
 	resolvedRoot, err := cwdctx.ResolveFilesystemPath(ctx, root)
 	if err != nil {
 		if errors.Is(err, cwdctx.ErrNoSessionCWD) {
@@ -141,10 +144,15 @@ func splitAbsPattern(pattern string) (root, rel string) {
 	}
 	prefix := pattern[:metaIdx]
 	lastSep := strings.LastIndex(prefix, string(filepath.Separator))
-	if lastSep <= 0 {
+	switch {
+	case lastSep < 0:
 		return "", pattern
+	case lastSep == 0:
+		// Pattern like "/{a,b}" or "/*.go" — root is the filesystem root.
+		return string(filepath.Separator), pattern[1:]
+	default:
+		return pattern[:lastSep], pattern[lastSep+1:]
 	}
-	return pattern[:lastSep], pattern[lastSep+1:]
 }
 
 // globWithRg uses `rg --files --glob <pattern>` for fast, gitignore-aware,
@@ -214,7 +222,7 @@ func globFallback(ctx context.Context, root, pattern string, maxResults int) ([]
 		},
 		doublestar.WithNoFollow(),
 	)
-	if walkErr != nil && walkErr != errGlobLimit {
+	if walkErr != nil && !errors.Is(walkErr, errGlobLimit) {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -227,16 +235,20 @@ func (t *GlobTool) RequiresApproval() bool { return true }
 
 func (t *GlobTool) IsReadOnlyCall(string) bool { return true }
 
+// IsSafeArgs and IsSafeArgsWithContext must inspect the SAME (root, pattern)
+// pair that Run will actually scan. If they only looked at args.Path, a caller
+// could smuggle an absolute directory into args.Pattern (e.g.
+// {"pattern":"/etc/*.conf"}), pass the safe-check with path="." ("safe,
+// under session CWD"), and then have Run split the pattern and scan the
+// smuggled root. Both entry points run through normalizeGlobTarget so there
+// is exactly one notion of "real target".
 func (t *GlobTool) IsSafeArgs(argsJSON string) bool {
 	var args globArgs
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return false
 	}
-	path := args.Path
-	if path == "" {
-		path = "."
-	}
-	return isPathUnderCWD(path)
+	root, _ := normalizeGlobTarget(args.Pattern, args.Path)
+	return isPathUnderCWD(root)
 }
 
 func (t *GlobTool) IsSafeArgsWithContext(ctx context.Context, argsJSON string) bool {
@@ -244,9 +256,6 @@ func (t *GlobTool) IsSafeArgsWithContext(ctx context.Context, argsJSON string) b
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return false
 	}
-	path := args.Path
-	if path == "" {
-		path = "."
-	}
-	return isPathUnderSessionCWD(ctx, path)
+	root, _ := normalizeGlobTarget(args.Pattern, args.Path)
+	return isPathUnderSessionCWD(ctx, root)
 }

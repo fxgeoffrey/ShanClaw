@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -402,5 +403,248 @@ func TestToolResultText_Extraction(t *testing.T) {
 	b3 := ContentBlock{Type: "text", Text: "plain"}
 	if got := ToolResultText(b3); got != "" {
 		t.Errorf("expected empty, got %q", got)
+	}
+}
+
+// TestNormalizeToolInput verifies the shared helper that coerces null/empty
+// tool_use input to an empty object. See issue #45.
+func TestNormalizeToolInput(t *testing.T) {
+	cases := []struct {
+		name string
+		in   json.RawMessage
+		want string
+	}{
+		{"nil", nil, "{}"},
+		{"empty bytes", json.RawMessage(""), "{}"},
+		{"literal null", json.RawMessage("null"), "{}"},
+		{"null with leading whitespace", json.RawMessage("  null"), "{}"},
+		{"null with trailing whitespace", json.RawMessage("null  "), "{}"},
+		{"null with surrounding whitespace", json.RawMessage(" null "), "{}"},
+		{"whitespace only", json.RawMessage("   "), "{}"},
+		{"empty object preserved", json.RawMessage("{}"), "{}"},
+		{"populated object preserved", json.RawMessage(`{"x":1}`), `{"x":1}`},
+		{"nested object preserved", json.RawMessage(`{"a":{"b":2}}`), `{"a":{"b":2}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := normalizeToolInput(tc.in)
+			if string(got) != tc.want {
+				t.Errorf("normalizeToolInput(%q) = %q, want %q", string(tc.in), string(got), tc.want)
+			}
+		})
+	}
+}
+
+// TestNewToolUseBlock_NormalizesInput verifies that the constructor coerces
+// null/empty input to {} so in-memory consumers (ollama.go, microcompact, etc.)
+// never see a literal "null" when reading block.Input.
+func TestNewToolUseBlock_NormalizesInput(t *testing.T) {
+	cases := []struct {
+		name string
+		in   json.RawMessage
+		want string
+	}{
+		{"nil input", nil, "{}"},
+		{"literal null", json.RawMessage("null"), "{}"},
+		{"empty bytes", json.RawMessage(""), "{}"},
+		{"valid object passthrough", json.RawMessage(`{"url":"x"}`), `{"url":"x"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := NewToolUseBlock("tu_1", "browser_snapshot", tc.in)
+			if b.Type != "tool_use" {
+				t.Errorf("Type = %q, want tool_use", b.Type)
+			}
+			if string(b.Input) != tc.want {
+				t.Errorf("Input = %q, want %q", string(b.Input), tc.want)
+			}
+		})
+	}
+}
+
+// TestContentBlock_MarshalJSON_ForcesToolUseInput is the load-bearing test for
+// issue #45. Even if a tool_use block was constructed with nil/null Input
+// (e.g. via a code path that bypasses NewToolUseBlock), MarshalJSON must
+// always emit a concrete JSON object for tool_use.input. The serialized bytes
+// must contain "input":{} and must never contain "input":null, and must never
+// omit the input field entirely.
+func TestContentBlock_MarshalJSON_ForcesToolUseInput(t *testing.T) {
+	cases := []struct {
+		name  string
+		block ContentBlock
+	}{
+		{"nil input", ContentBlock{Type: "tool_use", ID: "tu_1", Name: "browser_snapshot"}},
+		{"literal null input", ContentBlock{Type: "tool_use", ID: "tu_2", Name: "browser_close", Input: json.RawMessage("null")}},
+		{"whitespace null input", ContentBlock{Type: "tool_use", ID: "tu_3", Name: "browser_snapshot", Input: json.RawMessage(" null ")}},
+		{"empty bytes input", ContentBlock{Type: "tool_use", ID: "tu_4", Name: "noop", Input: json.RawMessage("")}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := json.Marshal(tc.block)
+			if err != nil {
+				t.Fatalf("marshal failed: %v", err)
+			}
+			s := string(data)
+			if !strings.Contains(s, `"input":{}`) {
+				t.Errorf("expected %q to contain %q", s, `"input":{}`)
+			}
+			if strings.Contains(s, `"input":null`) {
+				t.Errorf("serialized output must not contain \"input\":null, got %s", s)
+			}
+			// Verify by round-trip that "input" key exists and is a JSON object.
+			var m map[string]any
+			if err := json.Unmarshal(data, &m); err != nil {
+				t.Fatalf("round-trip unmarshal failed: %v", err)
+			}
+			input, ok := m["input"]
+			if !ok {
+				t.Errorf("input field is missing from serialized output: %s", s)
+			}
+			if _, isObj := input.(map[string]any); !isObj {
+				t.Errorf("input field is not a JSON object, got %T: %v", input, input)
+			}
+		})
+	}
+}
+
+// TestContentBlock_MarshalJSON_PreservesValidToolUseInput ensures the
+// normalization only kicks in for null/empty inputs and leaves populated
+// inputs untouched.
+func TestContentBlock_MarshalJSON_PreservesValidToolUseInput(t *testing.T) {
+	b := ContentBlock{
+		Type:  "tool_use",
+		ID:    "tu_valid",
+		Name:  "browser_navigate",
+		Input: json.RawMessage(`{"url":"https://example.com"}`),
+	}
+	data, err := json.Marshal(b)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	s := string(data)
+	if !strings.Contains(s, `"input":{"url":"https://example.com"}`) {
+		t.Errorf("expected populated input to be preserved, got %s", s)
+	}
+}
+
+// TestContentBlock_MarshalJSON_PreservesNonObjectToolUseInput verifies that
+// scalar/array/string/bool tool inputs are NOT silently coerced to {} even
+// though they are not valid tool_use.input per Anthropic's schema. The
+// normalization intentionally targets only null/empty — any other value is
+// passed through so the provider bug stays visible instead of being masked.
+func TestContentBlock_MarshalJSON_PreservesNonObjectToolUseInput(t *testing.T) {
+	cases := []struct {
+		name     string
+		rawInput json.RawMessage
+		expect   string
+	}{
+		{"number", json.RawMessage(`42`), `"input":42`},
+		{"string", json.RawMessage(`"hello"`), `"input":"hello"`},
+		{"array", json.RawMessage(`[1,2,3]`), `"input":[1,2,3]`},
+		{"bool true", json.RawMessage(`true`), `"input":true`},
+		{"bool false", json.RawMessage(`false`), `"input":false`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := ContentBlock{Type: "tool_use", ID: "tu_scalar", Name: "odd_tool", Input: tc.rawInput}
+			data, err := json.Marshal(b)
+			if err != nil {
+				t.Fatalf("marshal failed: %v", err)
+			}
+			s := string(data)
+			if !strings.Contains(s, tc.expect) {
+				t.Errorf("expected %q in output, got %s", tc.expect, s)
+			}
+			if strings.Contains(s, `"input":{}`) {
+				t.Errorf("non-null scalar must not be coerced to {}, got %s", s)
+			}
+		})
+	}
+}
+
+// TestContentBlock_MarshalJSON_OtherBlocksNoInputField ensures the
+// normalization only applies to tool_use blocks. Other block types
+// (text, image, tool_result) must NOT have an "input" field injected.
+func TestContentBlock_MarshalJSON_OtherBlocksNoInputField(t *testing.T) {
+	cases := []struct {
+		name  string
+		block ContentBlock
+	}{
+		{"text block", ContentBlock{Type: "text", Text: "hello"}},
+		{"tool_result block", NewToolResultBlock("tu_1", "ok", false)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := json.Marshal(tc.block)
+			if err != nil {
+				t.Fatalf("marshal failed: %v", err)
+			}
+			s := string(data)
+			if strings.Contains(s, `"input"`) {
+				t.Errorf("non-tool_use block must not serialize an input field, got %s", s)
+			}
+		})
+	}
+}
+
+// TestCompletionRequest_Serialization_NoNullToolInput is the full-payload
+// regression test for issue #45. It constructs a CompletionRequest containing
+// a tool_use block with nil/null Input (simulating the poisoned history from
+// a previous gateway response) and asserts the final serialized JSON bytes
+// would not be rejected by Anthropic's schema validator.
+func TestCompletionRequest_Serialization_NoNullToolInput(t *testing.T) {
+	req := CompletionRequest{
+		Messages: []Message{
+			{Role: "user", Content: NewTextContent("take a snapshot")},
+			{Role: "assistant", Content: NewBlockContent([]ContentBlock{
+				{Type: "tool_use", ID: "tu_a", Name: "browser_snapshot"},                              // nil Input
+				{Type: "tool_use", ID: "tu_b", Name: "browser_close", Input: json.RawMessage("null")}, // poisoned
+			})},
+			{Role: "user", Content: NewBlockContent([]ContentBlock{
+				NewToolResultBlock("tu_a", "ok", false),
+				NewToolResultBlock("tu_b", "ok", false),
+			})},
+		},
+	}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	s := string(data)
+	if strings.Contains(s, `"input":null`) {
+		t.Errorf("payload must not contain \"input\":null, got %s", s)
+	}
+	// Each tool_use block must have a concrete input object in the final JSON.
+	// Count occurrences of "input":{} — we expect exactly 2.
+	if strings.Count(s, `"input":{}`) != 2 {
+		t.Errorf("expected 2 occurrences of \"input\":{}, got %d: %s", strings.Count(s, `"input":{}`), s)
+	}
+}
+
+// TestArgumentsString_NullHandling verifies that FunctionCall.ArgumentsString
+// also coerces literal "null" to "{}". This protects XML-fallback and any
+// consumer reading argument strings for logging/audit.
+func TestArgumentsString_NullHandling(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  json.RawMessage
+		want string
+	}{
+		{"nil", nil, "{}"},
+		{"empty", json.RawMessage(""), "{}"},
+		{"literal null", json.RawMessage("null"), "{}"},
+		{"whitespace null", json.RawMessage(" null "), "{}"},
+		{"empty object", json.RawMessage("{}"), "{}"},
+		{"populated object", json.RawMessage(`{"url":"x"}`), `{"url":"x"}`},
+		{"json-encoded string", json.RawMessage(`"already a string"`), "already a string"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fc := FunctionCall{Name: "noop", Arguments: tc.raw}
+			got := fc.ArgumentsString()
+			if got != tc.want {
+				t.Errorf("ArgumentsString() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

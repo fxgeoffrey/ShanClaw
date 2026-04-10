@@ -132,7 +132,7 @@ func TestAgentLoop_CompactionAndMemoryPersist(t *testing.T) {
 	// Run with a big message
 	result, usage, err := loop.Run(context.Background(),
 		"Explain the complete system architecture. Think through each component step by step. Be thorough.",
-		nil)
+		nil, nil)
 	if err != nil {
 		t.Logf("Run error (may be iteration limit): %v", err)
 	}
@@ -659,7 +659,7 @@ func TestAgentLoop_ReactiveCompaction(t *testing.T) {
 
 	result, usage, err := loop.Run(context.Background(),
 		"Analyze each component of the system. Think through every step carefully.",
-		nil)
+		nil, nil)
 	if err != nil {
 		t.Logf("Run error: %v", err)
 	}
@@ -796,7 +796,7 @@ func TestAgentLoop_ReactiveCompactionNoDoubleRetry(t *testing.T) {
 	loop.SetMemoryDir(t.TempDir())
 	loop.SetHandler(handler)
 
-	_, _, err := loop.Run(context.Background(), "Trigger reactive compaction that fails on retry too.", nil)
+	_, _, err := loop.Run(context.Background(), "Trigger reactive compaction that fails on retry too.", nil, nil)
 
 	// Should get an error — NOT an infinite loop
 	if err == nil {
@@ -892,7 +892,7 @@ func TestAgentLoop_ReactiveCompaction_UsesEmergencyFallbackWhenSoftStillOverBudg
 		{Role: "assistant", Content: client.NewTextContent("third reply")},
 	}
 
-	result, _, err := loop.Run(context.Background(), "trigger reactive overflow", history)
+	result, _, err := loop.Run(context.Background(), "trigger reactive overflow", nil, history)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

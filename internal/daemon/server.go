@@ -1078,7 +1078,7 @@ func isJSONNull(raw json.RawMessage) bool {
 }
 
 const (
-	maxBodySize   = 1 << 20 // 1 MB
+	maxBodySize   = 50 << 20 // 50 MB — accommodates base64-encoded attachments (30 MB file → ~40 MB base64)
 	maxUploadSize = 10 << 20
 )
 

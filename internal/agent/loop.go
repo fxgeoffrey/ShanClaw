@@ -302,6 +302,7 @@ type AgentLoop struct {
 	memoryDir         string      // directory containing MEMORY.md; re-read each Run(), write-before-compact target
 	stickyContext     string      // session-scoped facts injected verbatim into system prompt; never truncated
 	outputFormat      string      // "markdown" (default) or "plain" — controls formatting guidance in volatile context
+	userFilePaths     []string    // paths from user-attached file_ref blocks — auto-approved for tool access
 	workingSet        *WorkingSet // session-scoped deferred schema cache injected by the caller
 	sessionID         string      // session ID for audit log correlation
 	sessionCWD        string      // session-scoped working directory; set by runner/TUI before Run()
@@ -502,6 +503,12 @@ func (a *AgentLoop) SetSessionCWD(cwd string) {
 	a.sessionCWD = cwd
 }
 
+// SetUserFilePaths registers file paths from user-attached file_ref blocks.
+// Tool calls whose arguments contain any of these paths are auto-approved.
+func (a *AgentLoop) SetUserFilePaths(paths []string) {
+	a.userFilePaths = paths
+}
+
 // SpillCleanupFunc returns a closure that removes disk-spilled tool result
 // files for the current session ID. The session ID is captured at call time,
 // so the closure is safe to register early and invoke later (e.g. on
@@ -598,7 +605,7 @@ func reactiveSummaryInput(messages []client.Message, priorSummary string) []clie
 	}
 }
 
-func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []client.Message) (string, *TurnUsage, error) {
+func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []client.ContentBlock, history []client.Message) (string, *TurnUsage, error) {
 	a.injectedMessages = nil // reset for this run
 	a.runMessages = nil      // reset for this run
 	a.runMsgInjected = nil   // reset for this run
@@ -719,8 +726,25 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 	if history != nil {
 		messages = append(messages, ctxwin.SanitizeHistory(history)...)
 	}
-	scaffoldedUserText := assembleUserMessage(parts, userMessage)
-	messages = append(messages, client.Message{Role: "user", Content: client.NewTextContent(scaffoldedUserText)})
+	var scaffoldedUserText string
+	if len(userContent) > 0 && hasNonTextBlocks(userContent) {
+		// Multimodal (images present): must use block array format.
+		scaffoldedUserText = assembleUserMessage(parts, userMessage)
+		blocks := make([]client.ContentBlock, 0, 1+len(userContent))
+		blocks = append(blocks, client.ContentBlock{Type: "text", Text: scaffoldedUserText})
+		blocks = append(blocks, userContent...)
+		messages = append(messages, client.Message{Role: "user", Content: client.NewBlockContent(blocks)})
+	} else {
+		// Text-only: merge content block texts into the user message string.
+		merged := userMessage
+		for _, b := range userContent {
+			if b.Type == "text" && b.Text != "" {
+				merged += "\n\n" + b.Text
+			}
+		}
+		scaffoldedUserText = assembleUserMessage(parts, merged)
+		messages = append(messages, client.Message{Role: "user", Content: client.NewTextContent(scaffoldedUserText)})
+	}
 
 	// Track where new messages start so RunMessages() can return only this run's
 	// conversation (user prompt + tool calls + results + assistant replies),
@@ -2061,7 +2085,21 @@ func (a *AgentLoop) checkPermissionAndApproval(ctx context.Context, toolName, ar
 			if decision == "allow" {
 				return "allow", true
 			}
-			// decision == "ask" — fall through to existing approval logic
+			// decision == "ask" — fall through; may be auto-approved by user file paths below
+		}
+	}
+
+	// Auto-approve tool calls that operate on user-uploaded file paths.
+	// Checked AFTER hard-block/deny so destructive commands cannot piggyback.
+	// Only exact path matches are considered — no substring matching.
+	if len(a.userFilePaths) > 0 {
+		if toolPath := extractToolPath(toolName, argsStr); toolPath != "" {
+			cleaned := filepath.Clean(toolPath)
+			for _, fp := range a.userFilePaths {
+				if cleaned == filepath.Clean(fp) {
+					return "allow", true
+				}
+			}
 		}
 	}
 
@@ -2090,6 +2128,48 @@ func (a *AgentLoop) checkPermissionAndApproval(ctx context.Context, toolName, ar
 		return "ask", approved
 	}
 	return "allow", true
+}
+
+// hasNonTextBlocks returns true if any block is not a text block (e.g., image).
+func hasNonTextBlocks(blocks []client.ContentBlock) bool {
+	for _, b := range blocks {
+		if b.Type != "text" {
+			return true
+		}
+	}
+	return false
+}
+
+// extractToolPath extracts the primary file path from a tool's JSON arguments.
+// Returns empty string if the tool doesn't operate on file paths or parsing fails.
+func extractToolPath(toolName, argsJSON string) string {
+	var m map[string]interface{}
+	if err := json.Unmarshal([]byte(argsJSON), &m); err != nil {
+		return ""
+	}
+	// Map tool names to their path-carrying field.
+	switch toolName {
+	case "file_read", "file_write", "file_edit":
+		if v, ok := m["path"].(string); ok {
+			return v
+		}
+		if v, ok := m["file_path"].(string); ok {
+			return v
+		}
+	case "glob":
+		if v, ok := m["path"].(string); ok {
+			return v
+		}
+	case "grep":
+		if v, ok := m["path"].(string); ok {
+			return v
+		}
+	case "directory_list":
+		if v, ok := m["path"].(string); ok {
+			return v
+		}
+	}
+	return ""
 }
 
 // logAudit writes an audit entry if the auditor is configured.

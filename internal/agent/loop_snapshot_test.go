@@ -64,7 +64,7 @@ func TestAgentLoop_SnapshotStripsScaffolding(t *testing.T) {
 
 	rawUser := "remind me to water the plants every morning at 8am"
 
-	if _, _, err := loop.Run(context.Background(), rawUser, nil); err != nil {
+	if _, _, err := loop.Run(context.Background(), rawUser, nil, nil); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -136,7 +136,7 @@ func TestAgentLoop_SnapshotExcludesInjectedMessages(t *testing.T) {
 	reg.Register(captor)
 	loop := NewAgentLoop(gw, reg, "medium", "", 10, 2000, 200, nil, nil, nil)
 
-	if _, _, err := loop.Run(context.Background(), "take a screenshot please", nil); err != nil {
+	if _, _, err := loop.Run(context.Background(), "take a screenshot please", nil, nil); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -184,7 +184,7 @@ func TestAgentLoop_SnapshotDoesNotLeakHistoryContent(t *testing.T) {
 	reg.Register(captor)
 	loop := NewAgentLoop(gw, reg, "medium", "", 5, 2000, 200, nil, nil, nil)
 
-	if _, _, err := loop.Run(context.Background(), "second real question", preFilteredHistory); err != nil {
+	if _, _, err := loop.Run(context.Background(), "second real question", nil, preFilteredHistory); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 

@@ -210,6 +210,7 @@ var daemonStartCmd = &cobra.Command{
 			}
 			req := daemon.RunAgentRequest{
 				Text:     msg.Text,
+				Content:  msg.Content,
 				Agent:    msg.AgentName,
 				Source:   source,
 				Channel:  msg.Channel,

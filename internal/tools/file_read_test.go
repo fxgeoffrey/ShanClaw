@@ -25,6 +25,66 @@ func TestFileRead_Run(t *testing.T) {
 	}
 }
 
+func TestFileRead_ImageReturnsVisionBlock(t *testing.T) {
+	dir := t.TempDir()
+	// Create a minimal valid PNG (1x1 pixel, red).
+	pngData := []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
+		0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, // IHDR chunk
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
+		0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41,
+		0x54, 0x08, 0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00,
+		0x00, 0x00, 0x03, 0x00, 0x01, 0x36, 0x28, 0x19,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E,
+		0x44, 0xAE, 0x42, 0x60, 0x82, // IEND chunk
+	}
+	path := filepath.Join(dir, "test.png")
+	os.WriteFile(path, pngData, 0644)
+
+	tool := &FileReadTool{}
+	result, err := tool.Run(context.Background(), `{"path": "`+path+`"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error result: %s", result.Content)
+	}
+	if len(result.Images) != 1 {
+		t.Fatalf("expected 1 image block, got %d", len(result.Images))
+	}
+	if result.Images[0].MediaType != "image/png" {
+		t.Errorf("expected image/png, got %s", result.Images[0].MediaType)
+	}
+	if result.Images[0].Data == "" {
+		t.Error("expected non-empty base64 data")
+	}
+	if !contains(result.Content, "test.png") {
+		t.Errorf("expected content to reference filename, got: %s", result.Content)
+	}
+}
+
+func TestFileRead_ImageTooLarge(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "huge.png")
+	// Create file just over the limit
+	f, _ := os.Create(path)
+	f.Truncate(maxImageReadSize + 1)
+	f.Close()
+
+	tool := &FileReadTool{}
+	result, err := tool.Run(context.Background(), `{"path": "`+path+`"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Error("expected error for oversized image")
+	}
+	if !contains(result.Content, "too large") {
+		t.Errorf("expected 'too large' message, got: %s", result.Content)
+	}
+}
+
 func TestFileRead_NotFound(t *testing.T) {
 	tool := &FileReadTool{}
 	result, err := tool.Run(context.Background(), `{"path": "/nonexistent/file.txt"}`)

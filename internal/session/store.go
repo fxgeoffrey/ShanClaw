@@ -25,17 +25,19 @@ type MessageMeta struct {
 }
 
 type Session struct {
-	SchemaVersion int              `json:"schema_version,omitempty"`
-	ID            string           `json:"id"`
-	CreatedAt     time.Time        `json:"created_at"`
-	UpdatedAt     time.Time        `json:"updated_at"`
-	Title         string           `json:"title"`
-	CWD           string           `json:"cwd"`
-	Messages      []client.Message `json:"messages"`
-	RemoteTasks   []string         `json:"remote_tasks,omitempty"`
-	MessageMeta   []MessageMeta    `json:"message_meta,omitempty"`
-	Source        string           `json:"source,omitempty"`  // "slack", "line", "shanclaw", "webhook"
-	Channel       string           `json:"channel,omitempty"` // source channel/group identifier
+	SchemaVersion   int              `json:"schema_version,omitempty"`
+	ID              string           `json:"id"`
+	CreatedAt       time.Time        `json:"created_at"`
+	UpdatedAt       time.Time        `json:"updated_at"`
+	Title           string           `json:"title"`
+	CWD             string           `json:"cwd"`
+	Messages        []client.Message `json:"messages"`
+	RemoteTasks     []string         `json:"remote_tasks,omitempty"`
+	MessageMeta     []MessageMeta    `json:"message_meta,omitempty"`
+	Source          string           `json:"source,omitempty"`            // "slack", "line", "shanclaw", "webhook"
+	Channel         string           `json:"channel,omitempty"`           // source channel/group identifier
+	SummaryCache    string           `json:"summary_cache,omitempty"`     // cached summary Markdown
+	SummaryCacheKey string           `json:"summary_cache_key,omitempty"` // invalidation key for cached summary
 }
 
 // SourceAt returns the source for message at index i, or "unknown" if not available.
@@ -149,6 +151,26 @@ func (s *Store) Save(sess *Session) error {
 		s.index.UpsertSession(sess) // best-effort, don't fail save on index error
 	}
 	return nil
+}
+
+// PatchSummaryCache 从磁盘重新读取 session 的最新版本，仅更新摘要缓存字段后写回。
+// 避免覆盖在初次 Load 和写入之间被 agent loop 追加的新消息。
+// 不更新 UpdatedAt，不影响 session 排序。
+func (s *Store) PatchSummaryCache(id, summary, cacheKey string) error {
+	sess, err := s.Load(id)
+	if err != nil {
+		return err
+	}
+	sess.SummaryCache = summary
+	sess.SummaryCacheKey = cacheKey
+
+	data, err := json.MarshalIndent(sess, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal session: %w", err)
+	}
+
+	path := filepath.Join(s.dir, sess.ID+".json")
+	return os.WriteFile(path, data, 0600)
 }
 
 func (s *Store) Load(id string) (*Session, error) {

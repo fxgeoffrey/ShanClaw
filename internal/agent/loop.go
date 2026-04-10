@@ -297,7 +297,7 @@ type InjectedMessage struct {
 }
 
 type AgentLoop struct {
-	client            *client.GatewayClient
+	client            client.LLMClient
 	tools             *ToolRegistry
 	modelTier         string
 	handler           EventHandler
@@ -334,7 +334,7 @@ type AgentLoop struct {
 	lastRunStatus     RunStatus
 }
 
-func NewAgentLoop(gw *client.GatewayClient, tools *ToolRegistry, modelTier string, shannonDir string, maxIter int, resultTrunc int, argsTrunc int, perms *permissions.PermissionsConfig, auditor *audit.AuditLogger, hookRunner *hooks.HookRunner) *AgentLoop {
+func NewAgentLoop(gw client.LLMClient, tools *ToolRegistry, modelTier string, shannonDir string, maxIter int, resultTrunc int, argsTrunc int, perms *permissions.PermissionsConfig, auditor *audit.AuditLogger, hookRunner *hooks.HookRunner) *AgentLoop {
 	if maxIter <= 0 {
 		maxIter = 25
 	}
@@ -889,6 +889,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		toolsUsed            = make(map[string]int)
 		totalToolCalls       int
 		lastText             string
+		streamingText        strings.Builder // accumulates streaming deltas for cancel recovery
 		truncatedText        strings.Builder // accumulates text from max_tokens continuations
 		continuationCount    int
 		afterCheckpoint      bool
@@ -978,6 +979,15 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				messages = append(messages, client.Message{
 					Role:    "assistant",
 					Content: client.NewTextContent(lastText),
+				})
+				stampMessage()
+			} else if i == 0 {
+				// First iteration, no LLM response yet. Insert a placeholder so
+				// the session has an assistant turn between user messages. Without
+				// this, resume produces [user, user] which confuses the LLM.
+				messages = append(messages, client.Message{
+					Role:    "assistant",
+					Content: client.NewTextContent("[cancelled before response]"),
 				})
 				stampMessage()
 			}
@@ -1154,8 +1164,10 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 		for attempt := 0; ; attempt++ {
 			// On retries, skip streaming to avoid duplicate partial deltas.
 			if attempt == 0 && a.enableStreaming && a.handler != nil {
+				streamingText.Reset()
 				resp, err = a.client.CompleteStream(ctx, req, func(delta client.StreamDelta) {
 					a.handler.OnStreamDelta(delta.Text)
+					streamingText.WriteString(delta.Text)
 				})
 				// Fall back to non-streaming if gateway doesn't support it
 				if err != nil {
@@ -1168,9 +1180,27 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 				break
 			}
 			if ctx.Err() != nil {
+				// Preserve any partial streaming text so the next resume sees
+				// what the assistant was saying before cancel interrupted it.
+				partial := streamingText.String()
+				if partial != "" {
+					messages = append(messages, client.Message{
+						Role:    "assistant",
+						Content: client.NewTextContent(partial),
+					})
+					stampMessage()
+				} else {
+					// No streaming text captured. Insert a placeholder so the
+					// session has an assistant turn between user messages.
+					messages = append(messages, client.Message{
+						Role:    "assistant",
+						Content: client.NewTextContent("[cancelled before response]"),
+					})
+					stampMessage()
+				}
 				captureRunMessages()
 				setRunStatus(runstatus.CodeFromError(ctx.Err()), false)
-				return "", usage, fmt.Errorf("LLM call cancelled: %w", ctx.Err())
+				return partial, usage, fmt.Errorf("LLM call cancelled: %w", ctx.Err())
 			}
 			// Reactive compaction: if the error is a context-length overflow,
 			// try the normal compaction profile first so summary quality stays
@@ -1295,9 +1325,22 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, history []clien
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
+				partial := streamingText.String()
+				if partial != "" {
+					messages = append(messages, client.Message{
+						Role:    "assistant",
+						Content: client.NewTextContent(partial),
+					})
+				} else {
+					messages = append(messages, client.Message{
+						Role:    "assistant",
+						Content: client.NewTextContent("[cancelled before response]"),
+					})
+				}
+				stampMessage()
 				captureRunMessages()
 				setRunStatus(runstatus.CodeFromError(ctx.Err()), false)
-				return "", usage, fmt.Errorf("LLM call cancelled: %w", ctx.Err())
+				return partial, usage, fmt.Errorf("LLM call cancelled: %w", ctx.Err())
 			}
 		}
 

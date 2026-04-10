@@ -129,16 +129,22 @@ func TestResolveEffectiveCWD_Priority(t *testing.T) {
 		{"request wins", "/req", "/sess", "/agent", "/req"},
 		{"session wins when no request", "", "/sess", "/agent", "/sess"},
 		{"agent wins when no request or session", "", "", "/agent", "/agent"},
-		{"fallback to process cwd", "", "", "", ""},
+		{"fallback to home dir", "", "", "", ""},
 	}
+	home, _ := os.UserHomeDir()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := ResolveEffectiveCWD(tt.request, tt.session, tt.agent)
 			if tt.want != "" && got != tt.want {
 				t.Errorf("expected %q, got %q", tt.want, got)
 			}
-			if tt.want == "" && got == "" {
-				t.Error("fallback should return non-empty os.Getwd()")
+			if tt.want == "" {
+				if got == "" {
+					t.Error("fallback should return non-empty directory")
+				}
+				if got != home {
+					t.Errorf("fallback should return $HOME %q, got %q", home, got)
+				}
 			}
 		})
 	}

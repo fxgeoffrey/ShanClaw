@@ -92,12 +92,15 @@ func IsUnderSessionCWD(ctx context.Context, path string) bool {
 }
 
 // ResolveEffectiveCWD returns the first non-empty value among requestCWD,
-// sessionCWD, agentCWD, falling back to os.Getwd().
+// sessionCWD, agentCWD, falling back to $HOME then os.Getwd().
 func ResolveEffectiveCWD(requestCWD, sessionCWD, agentCWD string) string {
 	for _, cwd := range []string{requestCWD, sessionCWD, agentCWD} {
 		if cwd != "" {
 			return cwd
 		}
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return home
 	}
 	cwd, _ := os.Getwd()
 	return cwd

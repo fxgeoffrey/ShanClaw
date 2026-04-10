@@ -27,9 +27,11 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/audit"
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
 	"github.com/Kocoro-lab/ShanClaw/internal/config"
+	ctxwin "github.com/Kocoro-lab/ShanClaw/internal/context"
 	"github.com/Kocoro-lab/ShanClaw/internal/cwdctx"
 	"github.com/Kocoro-lab/ShanClaw/internal/hooks"
 	"github.com/Kocoro-lab/ShanClaw/internal/instructions"
+	"github.com/Kocoro-lab/ShanClaw/internal/permissions"
 	"github.com/Kocoro-lab/ShanClaw/internal/runstatus"
 	"github.com/Kocoro-lab/ShanClaw/internal/session"
 	"github.com/Kocoro-lab/ShanClaw/internal/skills"
@@ -83,6 +85,14 @@ type outputBlock struct {
 	rerender func(width int) string // optional: re-render at new width (e.g. startup header)
 }
 
+// rerenderDoneMsg signals that the ClearScreen→Println sequence from
+// rerenderOutput has completed, so incremental flushPrints can resume.
+type rerenderDoneMsg struct{}
+
+// historyLoadedMsg is sent after session history finishes loading in a
+// goroutine, so we can re-render at the current terminal width.
+type historyLoadedMsg struct{}
+
 // spinnerTickMsg is a slow fallback that advances spinner phrase text
 type spinnerTickMsg struct{}
 
@@ -120,6 +130,7 @@ type Model struct {
 	baseCfg             *config.Config
 	cfg                 *config.Config
 	gateway             *client.GatewayClient
+	llmClient           client.LLMClient
 	sessions            *session.Manager
 	toolRegistry        *agent.ToolRegistry
 	toolCleanup         func()
@@ -171,6 +182,14 @@ type Model struct {
 	headerCWD       string                   // cached working directory
 	markdownCacheMu sync.RWMutex
 	markdownCache   map[string]string
+	// Input history
+	inputHistory []string // past submitted inputs (oldest first)
+	historyIdx   int      // -1 = current input, 0..len-1 = history position (from end)
+	historySaved string   // current input saved when entering history
+	lastEscTime  time.Time // for double-escape detection
+	sessionAllowed      map[string]bool // tools always-allowed for this session
+	pendingApprovalTool string          // tool name awaiting approval
+	rerenderPending     bool            // true while rerenderOutput sequence is in flight
 }
 
 type slashCmd struct {
@@ -191,6 +210,13 @@ func (m *Model) SetBypassPermissions(bypass bool) {
 	}
 }
 
+func (m *Model) modelDisplayLabel() string {
+	if m.cfg.Provider == "ollama" {
+		return "ollama/" + m.cfg.Ollama.Model
+	}
+	return m.cfg.ModelTier
+}
+
 func (m *Model) cwd() string {
 	if m.sessions != nil {
 		if sess := m.sessions.Current(); sess != nil && sess.CWD != "" {
@@ -204,10 +230,10 @@ func (m *Model) cwd() string {
 // finishHeaderAnimation completes the startup animation, flushes the final
 // header to scrollback, and transitions to stateInput.
 func (m *Model) finishHeaderAnimation() tea.Cmd {
-	finalHeader := renderStartupHeader(headerTotalFrames-1, m.width, m.version, m.cfg.ModelTier, m.cfg.Endpoint, m.headerCWD, m.headerSessions, m.headerTipIdx)
+	finalHeader := renderStartupHeader(headerTotalFrames-1, m.width, m.version, m.modelDisplayLabel(), m.cfg.Endpoint, m.headerCWD, m.headerSessions, m.headerTipIdx)
 	// Capture stable values for the rerender closure so the header can be
 	// re-rendered at a new width on terminal resize.
-	version, tier, ep, cwd := m.version, m.cfg.ModelTier, m.cfg.Endpoint, m.headerCWD
+	version, tier, ep, cwd := m.version, m.modelDisplayLabel(), m.cfg.Endpoint, m.headerCWD
 	sessions, tipIdx := m.headerSessions, m.headerTipIdx
 	m.output = append(m.output, outputBlock{
 		rendered: finalHeader,
@@ -220,10 +246,14 @@ func (m *Model) finishHeaderAnimation() tea.Cmd {
 	m.state = stateInput
 
 	if m.headerHealth != nil {
+		ep := m.cfg.Endpoint
+		if m.cfg.Provider == "ollama" {
+			ep = m.cfg.Ollama.Endpoint
+		}
 		if m.headerHealth.gatewayOK {
-			m.appendOutput(fmt.Sprintf("  Connected to %s", m.cfg.Endpoint))
+			m.appendOutput(fmt.Sprintf("  Connected to %s", ep))
 		} else {
-			m.appendOutput(fmt.Sprintf("  Warning: API unreachable at %s", m.cfg.Endpoint))
+			m.appendOutput(fmt.Sprintf("  Warning: API unreachable at %s", ep))
 		}
 		if m.headerHealth.updateMsg != "" {
 			m.appendOutput(fmt.Sprintf("  %s", m.headerHealth.updateMsg))
@@ -259,7 +289,6 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	ta.BlurredStyle.CursorLine = lipgloss.NewStyle()
 
-	gateway := client.NewGatewayClient(cfg.Endpoint, cfg.APIKey)
 	shannonDir := config.ShannonDir()
 	agentsDir := filepath.Join(shannonDir, "agents")
 	if err := agents.EnsureBuiltins(agentsDir, version); err != nil {
@@ -291,6 +320,21 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 		runtimeCfg = config.Clone(cfg)
 	}
 
+	// Create LLM client from runtimeCfg (after project-level overlay) so
+	// project-local provider overrides take effect.
+	var llmClient client.LLMClient
+	var gateway *client.GatewayClient
+	if runtimeCfg.Provider == "ollama" {
+		model := runtimeCfg.Ollama.Model
+		if runtimeCfg.Agent.Model != "" {
+			model = runtimeCfg.Agent.Model
+		}
+		llmClient = client.NewOllamaClient(runtimeCfg.Ollama.Endpoint, model)
+	} else {
+		gateway = client.NewGatewayClient(runtimeCfg.Endpoint, runtimeCfg.APIKey)
+		llmClient = gateway
+	}
+
 	// Create audit logger (best-effort)
 	var auditor *audit.AuditLogger
 	if shannonDir != "" {
@@ -305,14 +349,14 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 	tools.RegisterSessionSearch(reg, sessMgr)
 
 	hookRunner := hooks.NewHookRunner(runtimeCfg.Hooks)
-	loop := agent.NewAgentLoop(gateway, reg, runtimeCfg.ModelTier, shannonDir, runtimeCfg.Agent.MaxIterations, runtimeCfg.Tools.ResultTruncation, runtimeCfg.Tools.ArgsTruncation, &runtimeCfg.Permissions, auditor, hookRunner)
+	loop := agent.NewAgentLoop(llmClient, reg, runtimeCfg.ModelTier, shannonDir, runtimeCfg.Agent.MaxIterations, runtimeCfg.Tools.ResultTruncation, runtimeCfg.Tools.ArgsTruncation, &runtimeCfg.Permissions, auditor, hookRunner)
 	loop.SetMaxTokens(runtimeCfg.Agent.MaxTokens)
 	loop.SetTemperature(runtimeCfg.Agent.Temperature)
 	loop.SetContextWindow(runtimeCfg.Agent.ContextWindow)
 	if runtimeCfg.Agent.Model != "" {
 		loop.SetSpecificModel(runtimeCfg.Agent.Model)
 	}
-	if runtimeCfg.Agent.Thinking {
+	if runtimeCfg.Agent.Thinking && runtimeCfg.Provider != "ollama" {
 		if runtimeCfg.Agent.ThinkingMode == "enabled" {
 			loop.SetThinking(&client.ThinkingConfig{Type: "enabled", BudgetTokens: runtimeCfg.Agent.ThinkingBudget})
 		} else {
@@ -374,6 +418,7 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 		baseCfg:        cfg,
 		cfg:            runtimeCfg,
 		gateway:        gateway,
+		llmClient:      llmClient,
 		sessions:       sessMgr,
 		agentLoop:      loop,
 		textarea:       ta,
@@ -392,6 +437,8 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 		skillsPtr:      skillsPtr,
 		markdownCache:  make(map[string]string),
 		slashCommands:  instanceCmds,
+		sessionAllowed: make(map[string]bool),
+		historyIdx:     -1,
 	}
 
 	return m
@@ -444,14 +491,16 @@ func (m *Model) rebuildAgentLoop() {
 	}
 
 	m.hookRunner = hooks.NewHookRunner(m.cfg.Hooks)
-	loop := agent.NewAgentLoop(m.gateway, m.toolRegistry, m.cfg.ModelTier, m.shannonDir, m.cfg.Agent.MaxIterations, m.cfg.Tools.ResultTruncation, m.cfg.Tools.ArgsTruncation, &m.cfg.Permissions, m.auditor, m.hookRunner)
+	loop := agent.NewAgentLoop(m.llmClient, m.toolRegistry, m.cfg.ModelTier, m.shannonDir, m.cfg.Agent.MaxIterations, m.cfg.Tools.ResultTruncation, m.cfg.Tools.ArgsTruncation, &m.cfg.Permissions, m.auditor, m.hookRunner)
 	loop.SetMaxTokens(m.cfg.Agent.MaxTokens)
 	loop.SetTemperature(m.cfg.Agent.Temperature)
 	loop.SetContextWindow(m.cfg.Agent.ContextWindow)
 	if m.cfg.Agent.Model != "" {
 		loop.SetSpecificModel(m.cfg.Agent.Model)
+	} else if m.cfg.Provider == "ollama" && m.cfg.Ollama.Model != "" {
+		loop.SetSpecificModel(m.cfg.Ollama.Model)
 	}
-	if m.cfg.Agent.Thinking {
+	if m.cfg.Agent.Thinking && m.cfg.Provider != "ollama" {
 		if m.cfg.Agent.ThinkingMode == "enabled" {
 			loop.SetThinking(&client.ThinkingConfig{Type: "enabled", BudgetTokens: m.cfg.Agent.ThinkingBudget})
 		} else {
@@ -562,13 +611,15 @@ func (m *Model) loadServerTools() tea.Cmd {
 
 		reg, _, cleanup, err := tools.CompleteRegistration(ctx, m.gateway, m.cfg, m.toolRegistry, m.agentOverride)
 
-		// Cloud delegation tool
-		var cloudAgentName, cloudAgentPrompt string
-		if m.agentOverride != nil {
-			cloudAgentName = m.agentOverride.Name
-			cloudAgentPrompt = m.agentOverride.Prompt
+		// Cloud delegation tool (gateway only)
+		if m.gateway != nil {
+			var cloudAgentName, cloudAgentPrompt string
+			if m.agentOverride != nil {
+				cloudAgentName = m.agentOverride.Name
+				cloudAgentPrompt = m.agentOverride.Prompt
+			}
+			tools.RegisterCloudDelegate(reg, m.gateway, m.cfg, nil, cloudAgentName, cloudAgentPrompt)
 		}
-		tools.RegisterCloudDelegate(reg, m.gateway, m.cfg, nil, cloudAgentName, cloudAgentPrompt)
 
 		return serverToolsLoadedMsg{
 			registry: reg,
@@ -584,7 +635,13 @@ func (m *Model) checkHealth() tea.Cmd {
 		defer cancel()
 
 		msg := healthCheckMsg{}
-		msg.gatewayOK = m.gateway.Health(ctx) == nil
+		if m.gateway != nil {
+			msg.gatewayOK = m.gateway.Health(ctx) == nil
+		} else if oc, ok := m.llmClient.(*client.OllamaClient); ok {
+			msg.gatewayOK = oc.CheckHealth(ctx) == nil
+		} else {
+			msg.gatewayOK = true
+		}
 
 		if m.cfg.AutoUpdateCheck {
 			shannonDir := config.ShannonDir()
@@ -598,13 +655,16 @@ func (m *Model) checkHealth() tea.Cmd {
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	model, cmd := m.update(msg)
-	// Note: when cmd is rerenderOutput (e.g. agentDoneMsg, approvalRequestMsg),
-	// it already drained pendingPrints, so flushPrints returns nil here.
-	if flush := m.flushPrints(); flush != nil {
-		if cmd != nil {
-			cmd = tea.Sequence(flush, cmd)
-		} else {
-			cmd = flush
+	// Suppress incremental flushes while a rerenderOutput sequence is in
+	// flight — prevents streamOutputMsg from interleaving between
+	// ClearScreen and Println (Bug #3 fix).
+	if !m.rerenderPending {
+		if flush := m.flushPrints(); flush != nil {
+			if cmd != nil {
+				cmd = tea.Sequence(flush, cmd)
+			} else {
+				cmd = flush
+			}
 		}
 	}
 	return model, cmd
@@ -645,12 +705,10 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					default:
 					}
 				}
-				// Roll back the user message added in handleSubmit
-				sess := m.sessions.Current()
-				if len(sess.Messages) > 0 && sess.Messages[len(sess.Messages)-1].Role == "user" {
-					sess.Messages = sess.Messages[:len(sess.Messages)-1]
-				}
-				m.sessions.Save()
+				// Don't roll back the user message — let the agent loop's
+				// RunMessages be saved by runAgentLoop when it completes.
+				// This preserves tool calls and partial responses so the
+				// next run has full context of what happened before cancel.
 				cancelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 				m.appendOutput(cancelStyle.Render("  [Cancelled]"))
 				m.state = stateInput
@@ -658,6 +716,17 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.menuVisible {
 				m.menuVisible = false
+				return m, nil
+			}
+			if m.state == stateInput && m.textarea.Value() != "" {
+				now := time.Now()
+				if !m.lastEscTime.IsZero() && now.Sub(m.lastEscTime) < 800*time.Millisecond {
+					m.textarea.SetValue("")
+					m.textarea.SetHeight(1)
+					m.lastEscTime = time.Time{}
+					return m, nil
+				}
+				m.lastEscTime = now
 				return m, nil
 			}
 		case tea.KeyTab:
@@ -693,6 +762,23 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+			if m.state == stateInput && !m.menuVisible && len(m.inputHistory) > 0 {
+				taLines := strings.Count(m.textarea.Value(), "\n") + 1
+				if taLines <= 1 { // only navigate history when single-line
+					if m.historyIdx == -1 {
+						m.historySaved = m.textarea.Value()
+					}
+					newIdx := m.historyIdx + 1
+					histLen := len(m.inputHistory)
+					if newIdx >= histLen {
+						newIdx = histLen - 1
+					}
+					m.historyIdx = newIdx
+					m.textarea.SetValue(m.inputHistory[histLen-1-newIdx])
+					m.textarea.CursorEnd()
+					return m, nil
+				}
+			}
 		case tea.KeyDown:
 			if m.state == stateInput && m.menuVisible && len(m.menuItems) > 0 {
 				m.menuIndex++
@@ -700,6 +786,20 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.menuIndex = 0
 				}
 				return m, nil
+			}
+			if m.state == stateInput && !m.menuVisible && m.historyIdx >= 0 {
+				taLines := strings.Count(m.textarea.Value(), "\n") + 1
+				if taLines <= 1 {
+					m.historyIdx--
+					if m.historyIdx < 0 {
+						m.textarea.SetValue(m.historySaved)
+					} else {
+						histLen := len(m.inputHistory)
+						m.textarea.SetValue(m.inputHistory[histLen-1-m.historyIdx])
+					}
+					m.textarea.CursorEnd()
+					return m, nil
+				}
 			}
 		}
 
@@ -710,6 +810,52 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.toolExpandLevel = 1
 			return m, m.flushPrints()
+		}
+
+		// Readline shortcuts (only in stateInput, single-line, not during menus).
+		// CharOffset is relative to the current wrapped line, so these shortcuts
+		// would slice the wrong position in multi-line input.
+		taLines := strings.Count(m.textarea.Value(), "\n") + 1
+		if m.state == stateInput && !m.menuVisible && taLines <= 1 {
+			switch msg.Type {
+			case tea.KeyCtrlK: // Delete to end of line
+				val := m.textarea.Value()
+				pos := m.textarea.LineInfo().CharOffset
+				runes := []rune(val)
+				if pos < len(runes) {
+					m.textarea.SetValue(string(runes[:pos]))
+				}
+				return m, nil
+			case tea.KeyCtrlU: // Delete to start of line
+				val := m.textarea.Value()
+				pos := m.textarea.LineInfo().CharOffset
+				runes := []rune(val)
+				if pos > 0 && pos <= len(runes) {
+					m.textarea.SetValue(string(runes[pos:]))
+					m.textarea.CursorStart()
+				}
+				return m, nil
+			case tea.KeyCtrlW: // Delete word backward
+				val := m.textarea.Value()
+				pos := m.textarea.LineInfo().CharOffset
+				runes := []rune(val)
+				if pos > 0 && pos <= len(runes) {
+					i := pos - 1
+					for i > 0 && runes[i] == ' ' {
+						i--
+					}
+					for i > 0 && runes[i-1] != ' ' {
+						i--
+					}
+					newVal := string(runes[:i]) + string(runes[pos:])
+					m.textarea.SetValue(newVal)
+					m.textarea.SetCursor(i)
+				}
+				return m, nil
+			case tea.KeyCtrlL: // Clear screen
+				m.output = nil
+				return m, m.rerenderOutput()
+			}
 		}
 
 		if m.state == stateSessionPicker {
@@ -734,6 +880,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.appendOutput(fmt.Sprintf("Error: %v", err))
 					} else {
 						m.resumedSession = true
+						m.sessionAllowed = make(map[string]bool)
 						m.applyRuntimeContext(sess)
 						m.loadSessionHistory(sess)
 					}
@@ -759,6 +906,14 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "n", "N":
 				select {
 				case m.approvalCh <- false:
+				default:
+				}
+				m.state = stateProcessing
+				return m, nil
+			case "a", "A":
+				m.sessionAllowed[m.pendingApprovalTool] = true
+				select {
+				case m.approvalCh <- true:
 				default:
 				}
 				m.state = stateProcessing
@@ -840,11 +995,20 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.rerenderOutput()
 
 	case approvalRequestMsg:
+		m.pendingApprovalTool = msg.tool
+		// Check session-level auto-approve
+		if m.sessionAllowed[msg.tool] {
+			select {
+			case m.approvalCh <- true:
+			default:
+			}
+			return m, nil
+		}
 		m.state = stateApproval
 		dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 		warnIcon := lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("?")
 		keyArg := toolKeyArg(msg.tool, msg.args)
-		m.appendOutput(dimStyle.Render(fmt.Sprintf("⏵ %s(%s)  %s  Allow?", msg.tool, keyArg, warnIcon)))
+		m.appendOutput(dimStyle.Render(fmt.Sprintf("⏵ %s(%s)  %s  Allow? [y/n/a]", msg.tool, keyArg, warnIcon)))
 		// Full repaint on state transition to avoid cursor mis-positioning
 		// (same race as agentDoneMsg — view changes before pending Println arrives).
 		return m, m.rerenderOutput()
@@ -925,6 +1089,32 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.toolExpandLevel = 0
 		return m, nil
 
+	case doctorDoneMsg:
+		m.state = stateInput
+		m.appendOutput(formatDoctorResults(msg.checks))
+		return m, m.rerenderOutput()
+
+	case compactDoneMsg:
+		m.state = stateInput
+		if msg.err != nil {
+			m.appendOutput(fmt.Sprintf("Compact failed: %v", msg.err))
+		} else {
+			m.appendOutput(formatCompactResult(msg))
+		}
+		return m, m.rerenderOutput()
+
+	case rerenderDoneMsg:
+		m.rerenderPending = false
+		// Flush any output that arrived during the rerender sequence
+		if flush := m.flushPrints(); flush != nil {
+			return m, flush
+		}
+		return m, nil
+
+	case historyLoadedMsg:
+		// Re-render at current width in case terminal was resized during load
+		return m, m.rerenderOutput()
+
 	case clipboardResultMsg:
 		if msg.err != nil {
 			m.appendOutput(fmt.Sprintf("Copy failed: %v", msg.err))
@@ -953,7 +1143,7 @@ func (m *Model) View() string {
 	// --- Input / status line ---
 	switch m.state {
 	case stateStartup:
-		sb.WriteString(renderStartupHeader(m.headerFrame, m.width, m.version, m.cfg.ModelTier, m.cfg.Endpoint, m.headerCWD, m.headerSessions, m.headerTipIdx))
+		sb.WriteString(renderStartupHeader(m.headerFrame, m.width, m.version, m.modelDisplayLabel(), m.cfg.Endpoint, m.headerCWD, m.headerSessions, m.headerTipIdx))
 	case stateInput:
 		sb.WriteString(bar)
 		sb.WriteString("\n")
@@ -961,7 +1151,7 @@ func (m *Model) View() string {
 		sb.WriteString("\n")
 		// Bottom bar with right-aligned model tier
 		tierDim := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
-		rightInfo := tierDim.Render(m.cfg.ModelTier)
+		rightInfo := tierDim.Render(m.modelDisplayLabel())
 		barWidth := m.width - lipgloss.Width(rightInfo)
 		if barWidth < 0 {
 			barWidth = 0
@@ -986,7 +1176,7 @@ func (m *Model) View() string {
 		// Bottom status bar with model tier + execution timer (like Claude Code)
 		elapsed := formatElapsed(time.Since(m.processingStartTime))
 		tierDim := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
-		rightInfo := tierDim.Render(m.cfg.ModelTier + " " + elapsed)
+		rightInfo := tierDim.Render(m.modelDisplayLabel() + " " + elapsed)
 		statusBarWidth := m.width - lipgloss.Width(rightInfo)
 		if statusBarWidth < 0 {
 			statusBarWidth = 0
@@ -995,7 +1185,7 @@ func (m *Model) View() string {
 	case stateApproval:
 		sb.WriteString(bar)
 		sb.WriteString("\n")
-		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("  [y/n] "))
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("  [y/n/a] "))
 		sb.WriteString("\n")
 		sb.WriteString(bar)
 	case stateSessionPicker:
@@ -1030,6 +1220,16 @@ func (m *Model) handleSubmit() (tea.Model, tea.Cmd) {
 	if input == "" {
 		return m, nil
 	}
+
+	// Record in history (skip duplicates of last entry)
+	if len(m.inputHistory) == 0 || m.inputHistory[len(m.inputHistory)-1] != input {
+		m.inputHistory = append(m.inputHistory, input)
+		if len(m.inputHistory) > 200 {
+			m.inputHistory = m.inputHistory[len(m.inputHistory)-200:]
+		}
+	}
+	m.historyIdx = -1
+	m.historySaved = ""
 
 	promptMark := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("252")).Render(">")
 	m.appendOutput(fmt.Sprintf("%s %s", promptMark, input))
@@ -1121,10 +1321,46 @@ func (m *Model) runAgentLoop(query string, history []client.Message) tea.Cmd {
 			m.agentLoop.SetWorkingSet(nil)
 		}
 		result, usage, err := m.agentLoop.Run(ctx, query, history)
-		if result != "" && (err == nil || errors.Is(err, agent.ErrMaxIterReached)) {
-			sess := m.sessions.Current()
-			sess.Messages = append(sess.Messages, client.Message{Role: "assistant", Content: client.NewTextContent(result)})
-			sess.MessageMeta = append(sess.MessageMeta, session.MessageMeta{Source: "local", Timestamp: session.TimePtr(time.Now())})
+
+		// Persist the run's messages to session. Use RunMessages() for
+		// rich history (tool_use/tool_result blocks) so resumed sessions
+		// give the LLM full context — including cancelled runs.
+		// Only mutate sess.Messages when we intend to save, so hard errors
+		// don't leave in-memory partial state without disk persistence.
+		sess := m.sessions.Current()
+		isCancelled := errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+		shouldPersist := isCancelled || err == nil || errors.Is(err, agent.ErrMaxIterReached)
+		if shouldPersist {
+			runMsgs := m.agentLoop.RunMessages()
+			runInjected := m.agentLoop.RunMessageInjected()
+			runTimestamps := m.agentLoop.RunMessageTimestamps()
+			if len(runMsgs) > 0 {
+				// RunMessages includes the user prompt as first entry;
+				// skip it since handleSubmit already appended it.
+				startIdx := 0
+				if runMsgs[0].Role == "user" {
+					startIdx = 1
+				}
+				fallbackTime := time.Now()
+				for i, msg := range runMsgs[startIdx:] {
+					idx := i + startIdx
+					ts := fallbackTime
+					if idx < len(runTimestamps) && !runTimestamps[idx].IsZero() {
+						ts = runTimestamps[idx]
+					}
+					sess.Messages = append(sess.Messages, msg)
+					meta := session.MessageMeta{Source: "local", Timestamp: session.TimePtr(ts)}
+					if idx < len(runInjected) && runInjected[idx] {
+						meta.SystemInjected = true
+					}
+					sess.MessageMeta = append(sess.MessageMeta, meta)
+				}
+			} else if result != "" {
+				// Fallback: flat text (no RunMessages, e.g. early error).
+				sess.Messages = append(sess.Messages, client.Message{Role: "assistant", Content: client.NewTextContent(result)})
+				sess.MessageMeta = append(sess.MessageMeta, session.MessageMeta{Source: "local", Timestamp: session.TimePtr(time.Now())})
+			}
+			m.sessions.Save()
 		}
 		return agentDoneMsg{result: result, usage: usage, err: err, status: m.agentLoop.LastRunStatus()}
 	}
@@ -1166,6 +1402,12 @@ func (m *Model) loadSessionHistory(sess *session.Session) {
 				m.sendOutput("")
 			}
 		}
+		// Trigger a re-render after load completes so content uses the
+		// current terminal width (fixes stale-width if resize happened
+		// during history loading — Bug #4).
+		if m.program != nil {
+			m.program.Send(historyLoadedMsg{})
+		}
 	}()
 }
 
@@ -1205,34 +1447,34 @@ func (m *Model) flushPrints() tea.Cmd {
 // rerenderOutput re-renders all output blocks at the current width and reprints them.
 // Used when the terminal is resized and when handing off from the startup
 // animation to scrollback-backed output.
+//
+// Sets rerenderPending to suppress flushPrints during the ClearScreen→Println
+// sequence, preventing streamOutputMsg from interleaving (fixes resize race).
 func (m *Model) rerenderOutput() tea.Cmd {
 	width := m.width
-	blocks := make([]outputBlock, len(m.output))
-	copy(blocks, m.output)
 
-	// Re-render blocks at new width (always, so future output uses new width).
-	for i, b := range blocks {
+	// Re-render blocks at new width.
+	for i, b := range m.output {
 		if b.rerender != nil {
-			blocks[i].rendered = b.rerender(width)
-			m.output[i].rendered = blocks[i].rendered
+			m.output[i].rendered = b.rerender(width)
 		} else if b.raw != "" {
-			blocks[i].rendered = m.renderMarkdownCached(b.raw, width)
-			m.output[i].rendered = blocks[i].rendered
+			m.output[i].rendered = m.renderMarkdownCached(b.raw, width)
 		}
 	}
 
-	lines := make([]string, 0, len(blocks))
-	for _, b := range blocks {
+	lines := make([]string, 0, len(m.output))
+	for _, b := range m.output {
 		lines = append(lines, b.rendered)
 	}
 
-	// The full repaint includes the latest output snapshot, so suppress any
-	// queued incremental prints from this update to avoid duplicate lines.
+	// Suppress incremental prints until the full repaint completes.
 	m.pendingPrints = m.pendingPrints[:0]
+	m.rerenderPending = true
 
 	return tea.Sequence(
 		tea.ClearScreen,
 		tea.Println(strings.Join(lines, "\n")),
+		func() tea.Msg { return rerenderDoneMsg{} },
 	)
 }
 
@@ -1358,6 +1600,11 @@ func (m *Model) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 		m.appendOutput(helpText())
 	case "/clear":
 		m.output = nil
+		sess := m.sessions.NewSession()
+		m.resumedSession = false
+		m.sessionAllowed = make(map[string]bool)
+		m.applyRuntimeContext(sess)
+		return m, m.rerenderOutput()
 	case "/sessions":
 		sessions, err := m.sessions.List()
 		if err != nil {
@@ -1375,6 +1622,7 @@ func (m *Model) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 			case "new":
 				sess := m.sessions.NewSession()
 				m.resumedSession = false
+				m.sessionAllowed = make(map[string]bool)
 				m.applyRuntimeContext(sess)
 				m.appendOutput("Started new session")
 			case "resume":
@@ -1391,6 +1639,7 @@ func (m *Model) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 						m.appendOutput(fmt.Sprintf("Error: %v", err))
 					} else {
 						m.resumedSession = true
+						m.sessionAllowed = make(map[string]bool)
 						m.applyRuntimeContext(sess)
 						m.loadSessionHistory(sess)
 					}
@@ -1398,21 +1647,66 @@ func (m *Model) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 			}
 		}
 	case "/model":
-		if len(parts) > 1 {
-			saveCfg := m.cfg
-			if m.baseCfg != nil {
-				m.baseCfg.ModelTier = parts[1]
-				saveCfg = m.baseCfg
-			}
-			m.cfg.ModelTier = parts[1]
-			m.agentLoop.SetModelTier(parts[1])
-			if err := config.Save(saveCfg); err != nil {
-				m.appendOutput(fmt.Sprintf("Model tier: %s (failed to save: %v)", parts[1], err))
+		if m.cfg.Provider == "ollama" {
+			if len(parts) > 1 {
+				newModel := parts[1]
+				m.cfg.Ollama.Model = newModel
+				if m.baseCfg != nil {
+					m.baseCfg.Ollama.Model = newModel
+				}
+				m.agentLoop.SetSpecificModel(newModel)
+				saveCfg := m.cfg
+				if m.baseCfg != nil {
+					saveCfg = m.baseCfg
+				}
+				if err := config.Save(saveCfg); err != nil {
+					m.appendOutput(fmt.Sprintf("Model: %s (failed to save: %v)", newModel, err))
+				} else {
+					m.appendOutput(fmt.Sprintf("Model: %s (saved)", newModel))
+				}
 			} else {
-				m.appendOutput(fmt.Sprintf("Model tier: %s (saved)", parts[1]))
+				oc, ok := m.llmClient.(*client.OllamaClient)
+				if !ok {
+					m.appendOutput(fmt.Sprintf("Current model: %s", m.cfg.Ollama.Model))
+					break
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				models, err := oc.ListModels(ctx)
+				cancel()
+				if err != nil {
+					m.appendOutput(fmt.Sprintf("Current model: %s (could not list: %v)", m.cfg.Ollama.Model, err))
+					break
+				}
+				var sb strings.Builder
+				sb.WriteString("Available models:\n")
+				for _, mdl := range models {
+					marker := "  "
+					if mdl.Name == m.cfg.Ollama.Model {
+						marker = "→ "
+					}
+					sizeGB := float64(mdl.Size) / 1e9
+					sb.WriteString(fmt.Sprintf("  %s%s (%.1f GB)\n", marker, mdl.Name, sizeGB))
+				}
+				sb.WriteString("\nUse /model <name> to switch")
+				m.appendOutput(sb.String())
 			}
 		} else {
-			m.appendOutput(fmt.Sprintf("Current model tier: %s", m.cfg.ModelTier))
+			if len(parts) > 1 {
+				saveCfg := m.cfg
+				if m.baseCfg != nil {
+					m.baseCfg.ModelTier = parts[1]
+					saveCfg = m.baseCfg
+				}
+				m.cfg.ModelTier = parts[1]
+				m.agentLoop.SetModelTier(parts[1])
+				if err := config.Save(saveCfg); err != nil {
+					m.appendOutput(fmt.Sprintf("Model tier: %s (failed to save: %v)", parts[1], err))
+				} else {
+					m.appendOutput(fmt.Sprintf("Model tier: %s (saved)", parts[1]))
+				}
+			} else {
+				m.appendOutput(fmt.Sprintf("Current model tier: %s", m.cfg.ModelTier))
+			}
 		}
 	case "/config":
 		m.appendOutput(formatConfigDisplay(m.cfg))
@@ -1461,6 +1755,115 @@ func (m *Model) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+	case "/status":
+		sess := m.sessions.Current()
+		agentName := "default"
+		if m.agentOverride != nil {
+			agentName = m.agentOverride.Name
+		}
+		sessID := "(none)"
+		msgCount := 0
+		tokenEst := 0
+		if sess != nil {
+			sessID = sess.ID
+			msgCount = len(sess.Messages)
+			tokenEst = ctxwin.EstimateTokens(sess.Messages)
+		}
+		ctxWindow := m.cfg.Agent.ContextWindow
+		if ctxWindow <= 0 {
+			ctxWindow = 128000
+		}
+		pct := float64(tokenEst) / float64(ctxWindow) * 100
+		toolCount := 0
+		if m.toolRegistry != nil {
+			toolCount = m.toolRegistry.Len()
+		}
+		dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+		m.appendOutput(dimStyle.Render(fmt.Sprintf(
+			"  Version:     %s\n"+
+				"  Model:       %s\n"+
+				"  Endpoint:    %s\n"+
+				"  Agent:       %s\n"+
+				"  Session:     %s (%d messages)\n"+
+				"  Context:     ~%s / %s tokens (%.1f%%)\n"+
+				"  Tools:       %d registered",
+			m.version, m.cfg.ModelTier, m.cfg.Endpoint, agentName,
+			sessID, msgCount,
+			formatTokenCount(tokenEst), formatTokenCount(ctxWindow), pct,
+			toolCount,
+		)))
+	case "/doctor":
+		m.appendOutput("Running diagnostics...")
+		m.state = stateProcessing
+		m.processingStartTime = time.Now()
+		return m, tea.Batch(m.runDoctor(), spinnerTick(), spinnerFrameTick())
+	case "/permissions":
+		if len(parts) == 1 {
+			m.appendOutput(formatPermissions(&m.cfg.Permissions))
+		} else {
+			sub := parts[1]
+			if len(parts) < 3 {
+				m.appendOutput("Usage: /permissions allow|deny|remove <pattern>")
+				break
+			}
+			pattern := strings.Join(parts[2:], " ")
+			switch sub {
+			case "allow":
+				m.cfg.Permissions.AllowedCommands = append(m.cfg.Permissions.AllowedCommands, pattern)
+				if m.baseCfg != nil {
+					m.baseCfg.Permissions.AllowedCommands = append(m.baseCfg.Permissions.AllowedCommands, pattern)
+				}
+				if err := config.Save(m.baseCfg); err != nil {
+					m.appendOutput(fmt.Sprintf("Allowed %q (save failed: %v)", pattern, err))
+				} else {
+					m.appendOutput(fmt.Sprintf("Allowed: %s (saved)", pattern))
+				}
+			case "deny":
+				m.cfg.Permissions.DeniedCommands = append(m.cfg.Permissions.DeniedCommands, pattern)
+				if m.baseCfg != nil {
+					m.baseCfg.Permissions.DeniedCommands = append(m.baseCfg.Permissions.DeniedCommands, pattern)
+				}
+				if err := config.Save(m.baseCfg); err != nil {
+					m.appendOutput(fmt.Sprintf("Denied %q (save failed: %v)", pattern, err))
+				} else {
+					m.appendOutput(fmt.Sprintf("Denied: %s (saved)", pattern))
+				}
+			case "remove":
+				removed := false
+				m.cfg.Permissions.AllowedCommands = removePattern(m.cfg.Permissions.AllowedCommands, pattern)
+				m.cfg.Permissions.DeniedCommands = removePattern(m.cfg.Permissions.DeniedCommands, pattern)
+				if m.baseCfg != nil {
+					before := len(m.baseCfg.Permissions.AllowedCommands) + len(m.baseCfg.Permissions.DeniedCommands)
+					m.baseCfg.Permissions.AllowedCommands = removePattern(m.baseCfg.Permissions.AllowedCommands, pattern)
+					m.baseCfg.Permissions.DeniedCommands = removePattern(m.baseCfg.Permissions.DeniedCommands, pattern)
+					after := len(m.baseCfg.Permissions.AllowedCommands) + len(m.baseCfg.Permissions.DeniedCommands)
+					removed = before != after
+				}
+				if removed {
+					config.Save(m.baseCfg)
+					m.appendOutput(fmt.Sprintf("Removed: %s", pattern))
+				} else {
+					m.appendOutput(fmt.Sprintf("Pattern not found: %s", pattern))
+				}
+			default:
+				m.appendOutput("Usage: /permissions allow|deny|remove <pattern>")
+			}
+		}
+	case "/compact":
+		sess := m.sessions.Current()
+		if sess == nil || len(sess.Messages) < ctxwin.MinShapeable() {
+			m.appendOutput(fmt.Sprintf("Conversation too short to compact (need %d+ messages)", ctxwin.MinShapeable()))
+			break
+		}
+		customInstructions := ""
+		if len(parts) > 1 {
+			customInstructions = strings.Join(parts[1:], " ")
+		}
+		m.appendOutput("Compacting context...")
+		m.state = stateProcessing
+		m.processingStartTime = time.Now()
+		compactFn := m.runCompact(customInstructions)
+		return m, tea.Batch(func() tea.Msg { return compactFn() }, spinnerTick(), spinnerFrameTick())
 	default:
 		// Check custom commands
 		cmdName := strings.TrimPrefix(cmd, "/")
@@ -1488,6 +1891,17 @@ func (m *Model) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m *Model) runDoctor() tea.Cmd {
+	return func() tea.Msg {
+		toolCount := 0
+		if m.toolRegistry != nil {
+			toolCount = m.toolRegistry.Len()
+		}
+		checks := runDoctorWithHealth(m.shannonDir, m.cfg.APIKey, m.cfg.Endpoint, m.gateway, &m.cfg.Permissions, m.cfg.MCPServers, toolCount)
+		return doctorDoneMsg{checks: checks}
+	}
 }
 
 func (m *Model) handleResearch(args []string) (tea.Model, tea.Cmd) {
@@ -1535,6 +1949,11 @@ func (m *Model) handleSwarm(args []string) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) runRemote(query string, ctx map[string]any, strategy string) tea.Cmd {
+	if m.gateway == nil {
+		return func() tea.Msg {
+			return agentDoneMsg{err: fmt.Errorf("remote tasks require gateway provider (not available with ollama)")}
+		}
+	}
 	// Set title from query if still default
 	sess := m.sessions.Current()
 	if sess.Title == "New session" {
@@ -1747,6 +2166,13 @@ func helpText() string {
 	return `Keys:
   Alt+Enter                      Insert newline (multi-line input)
   Enter                          Submit message
+  Up/Down                        Navigate input history
+  Esc Esc                        Clear input
+  Ctrl+K                         Delete to end of line
+  Ctrl+U                         Delete to start of line
+  Ctrl+W                         Delete word backward
+  Ctrl+L                         Clear screen
+  Ctrl+O                         Expand last tool results
 
 Commands:
   /help                          Show this help
@@ -1760,7 +2186,11 @@ Commands:
   /session resume <id>           Resume a saved session
   /model [small|medium|large]    Switch model tier
   /copy                          Copy last response to clipboard
-  /clear                         Clear screen
+  /clear                         New session + clear screen
+  /compact [instructions]        Compress context, keep summary
+  /status                        Show session status
+  /doctor                        Run diagnostic checks
+  /permissions                   Show/manage tool permissions
   /quit                          Exit`
 }
 
@@ -1883,7 +2313,11 @@ var baseSlashCommands = []slashCmd{
 	{"/sessions", "List saved sessions"},
 	{"/search", "Search session history"},
 	{"/session", "new | resume <n>"},
-	{"/clear", "Clear screen"},
+	{"/clear", "New session + clear screen"},
+	{"/compact", "Compress context (keep summary)"},
+	{"/status", "Show session status"},
+	{"/doctor", "Run diagnostic checks"},
+	{"/permissions", "Manage tool permissions"},
 	{"/update", "Check for updates"},
 	{"/quit", "Exit"},
 }
@@ -1949,13 +2383,21 @@ func renderDropList(maxVisible, total, selected int, item func(i int) (label, de
 	var sb strings.Builder
 	for i := start; i < start+visible; i++ {
 		label, desc := item(i)
+		labelWidth := lipgloss.Width(label)
+		padWidth := 16 - labelWidth
+		if padWidth < 1 {
+			padWidth = 1
+		}
+		padding := strings.Repeat(" ", padWidth)
 		if i == selected {
-			sb.WriteString(fmt.Sprintf("  > %s  %s\n",
-				highlightLabel.Render(fmt.Sprintf("%-14s", label)),
+			sb.WriteString(fmt.Sprintf("  > %s%s%s\n",
+				highlightLabel.Render(label),
+				padding,
 				highlightDesc.Render(desc)))
 		} else {
-			sb.WriteString(fmt.Sprintf("    %s  %s\n",
-				dimStyle.Render(fmt.Sprintf("%-14s", label)),
+			sb.WriteString(fmt.Sprintf("    %s%s%s\n",
+				dimStyle.Render(label),
+				padding,
 				dimStyle.Render(desc)))
 		}
 	}
@@ -1980,6 +2422,13 @@ func statusMessage(msg, fallback string) string {
 func formatConfigDisplay(cfg *config.Config) string {
 	var sb strings.Builder
 	sb.WriteString("Shannon CLI Configuration\n")
+
+	if cfg.Provider == "ollama" {
+		sb.WriteString(fmt.Sprintf("  provider: ollama\n"))
+		sb.WriteString(fmt.Sprintf("  ollama.endpoint: %s\n", cfg.Ollama.Endpoint))
+		sb.WriteString(fmt.Sprintf("  ollama.model: %s\n", cfg.Ollama.Model))
+		sb.WriteString("\n")
+	}
 
 	srcLabel := func(key string) string {
 		if cfg.Sources == nil {
@@ -2059,10 +2508,59 @@ func formatConfigDisplay(cfg *config.Config) string {
 	return sb.String()
 }
 
+func formatTokenCount(n int) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	return fmt.Sprintf("%d,%03d", n/1000, n%1000)
+}
+
 func truncate(s string, max int) string {
 	r := []rune(s)
 	if len(r) <= max {
 		return s
 	}
 	return string(r[:max]) + "..."
+}
+
+func formatPermissions(p *permissions.PermissionsConfig) string {
+	var sb strings.Builder
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+
+	sb.WriteString(dimStyle.Render("  Allowed commands:") + "\n")
+	if len(p.AllowedCommands) == 0 {
+		sb.WriteString(dimStyle.Render("    (none)") + "\n")
+	} else {
+		for _, c := range p.AllowedCommands {
+			sb.WriteString(dimStyle.Render(fmt.Sprintf("    - %s", c)) + "\n")
+		}
+	}
+
+	sb.WriteString(dimStyle.Render("  Denied commands:") + "\n")
+	if len(p.DeniedCommands) == 0 {
+		sb.WriteString(dimStyle.Render("    (none)") + "\n")
+	} else {
+		for _, c := range p.DeniedCommands {
+			sb.WriteString(dimStyle.Render(fmt.Sprintf("    - %s", c)) + "\n")
+		}
+	}
+
+	if len(p.AllowedDirs) > 0 {
+		sb.WriteString(dimStyle.Render("  Allowed dirs:") + "\n")
+		for _, d := range p.AllowedDirs {
+			sb.WriteString(dimStyle.Render(fmt.Sprintf("    - %s", d)) + "\n")
+		}
+	}
+
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+func removePattern(list []string, pattern string) []string {
+	result := make([]string, 0, len(list))
+	for _, item := range list {
+		if item != pattern {
+			result = append(result, item)
+		}
+	}
+	return result
 }

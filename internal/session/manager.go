@@ -97,6 +97,11 @@ func (m *Manager) Save() error {
 	return m.store.Save(m.current)
 }
 
+// PatchSummaryCache 从磁盘重新读取最新 session，仅更新摘要缓存字段后写回。
+func (m *Manager) PatchSummaryCache(id, summary, cacheKey string) error {
+	return m.store.PatchSummaryCache(id, summary, cacheKey)
+}
+
 func (m *Manager) List() ([]SessionSummary, error) {
 	return m.store.List()
 }

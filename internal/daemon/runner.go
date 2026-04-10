@@ -649,7 +649,7 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 
 	result, usage, runErr := loop.Run(ctx, prompt, history)
 	status := loop.LastRunStatus()
-	if runErr != nil && !errors.Is(runErr, agent.ErrMaxIterReached) {
+	if runErr != nil && !isSoftRunError(runErr) {
 		// Hard error — save a user-friendly error message so the session isn't
 		// left with a dangling user message and no assistant reply.
 		// Full error detail goes to the log; session/UI gets a clean summary.
@@ -844,6 +844,15 @@ func closeRouteDone(done chan struct{}) {
 		}
 	}()
 	close(done)
+}
+
+// isSoftRunError reports whether err is a normal termination (cancel, timeout,
+// max iterations) rather than a hard failure. Soft errors should persist the
+// full conversation from RunMessages(), not just a friendly error stub.
+func isSoftRunError(err error) bool {
+	return errors.Is(err, agent.ErrMaxIterReached) ||
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded)
 }
 
 // FriendlyAgentError maps raw agent errors to user-facing messages.

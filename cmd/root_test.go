@@ -20,7 +20,7 @@ func TestResolveOneShotCWD_DefaultsToProcessCWD(t *testing.T) {
 		t.Fatalf("Getwd error: %v", err)
 	}
 	if got != want {
-		t.Fatalf("expected process cwd %q, got %q", want, got)
+		t.Fatalf("expected process CWD %q, got %q", want, got)
 	}
 }
 

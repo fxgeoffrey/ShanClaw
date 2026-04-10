@@ -48,7 +48,7 @@ func (t *FileReadTool) Info() agent.ToolInfo {
 			"properties": map[string]any{
 				"path":   map[string]any{"type": "string", "description": "Absolute or relative file path"},
 				"offset": map[string]any{"type": "integer", "description": "Start line (0-based, default 0). For PDF: start page (0-based)."},
-				"limit":  map[string]any{"type": "integer", "description": "Max lines to read (default: all). For PDF: max pages to render (default: 5)."},
+				"limit":  map[string]any{"type": "integer", "description": "Max lines to read (default: all). For PDF: max pages to render (default: 2)."},
 			},
 		},
 		Required: []string{"path"},

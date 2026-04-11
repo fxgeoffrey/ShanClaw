@@ -585,7 +585,7 @@ func (s *Server) handlePatchSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "session id required")
 		return
 	}
-	// 防止路径穿越 — session ID 必须是安全的文件名。
+	// Prevent path traversal — session ID must be a safe filename.
 	if id != filepath.Base(id) || strings.ContainsAny(id, `/\`) {
 		writeError(w, http.StatusBadRequest, "invalid session id")
 		return

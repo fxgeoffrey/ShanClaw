@@ -97,9 +97,9 @@ func (m *Manager) Save() error {
 	return m.store.Save(m.current)
 }
 
-// PatchTitle 修改指定 session 的标题并持久化。
-// 如果修改的是当前活跃 session，同时更新内存中的 title。
-// 先写磁盘再更新内存，避免写入失败导致不一致。
+// PatchTitle updates the title of the given session and persists it.
+// If the target is the active session, the in-memory title is also updated.
+// Disk is written first so a failed write won't leave memory inconsistent.
 func (m *Manager) PatchTitle(id, title string) error {
 	err := m.store.PatchTitle(id, title)
 	if err != nil {

@@ -2465,9 +2465,12 @@ func hasNativeToolIDs(toolCalls []client.FunctionCall) bool {
 
 // effectiveMaxIter returns a dynamic iteration limit based on tools used so far.
 // GUI tasks get a higher limit since screenshot→action loops are normal.
+// Uses isGUIToolName so playwright MCP tools (browser_navigate, browser_snapshot,
+// …) share the same higher budget as the literal GUITools set — otherwise a
+// multi-page web task would hit the default iteration cap mid-flow.
 func (a *AgentLoop) effectiveMaxIter(toolsUsed map[string]int) int {
 	for name := range toolsUsed {
-		if GUITools[name] {
+		if isGUIToolName(name) {
 			if a.maxIter < 75 {
 				return 75
 			}

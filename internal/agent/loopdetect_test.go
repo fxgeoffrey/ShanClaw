@@ -761,3 +761,42 @@ func TestBrowserInToolFamilies(t *testing.T) {
 		t.Errorf("browser family should be 'browser', got %q", family)
 	}
 }
+
+// TestLoopDetector_BrowserToolsRepeatable ensures that browser_* MCP tools
+// are treated as repeatable GUI tools. Before the fix, `repeatableGUITools`
+// was keyed on the literal string "browser", but real tool names are
+// "browser_navigate", "browser_snapshot", etc., so the NoProgress detector
+// (8+ same tool → nudge) would fire on legit multi-page browsing sessions.
+func TestLoopDetector_BrowserToolsRepeatable(t *testing.T) {
+	ld := NewLoopDetector()
+
+	// 9 browser_navigate calls to different URLs — progressCount stays at 1
+	// per topic, so the FamilyNoProgress detector won't fire. But before the
+	// fix the outer NoProgress detector (line 355) WOULD nudge at 8 because
+	// repeatableTools["browser_navigate"] == false. After the fix it stays Continue.
+	urls := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i"}
+	for _, u := range urls {
+		ld.Record("browser_navigate", fmt.Sprintf(`{"url":"https://example.com/%s"}`, u), false, "", "", false)
+	}
+	action, msg := ld.Check("browser_navigate")
+	if action != LoopContinue {
+		t.Fatalf("browser_navigate x9 to different URLs should Continue (it is a repeatable GUI tool), got %v: %s", action, msg)
+	}
+}
+
+func TestLoopDetector_BrowserSnapshotInterleavedRepeatable(t *testing.T) {
+	ld := NewLoopDetector()
+	// Realistic multi-step pattern: snapshot → click → snapshot → click → ...
+	// Each snapshot has the same args but is separated by clicks, so it is
+	// not a consecutive duplicate. Over 10 steps we accumulate 5 snapshots,
+	// under the consecutive-dup threshold and under the no-progress threshold
+	// of 8 same-name calls — must stay Continue.
+	for i := range 5 {
+		ld.Record("browser_snapshot", `{}`, false, "", "", false)
+		ld.Record("browser_click", fmt.Sprintf(`{"ref":"e%d"}`, i), false, "", "", false)
+	}
+	action, msg := ld.Check("browser_click")
+	if action != LoopContinue {
+		t.Fatalf("interleaved browser_snapshot/browser_click should Continue, got %v: %s", action, msg)
+	}
+}

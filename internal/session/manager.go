@@ -40,12 +40,15 @@ func (m *Manager) NewSession() *Session {
 		prevID = m.current.ID
 	}
 	id := generateID()
+	// CWD is intentionally left empty — callers (daemon runner, TUI,
+	// one-shot CLI) are responsible for setting it explicitly based on
+	// their own context. Historically this was populated via os.Getwd()
+	// which leaked the daemon startup directory into every new session.
 	m.current = &Session{
 		SchemaVersion: 1,
 		ID:            id,
 		CreatedAt:     time.Now(),
 		Title:         "New session",
-		CWD:           getCWD(),
 	}
 	m.ensureRuntimeLocked(id)
 	sess := m.current

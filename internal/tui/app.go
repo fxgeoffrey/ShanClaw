@@ -558,6 +558,12 @@ func (m *Model) applyRuntimeContext(sess *session.Session) string {
 		agentCWD = m.agentOverride.Config.CWD
 	}
 	effectiveCWD := cwdctx.ResolveEffectiveCWD("", sessionCWD, agentCWD)
+	// TUI runs in the user's shell — when nothing is configured explicitly,
+	// default to the terminal's current directory so project-level configs are
+	// picked up. Daemon-routed runs use a different default (empty + guard).
+	if effectiveCWD == "" {
+		effectiveCWD, _ = os.Getwd()
+	}
 	if err := cwdctx.ValidateCWD(effectiveCWD); err != nil {
 		fmt.Fprintf(os.Stderr, "[tui] invalid session CWD %q, falling back to process CWD: %v\n", effectiveCWD, err)
 		effectiveCWD, _ = os.Getwd()

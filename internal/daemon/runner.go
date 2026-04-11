@@ -586,7 +586,11 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		sess.Messages = req.SessionHistory
 	}
 
-	// Resolve effective CWD: request > resumed session > agent config > process cwd.
+	// Resolve effective CWD: request > resumed session > agent config. When all
+	// three are empty we deliberately do NOT invent a working directory — the
+	// request runs with no filesystem scope, and filesystem tools (glob, grep,
+	// file_read, directory_list) will refuse any relative paths at the tool
+	// level. Web-only and pure-reasoning tasks are unaffected.
 	var sessionCWD string
 	if resumed {
 		sessionCWD = sess.CWD
@@ -596,8 +600,10 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		agentCWD = agentOverride.Config.CWD
 	}
 	effectiveCWD := cwdctx.ResolveEffectiveCWD(req.CWD, sessionCWD, agentCWD)
-	if err := cwdctx.ValidateCWD(effectiveCWD); err != nil {
-		return nil, fmt.Errorf("invalid cwd: %w", err)
+	if effectiveCWD != "" {
+		if err := cwdctx.ValidateCWD(effectiveCWD); err != nil {
+			return nil, fmt.Errorf("invalid cwd: %w", err)
+		}
 	}
 	if req.RouteKey != "" {
 		deps.SessionCache.SetRouteRunState(req.RouteKey, routeDone, routeInjectCh, effectiveCWD)
@@ -606,7 +612,12 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 	if err != nil {
 		return nil, fmt.Errorf("runtime config: %w", err)
 	}
-	sess.CWD = effectiveCWD
+	// Only write back when we have a real CWD — avoid poisoning the session
+	// with an empty value and avoid overwriting an existing non-empty session
+	// CWD with an empty fallback.
+	if effectiveCWD != "" {
+		sess.CWD = effectiveCWD
+	}
 	ctx = cwdctx.WithSessionCWD(ctx, effectiveCWD)
 
 	// Notify handler of resolved session ID so it can include it in EventBus payloads.

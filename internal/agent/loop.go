@@ -653,11 +653,17 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	coldDeferred := remainingDeferredNames(deferred, loadedDeferred)
 	deferredMode := len(coldDeferred) > 0 && shouldDefer(a.tools, a.tools.SortedNames(), schemaTokenBudget)
 
+	// sessionCWD may legitimately be empty for daemon runs that arrive without
+	// a CWD (pure web / reasoning tasks). Do NOT fall back to os.Getwd() here:
+	// the daemon process cwd is the directory the user ran `shan daemon start`
+	// from and is never a correct substitute. Falling back to it is exactly
+	// the leak that used to poison the prompt with "Working directory: ..."
+	// and make tools resolve relative paths against $HOME / dev dirs.
 	cwd := a.sessionCWD
-	if cwd == "" {
-		cwd, _ = os.Getwd()
+	var projectDir string
+	if cwd != "" {
+		projectDir = filepath.Join(cwd, ".shannon")
 	}
-	projectDir := filepath.Join(cwd, ".shannon")
 	instrText, _ := instructions.LoadInstructions(a.shannonDir, projectDir, 4000)
 	if cwd != "" {
 		ctx = cwdctx.WithSessionCWD(ctx, cwd)
@@ -2459,9 +2465,12 @@ func hasNativeToolIDs(toolCalls []client.FunctionCall) bool {
 
 // effectiveMaxIter returns a dynamic iteration limit based on tools used so far.
 // GUI tasks get a higher limit since screenshot→action loops are normal.
+// Uses isGUIToolName so playwright MCP tools (browser_navigate, browser_snapshot,
+// …) share the same higher budget as the literal GUITools set — otherwise a
+// multi-page web task would hit the default iteration cap mid-flow.
 func (a *AgentLoop) effectiveMaxIter(toolsUsed map[string]int) int {
 	for name := range toolsUsed {
-		if GUITools[name] {
+		if isGUIToolName(name) {
 			if a.maxIter < 75 {
 				return 75
 			}
@@ -2634,14 +2643,19 @@ func toolContentLength(tc any) int {
 //
 // When completer is non-nil, Tier 2 upgrades large results to semantic summaries.
 // When nil, Tier 2 falls back to mechanical head+tail truncation (zero LLM cost).
-// tier2FloorTools are read/search/repo-inspection tools that never degrade to
-// Tier 1 (metadata-only stubs). When these would normally hit Tier 1, they stay
-// at Tier 2 (mechanical head+tail truncation) to preserve actual content excerpts.
-var tier2FloorTools = map[string]bool{
-	"file_read":      true,
-	"grep":           true,
-	"glob":           true,
-	"directory_list": true,
+// isTier2FloorTool reports whether a tool's result should stay at Tier 2
+// (mechanical head+tail truncation) even when it would normally degrade to
+// Tier 1 (metadata-only stub). These are read/search/repo-inspection tools
+// where losing the actual content defeats the purpose. Browser tools belong
+// here for the same reason they belong in isMicroCompactSkipTool: the page
+// snapshot IS the task payload. Prefix-matched on "browser_" so newly added
+// playwright tools are covered automatically.
+func isTier2FloorTool(name string) bool {
+	switch name {
+	case "file_read", "grep", "glob", "directory_list":
+		return true
+	}
+	return strings.HasPrefix(name, "browser_")
 }
 
 func compressOldToolResults(ctx context.Context, messages []client.Message, keepRecent int, maxChars int, completer ctxwin.Completer) {
@@ -2720,7 +2734,7 @@ func hasTier2FloorTool(msg client.Message, toolCallMap map[string]toolCallInfo) 
 	if msg.Role == "user" && msg.Content.HasBlocks() {
 		for _, b := range msg.Content.Blocks() {
 			if b.Type == "tool_result" {
-				if info, ok := toolCallMap[b.ToolUseID]; ok && tier2FloorTools[info.Name] {
+				if info, ok := toolCallMap[b.ToolUseID]; ok && isTier2FloorTool(info.Name) {
 					return true
 				}
 			}
@@ -2730,12 +2744,12 @@ func hasTier2FloorTool(msg client.Message, toolCallMap map[string]toolCallInfo) 
 	text := msg.Content.Text()
 	if strings.Contains(text, "<tool_exec ") || strings.Contains(text, "I called ") {
 		if matches := toolResultPattern.FindStringSubmatch(text); len(matches) > 1 {
-			if tier2FloorTools[matches[1]] {
+			if isTier2FloorTool(matches[1]) {
 				return true
 			}
 		}
 		if matches := legacyToolResultPattern.FindStringSubmatch(text); len(matches) > 1 {
-			if tier2FloorTools[matches[1]] {
+			if isTier2FloorTool(matches[1]) {
 				return true
 			}
 		}
@@ -2778,7 +2792,7 @@ func compressTier2Blocks(ctx context.Context, mc client.MessageContent, maxChars
 		if info, ok := toolCallMap[b.ToolUseID]; ok {
 			toolName = info.Name
 		}
-		if completer != nil && charLen > microCompactMinChars && !isMicroCompacted(content) && *mcCount < microCompactMaxPerPass && !microCompactSkipTools[toolName] {
+		if completer != nil && charLen > microCompactMinChars && !isMicroCompacted(content) && *mcCount < microCompactMaxPerPass && !isMicroCompactSkipTool(toolName) {
 			*mcCount++ // count attempts, not just successes — caps latency
 			if summary, ok := microCompactResult(ctx, completer, toolName, content); ok {
 				b.ToolContent = summary

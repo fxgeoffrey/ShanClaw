@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"os"
 	"sync"
 	"time"
 
@@ -313,12 +312,4 @@ func generateID() string {
 		return time.Now().Format("2006-01-02-150405")
 	}
 	return fmt.Sprintf("%s-%s", time.Now().Format("2006-01-02"), hex.EncodeToString(b))
-}
-
-func getCWD() string {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "."
-	}
-	return cwd
 }

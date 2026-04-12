@@ -962,6 +962,56 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		}
 	}
 
+	// runForceStopTurn issues the final non-tool LLM turn after the loop
+	// detector decided to stop. It preserves the live agent config so this
+	// turn behaves like every other turn (MaxTokens, Thinking, SpecificModel,
+	// Temperature, ReasoningEffort) and substitutes a neutral fallback when
+	// the model returns empty text, so callers never see a blank bubble.
+	// Tools are intentionally omitted to force a text-only response.
+	runForceStopTurn := func(reason string) (string, error) {
+		messages = append(messages, client.Message{
+			Role:    "user",
+			Content: client.NewTextContent(reason),
+		})
+		markInjected()
+
+		req := client.CompletionRequest{
+			Messages:        messages,
+			ModelTier:       a.modelTier,
+			SpecificModel:   a.specificModel,
+			Temperature:     a.temperature,
+			MaxTokens:       a.maxTokens,
+			Thinking:        a.thinking,
+			ReasoningEffort: a.reasoningEffort,
+		}
+		finalResp, err := a.completeWithRetry(ctx, req)
+		if err != nil {
+			captureRunMessages()
+			setRunStatus(runstatus.CodeFromError(err), false)
+			return "", err
+		}
+		usage.Add(finalResp.Usage)
+
+		text := strings.TrimSpace(finalResp.OutputText)
+		if text == "" {
+			text = "I hit the loop limit after repeated failed attempts and couldn't produce a final answer."
+		}
+		messages = append(messages, client.Message{
+			Role:    "assistant",
+			Content: client.NewTextContent(text),
+		})
+		stampMessage()
+		captureRunMessages()
+		// Every force-stop exit is abnormal: the loop detector terminated
+		// the run early, so this is never a clean success regardless of
+		// whether the model produced final text.
+		setRunStatus(runstatus.CodeIterationLimit, true)
+		if a.handler != nil {
+			a.handler.OnText(text)
+		}
+		return text, nil
+	}
+
 	boundaryText := func(boundary MetaBoundary) string {
 		switch boundary {
 		case MetaBoundaryToolSearchLoaded:
@@ -1963,65 +2013,21 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 
 		// Handle loop detection results
 		if worstAction == LoopForceStop {
-			messages = append(messages, client.Message{
-				Role:    "user",
-				Content: client.NewTextContent(worstMsg),
-			})
-			markInjected()
-			finalResp, err := a.completeWithRetry(ctx, client.CompletionRequest{
-				Messages:  messages,
-				ModelTier: a.modelTier,
-			})
+			text, err := runForceStopTurn(worstMsg)
 			if err != nil {
-				captureRunMessages()
-				setRunStatus(runstatus.CodeFromError(err), false)
 				return "", usage, err
 			}
-			usage.Add(finalResp.Usage)
-			messages = append(messages, client.Message{
-				Role:    "assistant",
-				Content: client.NewTextContent(finalResp.OutputText),
-			})
-			stampMessage()
-			captureRunMessages()
-			setRunStatus(runstatus.CodeNone, false)
-			if a.handler != nil {
-				a.handler.OnText(finalResp.OutputText)
-			}
-			return finalResp.OutputText, usage, nil
+			return text, usage, nil
 		}
 		if worstAction == LoopNudge {
 			nudgeCount++
 			if nudgeCount >= maxNudges {
 				// Escalate: too many nudges without behavior change → force stop
-				worstAction = LoopForceStop
-				worstMsg = "Multiple approaches have failed. Provide your final answer now with what you have."
-				messages = append(messages, client.Message{
-					Role:    "user",
-					Content: client.NewTextContent(worstMsg),
-				})
-				markInjected()
-				finalResp, err := a.completeWithRetry(ctx, client.CompletionRequest{
-					Messages:  messages,
-					ModelTier: a.modelTier,
-				})
+				text, err := runForceStopTurn("Multiple approaches have failed. Provide your final answer now with what you have.")
 				if err != nil {
-					captureRunMessages()
-					setRunStatus(runstatus.CodeFromError(err), false)
 					return "", usage, err
 				}
-				usage.Add(finalResp.Usage)
-				messages = append(messages, client.Message{
-					Role:    "assistant",
-					Content: client.NewTextContent(finalResp.OutputText),
-				})
-				stampMessage()
-				captureRunMessages()
-				setRunStatus(runstatus.CodeNone, false)
-				if a.handler != nil {
-					a.handler.OnText(finalResp.OutputText)
-				}
-				return finalResp.OutputText, usage, nil
+				return text, usage, nil
 			}
 			messages = append(messages, client.Message{
 				Role:    "user",

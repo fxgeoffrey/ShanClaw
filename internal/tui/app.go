@@ -974,6 +974,13 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.result != "" && (msg.err == nil || errors.Is(msg.err, agent.ErrMaxIterReached)) {
 			m.appendMarkdownOutput(msg.result, m.renderMarkdownCached(msg.result, m.width))
 			m.appendOutput("")
+			// Soft warning for loop-detector force-stop: the reply is valid
+			// and rendered above, but the run ended early. Show a dim hint,
+			// not a red error.
+			if msg.err == nil && msg.status.Partial && msg.status.FailureCode == runstatus.CodeIterationLimit {
+				dim := lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Italic(true)
+				m.appendOutput(dim.Render("  Stopped early after repeated failed attempts."))
+			}
 		}
 		// Tool count summary (individual tool lines already shown during execution)
 		if len(m.lastToolResults) > 0 {

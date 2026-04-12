@@ -342,6 +342,12 @@ type RunAgentResult struct {
 	SessionID string        `json:"session_id"`
 	Agent     string        `json:"agent"`
 	Usage     RunAgentUsage `json:"usage"`
+	// Partial=true + FailureCode indicate the run completed "softly" — the
+	// reply is valid and should be shown, but the loop layer flagged it as
+	// abnormal (e.g. loop-detector force-stop). Treat as a soft warning, not
+	// an error.
+	Partial     bool           `json:"partial,omitempty"`
+	FailureCode runstatus.Code `json:"failure_code,omitempty"`
 }
 
 // RunAgentUsage tracks token and cost information for a single agent run.
@@ -1010,13 +1016,21 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		// consumers (e.g. desktop schedule notifications that click through
 		// to the session) would point at a session that cannot be loaded.
 		if saveErr == nil && deps.EventBus != nil {
-			payload, _ := json.Marshal(map[string]any{
+			payload := map[string]any{
 				"agent":      agentName,
 				"source":     req.Source,
 				"session_id": sess.ID,
 				"text":       result,
-			})
-			deps.EventBus.Emit(Event{Type: EventAgentReply, Payload: payload})
+			}
+			// Soft-warning semantics: force-stop exits still emit a normal
+			// agent_reply, but carry partial/failure_code so consumers can
+			// show a non-error "stopped early" hint next to the text.
+			if status.Partial {
+				payload["partial"] = true
+				payload["failure_code"] = status.FailureCode
+			}
+			payloadBytes, _ := json.Marshal(payload)
+			deps.EventBus.Emit(Event{Type: EventAgentReply, Payload: payloadBytes})
 		}
 	}
 
@@ -1043,6 +1057,8 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 			TotalTokens:  usage.TotalTokens,
 			CostUSD:      usage.CostUSD,
 		},
+		Partial:     status.Partial,
+		FailureCode: status.FailureCode,
 	}, nil
 }
 

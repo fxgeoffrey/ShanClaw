@@ -124,18 +124,20 @@ func TestLoopDetector_NoProgress_Nudge(t *testing.T) {
 	ld := NewLoopDetector()
 
 	// 7 calls with different args: no trigger (threshold is 8)
-	// Use bash (not in any tool family) to test pure NoProgress detection.
+	// Use think (not in any tool family, not semi-repeatable) to test pure
+	// NoProgress detection. bash is semi-repeatable (threshold 12) so it
+	// wouldn't trigger at 8.
 	for i := range 7 {
-		ld.Record("bash", fmt.Sprintf(`{"cmd":"cmd%d"}`, i), false, "", "", false)
+		ld.Record("think", fmt.Sprintf(`{"thought":"idea%d"}`, i), false, "", "", false)
 	}
-	action, _ := ld.Check("bash")
+	action, _ := ld.Check("think")
 	if action != LoopContinue {
 		t.Errorf("7 calls should not trigger, got %v", action)
 	}
 
 	// 8th call: nudge
-	ld.Record("bash", `{"cmd":"cmd8"}`, false, "", "", false)
-	action, _ = ld.Check("bash")
+	ld.Record("think", `{"thought":"idea8"}`, false, "", "", false)
+	action, _ = ld.Check("think")
 	if action != LoopNudge {
 		t.Errorf("8 calls should trigger nudge, got %v", action)
 	}
@@ -798,5 +800,55 @@ func TestLoopDetector_BrowserSnapshotInterleavedRepeatable(t *testing.T) {
 	action, msg := ld.Check("browser_click")
 	if action != LoopContinue {
 		t.Fatalf("interleaved browser_snapshot/browser_click should Continue, got %v: %s", action, msg)
+	}
+}
+
+// TestLoopDetector_SemiRepeatable_BashHigherThreshold verifies that bash
+// gets the elevated NoProgress threshold (12) instead of the generic (8),
+// so multi-step scripting workflows (fetch → process → install → build)
+// aren't killed before completing. The exact-dup, same-error, and sleep
+// detectors still catch real loops at their own lower thresholds.
+func TestLoopDetector_SemiRepeatable_BashHigherThreshold(t *testing.T) {
+	ld := NewLoopDetector()
+
+	// 8 distinct bash calls — would nudge with the generic threshold,
+	// but should be Continue with the semi-repeatable threshold of 12.
+	for i := range 8 {
+		ld.Record("bash", fmt.Sprintf(`{"command":"step_%d"}`, i), false, "", "", false)
+	}
+	action, _ := ld.Check("bash")
+	if action != LoopContinue {
+		t.Errorf("8 distinct bash calls should Continue (semi-repeatable threshold 12), got %v", action)
+	}
+
+	// 11 calls — still under 12.
+	for i := 8; i < 11; i++ {
+		ld.Record("bash", fmt.Sprintf(`{"command":"step_%d"}`, i), false, "", "", false)
+	}
+	action, _ = ld.Check("bash")
+	if action != LoopContinue {
+		t.Errorf("11 distinct bash calls should Continue, got %v", action)
+	}
+
+	// 12th call → nudge.
+	ld.Record("bash", `{"command":"step_12"}`, false, "", "", false)
+	action, _ = ld.Check("bash")
+	if action != LoopNudge {
+		t.Errorf("12 bash calls should nudge, got %v", action)
+	}
+}
+
+// TestLoopDetector_SemiRepeatable_NonBashUnchanged verifies that the generic
+// NoProgress threshold (8) still applies to non-semi-repeatable tools like
+// file_write, think, etc. — unchanged from before.
+func TestLoopDetector_SemiRepeatable_NonBashUnchanged(t *testing.T) {
+	ld := NewLoopDetector()
+
+	for i := range 8 {
+		ld.Record("think", fmt.Sprintf(`{"thought":"idea_%d"}`, i), false, "", "", false)
+	}
+	action, _ := ld.Check("think")
+	if action != LoopNudge {
+		t.Errorf("8 think calls should nudge at generic threshold, got %v", action)
 	}
 }

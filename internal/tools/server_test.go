@@ -133,6 +133,76 @@ func TestServerTool_Run_NullOutput(t *testing.T) {
 	}
 }
 
+func TestServerTool_Run_502_TransientPrefix(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		w.Write([]byte(`{"error":"Tool service unavailable"}`))
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	tool := NewServerTool(client.ServerToolSchema{Name: "x_search"}, gw)
+
+	result, err := tool.Run(context.Background(), `{"query":"test"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Error("expected IsError=true for 502")
+	}
+	if !strings.HasPrefix(result.Content, "[transient error]") {
+		t.Errorf("expected [transient error] prefix, got %q", result.Content)
+	}
+}
+
+func TestServerTool_Run_403_PermissionPrefix(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(`{"error":"access denied"}`))
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	tool := NewServerTool(client.ServerToolSchema{Name: "x_search"}, gw)
+
+	result, err := tool.Run(context.Background(), `{"query":"test"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Error("expected IsError=true for 403")
+	}
+	if !strings.HasPrefix(result.Content, "[permission error]") {
+		t.Errorf("expected [permission error] prefix, got %q", result.Content)
+	}
+}
+
+func TestClassifyServerError(t *testing.T) {
+	tests := []struct {
+		msg  string
+		want string
+	}{
+		{"tool x_search returned 502: {\"error\":\"Tool service unavailable\"}", "[transient error] "},
+		{"tool x_search returned 429: rate limited", "[transient error] "},
+		{"tool x_search returned 503: service unavailable", "[transient error] "},
+		{"request failed: context deadline exceeded (Client.Timeout)", "[transient error] "},
+		{"request failed: dial tcp: connection refused", "[transient error] "},
+		{"request failed: EOF", "[transient error] "},
+		{"tool x_search returned 403: forbidden", "[permission error] "},
+		{"tool x_search returned 401: unauthorized", "[permission error] "},
+		{"tool x_search returned 400: bad request", "[validation error] "},
+		{"tool x_search returned 422: unprocessable entity", "[validation error] "},
+		{"tool x_search returned 404: not found", ""},
+		{"some unknown error", ""},
+	}
+	for _, tt := range tests {
+		got := classifyServerError(tt.msg)
+		if got != tt.want {
+			t.Errorf("classifyServerError(%q) = %q, want %q", tt.msg, got, tt.want)
+		}
+	}
+}
+
 func TestServerTool_Run_InvalidJSON(t *testing.T) {
 	tool := NewServerTool(client.ServerToolSchema{Name: "test"}, nil)
 	result, err := tool.Run(context.Background(), "not json")

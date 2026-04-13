@@ -78,6 +78,22 @@ shan --setup
 # Enter API key: (leave empty for local)
 ```
 
+**Option C: Ollama (local LLMs)** — run models locally with [Ollama](https://ollama.com):
+
+```bash
+# Install and start Ollama, then pull a model
+ollama pull llama3.1
+
+# Configure shan to use Ollama
+# In ~/.shannon/config.yaml:
+provider: ollama
+ollama:
+  endpoint: "http://localhost:11434"   # default, can be omitted
+  model: "llama3.1"
+```
+
+When `provider: ollama` is set, ShanClaw connects to Ollama's OpenAI-compatible API. Standard function tools work; native Anthropic tool types (computer use) are not available. Thinking models (e.g. Qwen3) are supported — reasoning output is surfaced with a `[thinking]` prefix.
+
 ## Quick Start
 
 ```bash
@@ -245,16 +261,21 @@ Type `/` in the TUI to see the interactive command menu:
 | `/swarm <query>` | Multi-agent swarm orchestration |
 | `/copy` | Copy last response to clipboard |
 | `/model [small\|medium\|large]` | Switch model tier |
+| `/rename <title>` | Rename current session |
 | `/config` | Show merged config with sources |
+| `/status` | Show session status |
 | `/sessions` | Interactive session picker |
 | `/session new` | Start new session |
 | `/session resume <n>` | Resume session by number or ID |
 | `/search <query>` | Search session history (keyword, phrase, stemming) |
-| `/clear` | Clear screen |
+| `/clear` | New session + clear screen |
+| `/compact [instructions]` | Compress context and keep a summary |
+| `/doctor` | Run diagnostic checks |
+| `/permissions` | Show or manage tool permissions |
 | `/update` | Self-update from GitHub releases |
 | `/setup` | Reconfigure endpoint & API key |
 | `/quit` | Exit (alias: `/exit`) |
-| `/<custom>` | Custom commands from `.shannon/commands/*.md` or agent `commands/` and `skills/` |
+| `/<custom>` | Custom commands from global/project command dirs plus agent commands and attached agent skills |
 
 ### Subcommands
 
@@ -280,7 +301,7 @@ Local tools executed on your macOS machine:
 
 | Tool | Approval | Description |
 |------|----------|-------------|
-| `file_read` | CWD auto | Read files with line numbers, supports offset/limit |
+| `file_read` | CWD auto | Read files with line numbers (offset/limit). Images (png/jpg/gif/webp) returned as base64 vision blocks. PDFs rendered page-by-page via Swift/PDFKit (offset=start page, limit=page count). |
 | `file_write` | Yes | Write/create files, creates parent dirs |
 | `file_edit` | Yes | Find-and-replace (old_string must be unique) |
 | `glob` | CWD auto | Find files by pattern (supports `**` recursive) |
@@ -338,7 +359,7 @@ Local tools executed on your macOS machine:
 
 ```
 Tool call from LLM
-  → Permission engine (hard-block → denied_commands → allowed_commands)
+  → Permission engine (hard-block → denied_commands → split compounds → allowed_commands → default safe)
   → RequiresApproval + SafeChecker
   → Pre-tool hook (can deny)
   → Execute tool
@@ -356,15 +377,16 @@ Tool call from LLM
 
 ## Permission Engine
 
-5-layer command resolution:
+6-step command resolution:
 
 1. **Hard-block** — built-in constants (rm -rf /, mkfs, dd, curl|sh, etc.), cannot be overridden
 2. **Denied commands** — `permissions.denied_commands` in config
-3. **Allowed commands** — `permissions.allowed_commands` in config (glob patterns)
-4. **Default safe commands** — built-in safe list (ls, git status, go test, make, etc.)
-5. **User approval** — interactive prompt or `-y` flag
+3. **Compound command split** — `&&`, `||`, `;`, `|` are split and checked per sub-command
+4. **Allowed commands** — `permissions.allowed_commands` in config (glob patterns)
+5. **Default safe commands** — built-in safe list (ls, git status, go test, make, etc.)
+6. **User approval** — interactive prompt or `-y` flag
 
-Compound commands (`&&`, `||`, `;`, `|`) are split and each sub-command checked independently.
+For compound commands, every sub-command must be explicitly allowed to auto-allow the whole command. If any sub-command is denied, the whole command is denied.
 
 Additional checks:
 - **File paths**: symlink protection (`filepath.EvalSymlinks`), sensitive file patterns (`.env`, `*.pem`, `id_rsa`), allowed_dirs
@@ -782,7 +804,7 @@ Create independent agents with their own instructions, memory, tools, MCP server
     MEMORY.md         # agent-specific memory (persists across sessions)
     config.yaml       # optional: tool filtering, MCP scoping, model overrides
     commands/          # optional: agent-scoped slash commands (*.md)
-    skills/            # optional: agent-scoped skills (skill-name/SKILL.md)
+    _attached.yaml     # optional: attached installed skill names
 ```
 
 ### Creating an Agent
@@ -935,12 +957,12 @@ Use in the TUI: `/review src/auth/login.go`
 
 ### Agent Skills
 
-Skills use the [Anthropic SKILL.md spec](https://agentskills.io/specification). Create a directory per skill with a `SKILL.md` file:
+Skills use the [Anthropic SKILL.md spec](https://agentskills.io/specification). Install skills globally, then attach them to an agent by name:
 
 ```bash
-mkdir -p ~/.shannon/agents/reviewer/skills/summarize
+mkdir -p ~/.shannon/skills/summarize
 
-cat > ~/.shannon/agents/reviewer/skills/summarize/SKILL.md << 'EOF'
+cat > ~/.shannon/skills/summarize/SKILL.md << 'EOF'
 ---
 name: summarize
 description: Summarize codebase architecture
@@ -949,13 +971,17 @@ description: Summarize codebase architecture
 Provide a concise summary of the architecture and key decisions.
 Focus on: entry points, data flow, error handling patterns.
 EOF
+
+cat > ~/.shannon/agents/reviewer/_attached.yaml << 'EOF'
+- summarize
+EOF
 ```
+
+Attached skill names are resolved from installed skills in `~/.shannon/skills/`. Bundled skills must be installed before they can be attached to an agent.
 
 Skills are listed in the system prompt (name + description only). The LLM activates a skill by calling the `use_skill` tool, which returns the full SKILL.md body — progressive disclosure that keeps prompt size small.
 
-**Skill sources (priority order):** agent-scoped (`skills/`) > global (`~/.shannon/skills/`) > bundled.
-
-Skills also appear as `/summarize` slash commands in the TUI.
+Attached agent skills also appear as `/summarize` slash commands in the TUI.
 
 ### Using Agents
 
@@ -963,7 +989,7 @@ Skills also appear as `/summarize` slash commands in the TUI.
 # One-shot mode
 shan --agent ops-bot "check error rate in prod"
 
-# Interactive TUI (with agent commands and skills as /slash commands)
+# Interactive TUI (with agent commands and attached skills as /slash commands)
 shan --agent ops-bot
 
 # In daemon mode, @mention routes to agents:
@@ -1013,6 +1039,7 @@ Slack/LINE ──webhook──▶ Shannon Cloud ──WebSocket──▶ shan da
 - **Schedule mutation tools** (`schedule_create/update/remove`) are denied by default in daemon mode
 - **Interactive approval** — tools requiring approval send requests to the client app (via WS relay through Shannon Cloud); supports "always allow" persistence for bash commands
 - **HITL message injection** — send follow-up messages to a running agent via `POST /message`; messages are injected mid-turn and incorporated into the conversation
+- **File attachments** — Slack/Feishu messages with file attachments are automatically downloaded to `~/.shannon/tmp/attachments/` and converted to `file_ref` content blocks. Supports up to 10 files per message (100 MB each). SSRF-protected with scheme/IP validation. Cleaned up on session close.
 
 ### Local HTTP API (port 7533)
 

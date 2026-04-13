@@ -70,6 +70,7 @@ type RunAgentRequest struct {
 	BypassRouting  bool                  `json:"-"`                   // skip route lock (heartbeat runs)
 	SessionHistory []client.Message      `json:"-"`                   // pre-loaded history for LLM context (BypassRouting runs)
 	StickyContext  string                `json:"-"`                   // 额外的 sticky context，注入系统提示（对用户不可见）
+	Files          []RemoteFile          `json:"-"`                   // remote file attachments from Cloud (WS only)
 }
 
 // Validate checks that the request has the minimum required fields.
@@ -480,6 +481,30 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 	agentName := req.Agent
 	prompt := req.Text
 
+	// Download remote file attachments and convert to file_ref blocks.
+	// Attachment files must survive across turns (non-image files become
+	// file_read hints in session history). Cleanup uses sessMgr.OnClose
+	// (append-style, fires on manager close) — not OnSessionClose (which
+	// replaces per-session and would clobber previous turns' cleanup).
+	// The defer is a safety net for early-return errors before sessMgr
+	// is available; it's cancelled once OnClose takes ownership.
+	var attachmentCleanup func()
+	var attachmentRegistered bool
+	if len(req.Files) > 0 {
+		var fileBlocks []RequestContentBlock
+		fileBlocks, attachmentCleanup = downloadRemoteFiles(deps.ShannonDir, req.Files)
+		defer func() {
+			if !attachmentRegistered && attachmentCleanup != nil {
+				attachmentCleanup()
+			}
+		}()
+		req.Content = append(req.Content, fileBlocks...)
+		// Zero auth headers to prevent lingering tokens in memory.
+		for i := range req.Files {
+			req.Files[i].AuthHeader = ""
+		}
+	}
+
 	// Resolve multimodal content blocks (if present).
 	var resolvedContent []client.ContentBlock
 	if len(req.Content) > 0 {
@@ -885,6 +910,10 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 	// Always set (even nil) to clear paths from a previous run on a reused loop.
 	loop.SetUserFilePaths(extractUserFilePaths(req.Content))
 	sessMgr.OnSessionClose(sess.ID, loop.SpillCleanupFunc())
+	if attachmentCleanup != nil {
+		attachmentRegistered = true // cancel the defer safety net
+		sessMgr.OnClose(attachmentCleanup)
+	}
 
 	result, usage, runErr := loop.Run(ctx, prompt, resolvedContent, history)
 	status := loop.LastRunStatus()

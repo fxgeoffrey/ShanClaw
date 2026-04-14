@@ -293,10 +293,12 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 	}
 	status := loop.LastRunStatus()
 
-	// Handler-accumulated usage includes both direct LLM calls (from the loop)
-	// and cloud_delegate's nested LLM calls (emitted via OnUsage). The return
-	// value of loop.Run() only has the direct part, so prefer the handler.
+	// Handler-accumulated usage includes direct LLM calls (from the loop),
+	// cloud_delegate's nested LLM calls, and gateway tool billing tracked
+	// separately. The LLM bucket preserves input+output==total_tokens; tool
+	// billing rolls up into ToolCostUSD/ToolTokens so the two don't mix.
 	totalUsage := cliHandler.Usage()
+	llm := totalUsage.LLM
 
 	// Persist session to disk
 	now := time.Now()
@@ -308,10 +310,10 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 		session.MessageMeta{Source: "local", Timestamp: session.TimePtr(now)},
 		session.MessageMeta{Source: "local", Timestamp: session.TimePtr(time.Now())},
 	)
-	sessMgr.AddUsage(sess.ID, session.UsageFromTurn(
-		totalUsage.LLMCalls, totalUsage.InputTokens, totalUsage.OutputTokens,
-		totalUsage.TotalTokens, totalUsage.CostUSD,
-		totalUsage.CacheReadTokens, totalUsage.CacheCreationTokens, totalUsage.Model,
+	sessMgr.AddUsage(sess.ID, session.UsageFromAccumulated(
+		llm.LLMCalls, llm.InputTokens, llm.OutputTokens, llm.TotalTokens, llm.CostUSD,
+		llm.CacheReadTokens, llm.CacheCreationTokens, llm.Model,
+		totalUsage.ToolCalls, totalUsage.ToolCostUSD,
 	))
 	if saveErr := sessMgr.Save(); saveErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to save session: %v\n", saveErr)
@@ -323,10 +325,14 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 	if err == nil && status.Partial && status.FailureCode == runstatus.CodeIterationLimit {
 		fmt.Fprintln(os.Stderr, "\nStopped early after repeated failed attempts.")
 	}
-	usageLine := fmt.Sprintf("\n[tokens: %d in / %d out | cost: $%.4f | calls: %d",
-		totalUsage.InputTokens, totalUsage.OutputTokens, totalUsage.CostUSD, totalUsage.LLMCalls)
-	if totalUsage.Model != "" {
-		usageLine += " | model: " + totalUsage.Model
+	usageLine := fmt.Sprintf("\n[tokens: %d in / %d out | llm: $%.4f",
+		llm.InputTokens, llm.OutputTokens, llm.CostUSD)
+	if totalUsage.ToolCostUSD > 0 {
+		usageLine += fmt.Sprintf(" | tools: $%.4f (%d calls)", totalUsage.ToolCostUSD, totalUsage.ToolCalls)
+	}
+	usageLine += fmt.Sprintf(" | total: $%.4f | calls: %d", totalUsage.TotalCostUSD(), llm.LLMCalls)
+	if llm.Model != "" {
+		usageLine += " | " + llm.Model
 	}
 	fmt.Println(usageLine + "]")
 	return nil
@@ -357,8 +363,10 @@ type cliEventHandler struct {
 	usage       agent.UsageAccumulator
 }
 
-// Usage returns the cumulative LLM usage collected during this handler's lifetime.
-func (h *cliEventHandler) Usage() agent.TurnUsage { return h.usage.Snapshot() }
+// Usage returns the cumulative usage collected during this handler's lifetime,
+// split into LLM and gateway-tool billing so tool synthetic tokens don't
+// corrupt the LLM token accounting.
+func (h *cliEventHandler) Usage() agent.AccumulatedUsage { return h.usage.Snapshot() }
 
 func (h *cliEventHandler) OnToolCall(name string, args string) {}
 

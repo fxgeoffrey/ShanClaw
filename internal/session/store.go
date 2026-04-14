@@ -60,9 +60,9 @@ type UsageSummary struct {
 	ToolCostUSD float64 `json:"tool_cost_usd,omitempty"`
 }
 
-// UsageFromTurn converts agent.TurnUsage-like numeric values into a UsageSummary.
-// The caller passes the primitive fields so session doesn't need to import
-// package agent (which already imports session indirectly via manager.go).
+// UsageFromTurn converts LLM-only numeric values into a UsageSummary.
+// Left in place for callers that only have LLM data; new code should prefer
+// UsageFromAccumulated which carries both LLM and gateway-tool costs.
 func UsageFromTurn(llmCalls, inputTokens, outputTokens, totalTokens int, costUSD float64, cacheRead, cacheCreation int, model string) UsageSummary {
 	return UsageSummary{
 		LLMCalls:            llmCalls,
@@ -73,6 +73,28 @@ func UsageFromTurn(llmCalls, inputTokens, outputTokens, totalTokens int, costUSD
 		CacheReadTokens:     cacheRead,
 		CacheCreationTokens: cacheCreation,
 		Model:               model,
+	}
+}
+
+// UsageFromAccumulated builds a UsageSummary carrying both LLM and gateway
+// tool costs as separate fields so totals stay unambiguous when a run
+// touched billed tools (x_search, web_search).
+func UsageFromAccumulated(
+	llmCalls, inputTokens, outputTokens, totalTokens int, costUSD float64,
+	cacheRead, cacheCreation int, model string,
+	toolCalls int, toolCostUSD float64,
+) UsageSummary {
+	return UsageSummary{
+		LLMCalls:            llmCalls,
+		InputTokens:         inputTokens,
+		OutputTokens:        outputTokens,
+		TotalTokens:         totalTokens,
+		CostUSD:             costUSD,
+		CacheReadTokens:     cacheRead,
+		CacheCreationTokens: cacheCreation,
+		Model:               model,
+		ToolCalls:           toolCalls,
+		ToolCostUSD:         toolCostUSD,
 	}
 }
 

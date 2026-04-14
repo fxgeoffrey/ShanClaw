@@ -1389,14 +1389,17 @@ func (m *Model) runAgentLoop(query string, history []client.Message) tea.Cmd {
 				sess.Messages = append(sess.Messages, client.Message{Role: "assistant", Content: client.NewTextContent(result)})
 				sess.MessageMeta = append(sess.MessageMeta, session.MessageMeta{Source: "local", Timestamp: session.TimePtr(time.Now())})
 			}
-			// Persist handler-accumulated usage (direct LLM + cloud_delegate)
-			// into the session's cumulative Usage summary.
+			// Persist handler-accumulated usage (direct LLM + cloud_delegate +
+			// gateway tool billing) into the session's cumulative Usage
+			// summary. LLM and tool costs are stored in separate fields.
 			if sess != nil {
-				tu := handler.Usage()
-				if tu.LLMCalls > 0 || tu.InputTokens > 0 || tu.OutputTokens > 0 {
-					m.sessions.AddUsage(sess.ID, session.UsageFromTurn(
-						tu.LLMCalls, tu.InputTokens, tu.OutputTokens, tu.TotalTokens,
-						tu.CostUSD, tu.CacheReadTokens, tu.CacheCreationTokens, tu.Model,
+				acc := handler.Usage()
+				llm := acc.LLM
+				if llm.LLMCalls > 0 || acc.ToolCalls > 0 || llm.InputTokens > 0 {
+					m.sessions.AddUsage(sess.ID, session.UsageFromAccumulated(
+						llm.LLMCalls, llm.InputTokens, llm.OutputTokens, llm.TotalTokens,
+						llm.CostUSD, llm.CacheReadTokens, llm.CacheCreationTokens, llm.Model,
+						acc.ToolCalls, acc.ToolCostUSD,
 					))
 				}
 			}
@@ -2256,8 +2259,9 @@ type tuiEventHandler struct {
 	usage          agent.UsageAccumulator
 }
 
-// Usage returns the cumulative LLM usage collected during this handler's lifetime.
-func (h *tuiEventHandler) Usage() agent.TurnUsage { return h.usage.Snapshot() }
+// Usage returns the cumulative usage collected during this handler's lifetime,
+// split into LLM and gateway-tool billing.
+func (h *tuiEventHandler) Usage() agent.AccumulatedUsage { return h.usage.Snapshot() }
 
 // ResetUsage clears accumulated totals. Called between TUI prompts to scope
 // usage reporting to a single run.

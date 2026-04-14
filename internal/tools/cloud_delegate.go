@@ -65,20 +65,26 @@ func (t *CloudDelegateTool) SetAgentContext(name, prompt string) {
 func (t *CloudDelegateTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
 		Name: "cloud_delegate",
-		Description: "Delegate to Shannon Cloud. Remote execution, 5-15 minutes.\n\n" +
-			"Call ONLY when ALL of these are true:\n" +
-			"  1. Task decomposes into 3+ independent sub-tasks on different entities/domains/time-windows\n" +
-			"  2. Each sub-task itself would need multiple searches/fetches\n" +
-			"  3. Sub-tasks don't need each other's intermediate results (combine only at the end)\n\n" +
-			"If any condition fails, use local tools instead:\n" +
-			"  - Find/list people or accounts on social media → x_search\n" +
-			"  - Fetch a specific web page → web_fetch or http\n" +
-			"  - Single-topic iterative research → x_search loop locally\n" +
-			"  - Write the result to a file → file_write\n\n" +
-			"Examples:\n" +
-			"  USE:     \"Compare EV policy in US/EU/JP/CN markets\"  (4 independent regions)\n" +
-			"  DO NOT:  \"Find Japanese SaaS marketers on Twitter\"   (single domain → x_search)\n" +
-			"  DO NOT:  \"Research company X's competitors\"          (iterative single-thread → x_search)",
+		Description: "Delegate to Shannon Cloud. Remote, 5-15 min, expensive.\n\n" +
+			"Use cloud_delegate ONLY when the task contains 3+ sub-investigations that\n" +
+			"each require a DIFFERENT source and a DIFFERENT query strategy, and only\n" +
+			"need to converge at the end (intermediate state sharing between agents is fine).\n\n" +
+			"Key distinction — do not confuse these:\n" +
+			"  - OUTPUT cardinality (return N items in a list)        → NOT parallelism\n" +
+			"  - INVESTIGATION cardinality (run N different queries\n" +
+			"    on N different sources with N different strategies)  → may warrant cloud\n\n" +
+			"A single platform returning a long list is ONE investigation, regardless\n" +
+			"of list length. Use local tools.\n\n" +
+			"Do NOT use cloud_delegate when:\n" +
+			"  - One query on one platform can return the list (even if list is long)\n" +
+			"  - Task iterates on a single topic/entity with follow-up queries\n" +
+			"  - The task names one domain, one source, or one entity\n" +
+			"  - The user asks to \"find N X's\" on a specific platform\n\n" +
+			"Local routing by task shape:\n" +
+			"  - List/enumerate/find on any single platform   → x_search\n" +
+			"  - Iterative research on one topic              → x_search + web_fetch\n" +
+			"  - Fetch a specific URL                         → web_fetch or http\n" +
+			"  - Save output                                  → file_write",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

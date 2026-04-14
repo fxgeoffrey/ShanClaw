@@ -939,11 +939,13 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 			// a few successful tool iterations that ran up tokens before a
 			// later LLM call failed).
 			if up, ok := handler.(agent.UsageProvider); ok {
-				tu := up.Usage()
-				if tu.LLMCalls > 0 || tu.InputTokens > 0 || tu.OutputTokens > 0 {
-					sessMgr.AddUsage(sess.ID, session.UsageFromTurn(
-						tu.LLMCalls, tu.InputTokens, tu.OutputTokens, tu.TotalTokens,
-						tu.CostUSD, tu.CacheReadTokens, tu.CacheCreationTokens, tu.Model,
+				acc := up.Usage()
+				llm := acc.LLM
+				if llm.LLMCalls > 0 || acc.ToolCalls > 0 || llm.InputTokens > 0 {
+					sessMgr.AddUsage(sess.ID, session.UsageFromAccumulated(
+						llm.LLMCalls, llm.InputTokens, llm.OutputTokens, llm.TotalTokens,
+						llm.CostUSD, llm.CacheReadTokens, llm.CacheCreationTokens, llm.Model,
+						acc.ToolCalls, acc.ToolCostUSD,
 					))
 				}
 			}
@@ -1038,16 +1040,18 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 				session.MessageMeta{Source: source, Timestamp: session.TimePtr(replyTime)},
 			)
 		}
-		// Fold handler-accumulated usage (direct LLM + cloud_delegate) into
-		// the session totals before persisting. Handler is an interface, so
-		// the accumulator is opt-in via UsageProvider; non-accumulating
-		// handlers are silently skipped.
+		// Fold handler-accumulated usage (direct LLM + cloud_delegate + tool
+		// billing) into session totals before persisting. LLM and tool costs
+		// are stored in separate fields so the session JSON preserves the
+		// input+output==total_tokens invariant on the LLM side.
 		if up, ok := handler.(agent.UsageProvider); ok {
-			tu := up.Usage()
-			if tu.LLMCalls > 0 || tu.InputTokens > 0 || tu.OutputTokens > 0 {
-				sessMgr.AddUsage(sess.ID, session.UsageFromTurn(
-					tu.LLMCalls, tu.InputTokens, tu.OutputTokens, tu.TotalTokens,
-					tu.CostUSD, tu.CacheReadTokens, tu.CacheCreationTokens, tu.Model,
+			acc := up.Usage()
+			llm := acc.LLM
+			if llm.LLMCalls > 0 || acc.ToolCalls > 0 || llm.InputTokens > 0 {
+				sessMgr.AddUsage(sess.ID, session.UsageFromAccumulated(
+					llm.LLMCalls, llm.InputTokens, llm.OutputTokens, llm.TotalTokens,
+					llm.CostUSD, llm.CacheReadTokens, llm.CacheCreationTokens, llm.Model,
+					acc.ToolCalls, acc.ToolCostUSD,
 				))
 			}
 		}
@@ -1089,9 +1093,10 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		}
 	}
 
-	// Prefer handler-accumulated totals (includes cloud_delegate nested spend)
-	// over loop.Run's direct-only return. Falls back to the return value when
-	// the handler does not implement UsageProvider.
+	// Prefer handler-accumulated LLM totals (includes cloud_delegate nested
+	// spend) for the model token fields. Tool billing rolls into CostUSD
+	// on top of LLM cost but never into the token fields, so
+	// input_tokens+output_tokens==total_tokens stays true for API consumers.
 	reportedUsage := RunAgentUsage{
 		InputTokens:  usage.InputTokens,
 		OutputTokens: usage.OutputTokens,
@@ -1099,13 +1104,14 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		CostUSD:      usage.CostUSD,
 	}
 	if up, ok := handler.(agent.UsageProvider); ok {
-		tu := up.Usage()
-		if tu.LLMCalls > 0 || tu.TotalTokens > 0 || tu.CostUSD > 0 {
+		acc := up.Usage()
+		llm := acc.LLM
+		if llm.LLMCalls > 0 || llm.TotalTokens > 0 || llm.CostUSD > 0 || acc.ToolCostUSD > 0 {
 			reportedUsage = RunAgentUsage{
-				InputTokens:  tu.InputTokens,
-				OutputTokens: tu.OutputTokens,
-				TotalTokens:  tu.TotalTokens,
-				CostUSD:      tu.CostUSD,
+				InputTokens:  llm.InputTokens,
+				OutputTokens: llm.OutputTokens,
+				TotalTokens:  llm.TotalTokens,
+				CostUSD:      llm.CostUSD + acc.ToolCostUSD,
 			}
 		}
 	}

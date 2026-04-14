@@ -579,8 +579,10 @@ type daemonEventHandler struct {
 
 func (h *daemonEventHandler) SetSessionID(id string) { h.sessionID = id }
 
-// Usage returns the cumulative LLM usage collected during this handler's lifetime.
-func (h *daemonEventHandler) Usage() agent.TurnUsage { return h.usage.Snapshot() }
+// Usage returns the cumulative usage collected during this handler's lifetime,
+// split into LLM and gateway-tool billing so tool synthetic tokens don't
+// corrupt the LLM token accounting.
+func (h *daemonEventHandler) Usage() agent.AccumulatedUsage { return h.usage.Snapshot() }
 
 // ResetUsage clears accumulated totals. Use between independent messages on
 // the same long-lived handler so per-message cost reporting is accurate.
@@ -687,8 +689,8 @@ type autoApproveHandler struct {
 	usage agent.UsageAccumulator
 }
 
-// Usage returns the cumulative LLM usage collected during this handler's lifetime.
-func (h *autoApproveHandler) Usage() agent.TurnUsage { return h.usage.Snapshot() }
+// Usage returns the cumulative usage collected during this handler's lifetime.
+func (h *autoApproveHandler) Usage() agent.AccumulatedUsage { return h.usage.Snapshot() }
 
 func (h *autoApproveHandler) OnToolCall(name string, args string) {}
 func (h *autoApproveHandler) OnToolResult(name string, args string, result agent.ToolResult, elapsed time.Duration) {

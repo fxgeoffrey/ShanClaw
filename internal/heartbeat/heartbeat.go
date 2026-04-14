@@ -314,8 +314,8 @@ type TranscriptCollector struct {
 	usage    agent.UsageAccumulator
 }
 
-// Usage returns the cumulative LLM usage collected during the heartbeat run.
-func (tc *TranscriptCollector) Usage() agent.TurnUsage { return tc.usage.Snapshot() }
+// Usage returns the cumulative usage collected during the heartbeat run.
+func (tc *TranscriptCollector) Usage() agent.AccumulatedUsage { return tc.usage.Snapshot() }
 
 func (tc *TranscriptCollector) OnToolCall(name string, args string) {}
 func (tc *TranscriptCollector) OnToolResult(name string, args string, result agent.ToolResult, elapsed time.Duration) {

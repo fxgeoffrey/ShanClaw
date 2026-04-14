@@ -200,8 +200,8 @@ type scheduleHandler struct {
 	usage agent.UsageAccumulator
 }
 
-// Usage returns the cumulative LLM usage collected during this schedule run.
-func (h *scheduleHandler) Usage() agent.TurnUsage { return h.usage.Snapshot() }
+// Usage returns the cumulative usage collected during this schedule run.
+func (h *scheduleHandler) Usage() agent.AccumulatedUsage { return h.usage.Snapshot() }
 
 func (h *scheduleHandler) OnToolCall(name string, args string)                                      {}
 func (h *scheduleHandler) OnToolResult(name string, args string, result agent.ToolResult, elapsed time.Duration) {

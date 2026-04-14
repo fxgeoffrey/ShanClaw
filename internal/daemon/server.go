@@ -1119,8 +1119,8 @@ type httpEventHandler struct {
 	usage agent.UsageAccumulator
 }
 
-// Usage returns the cumulative LLM usage collected during this handler's lifetime.
-func (h *httpEventHandler) Usage() agent.TurnUsage { return h.usage.Snapshot() }
+// Usage returns the cumulative usage collected during this handler's lifetime.
+func (h *httpEventHandler) Usage() agent.AccumulatedUsage { return h.usage.Snapshot() }
 
 func (h *httpEventHandler) OnToolCall(name string, args string) {}
 func (h *httpEventHandler) OnToolResult(name string, args string, result agent.ToolResult, elapsed time.Duration) {
@@ -1153,8 +1153,8 @@ type sseEventHandler struct {
 	usage       agent.UsageAccumulator
 }
 
-// Usage returns the cumulative LLM usage collected during this handler's lifetime.
-func (h *sseEventHandler) Usage() agent.TurnUsage { return h.usage.Snapshot() }
+// Usage returns the cumulative usage collected during this handler's lifetime.
+func (h *sseEventHandler) Usage() agent.AccumulatedUsage { return h.usage.Snapshot() }
 
 func (h *sseEventHandler) OnToolCall(name string, args string) {
 	data := mustJSON(map[string]interface{}{"tool": name, "status": "running"})

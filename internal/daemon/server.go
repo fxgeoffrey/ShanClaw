@@ -787,9 +787,10 @@ func (s *Server) handleSessionSearch(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"results": results})
 }
 
-// handleEditMessage 截断指定 session 的历史消息并以新内容重新触发 agent。
-// 请求体：{"message_index": N, "new_content": "...", "agent": "可选"}
-// message_index 表示保留前 N 条消息，N 之后的消息全部丢弃，再以 new_content 重新发送。
+// handleEditMessage truncates session history and re-runs the agent with new content.
+// Body: {"message_index": N, "new_content": "...", "content": [...], "agent": "optional"}
+// message_index keeps the first N messages; everything after is discarded.
+// content is an optional array of multimodal blocks (images, files, etc.), same format as POST /message.
 func (s *Server) handleEditMessage(w http.ResponseWriter, r *http.Request) {
 	if s.deps == nil {
 		writeError(w, http.StatusInternalServerError, "daemon deps not configured")
@@ -807,15 +808,18 @@ func (s *Server) handleEditMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		MessageIndex int    `json:"message_index"`
-		NewContent   string `json:"new_content"`
-		Agent        string `json:"agent,omitempty"`
+		MessageIndex int                   `json:"message_index"`
+		NewContent   string                `json:"new_content"`
+		Content      []RequestContentBlock `json:"content,omitempty"`
+		Agent        string                `json:"agent,omitempty"`
 	}
 	if !decodeBody(w, r, &body) {
 		return
 	}
-	if strings.TrimSpace(body.NewContent) == "" {
-		writeError(w, http.StatusBadRequest, "new_content is required")
+	// Note: Validate() not called here — inline validation runs before truncation
+	// to avoid side-effects on bad input.
+	if strings.TrimSpace(body.NewContent) == "" && len(body.Content) == 0 {
+		writeError(w, http.StatusBadRequest, "new_content or content is required")
 		return
 	}
 	if body.Agent != "" {
@@ -843,6 +847,7 @@ func (s *Server) handleEditMessage(w http.ResponseWriter, r *http.Request) {
 	// 以新内容重新触发 agent，复用现有消息发送流程
 	runReq := RunAgentRequest{
 		Text:      body.NewContent,
+		Content:   body.Content,
 		Agent:     body.Agent,
 		SessionID: id,
 		Source:    "shanclaw",

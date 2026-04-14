@@ -990,14 +990,37 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil || errors.Is(msg.err, agent.ErrMaxIterReached) {
 			elapsed := formatElapsed(time.Since(m.processingStartTime))
 			usageDim := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
-			if msg.usage != nil {
+			// Prefer session's cumulative usage (captures direct LLM + cloud_delegate
+			// nested LLM calls) over msg.usage (direct LLM only from loop.Run).
+			var sessionUsage *session.UsageSummary
+			if sess := m.sessions.Current(); sess != nil {
+				sessionUsage = sess.Usage
+			}
+			switch {
+			case sessionUsage != nil && (sessionUsage.InputTokens > 0 || sessionUsage.OutputTokens > 0):
+				// Show the combined total as "cost:". Resumed sessions may
+				// carry a mix of pre-split and split-aware writes (e.g. a
+				// legacy session that accrued more spend after upgrading),
+				// so an llm/tools breakdown cannot be rendered accurately
+				// from the stored summary alone. Users who want the per-
+				// turn breakdown can see it in the one-shot CLI footer.
+				total := sessionUsage.CostUSD + sessionUsage.ToolCostUSD
+				usageStr := fmt.Sprintf("  tokens: %d in / %d out | cost: $%.4f | calls: %d",
+					sessionUsage.InputTokens, sessionUsage.OutputTokens,
+					total, sessionUsage.LLMCalls)
+				if sessionUsage.Model != "" {
+					usageStr += " | " + sessionUsage.Model
+				}
+				usageStr += " | " + elapsed
+				m.appendOutput(usageDim.Render(usageStr))
+			case msg.usage != nil:
 				usageStr := fmt.Sprintf("  tokens: %d | cost: $%.4f", msg.usage.TotalTokens, msg.usage.CostUSD)
 				if msg.usage.Model != "" {
 					usageStr += " | model: " + msg.usage.Model
 				}
 				usageStr += " | " + elapsed
 				m.appendOutput(usageDim.Render(usageStr))
-			} else {
+			default:
 				m.appendOutput(usageDim.Render("  " + elapsed))
 			}
 		}
@@ -1301,9 +1324,10 @@ func (m *Model) runAgentLoop(query string, history []client.Message) tea.Cmd {
 	m.cancelRun = cancel
 	m.injectCh = make(chan agent.InjectedMessage, 10)
 	return func() tea.Msg {
+		// Handler is hoisted so post-run code can query its accumulated usage.
+		handler := &tuiEventHandler{model: m}
 		if sess := m.sessions.Current(); sess != nil {
 			effectiveCWD := m.applyRuntimeContext(sess)
-			handler := &tuiEventHandler{model: m}
 			m.agentLoop.SetHandler(handler)
 			m.agentLoop.SetInjectCh(m.injectCh)
 			// Wire handler to cloud_delegate tool so it can stream events
@@ -1322,7 +1346,6 @@ func (m *Model) runAgentLoop(query string, history []client.Message) tea.Cmd {
 				m.agentLoop.SetWorkingSet(nil)
 			})
 		} else {
-			handler := &tuiEventHandler{model: m}
 			m.agentLoop.SetHandler(handler)
 			m.agentLoop.SetInjectCh(m.injectCh)
 			if ct, ok := m.toolRegistry.Get("cloud_delegate"); ok {
@@ -1372,6 +1395,20 @@ func (m *Model) runAgentLoop(query string, history []client.Message) tea.Cmd {
 				// Fallback: flat text (no RunMessages, e.g. early error).
 				sess.Messages = append(sess.Messages, client.Message{Role: "assistant", Content: client.NewTextContent(result)})
 				sess.MessageMeta = append(sess.MessageMeta, session.MessageMeta{Source: "local", Timestamp: session.TimePtr(time.Now())})
+			}
+			// Persist handler-accumulated usage (direct LLM + cloud_delegate +
+			// gateway tool billing) into the session's cumulative Usage
+			// summary. LLM and tool costs are stored in separate fields.
+			if sess != nil {
+				acc := handler.Usage()
+				llm := acc.LLM
+				if llm.LLMCalls > 0 || acc.ToolCalls > 0 || llm.InputTokens > 0 {
+					m.sessions.AddUsage(sess.ID, session.UsageFromAccumulated(
+						llm.LLMCalls, llm.InputTokens, llm.OutputTokens, llm.TotalTokens,
+						llm.CostUSD, llm.CacheReadTokens, llm.CacheCreationTokens, llm.Model,
+						acc.ToolCalls, acc.ToolCostUSD,
+					))
+				}
 			}
 			m.sessions.Save()
 		}
@@ -2226,7 +2263,16 @@ Commands:
 type tuiEventHandler struct {
 	model          *Model
 	cloudStreaming bool // when true, OnStreamDelta forwards to TUI (for cloud_delegate)
+	usage          agent.UsageAccumulator
 }
+
+// Usage returns the cumulative usage collected during this handler's lifetime,
+// split into LLM and gateway-tool billing.
+func (h *tuiEventHandler) Usage() agent.AccumulatedUsage { return h.usage.Snapshot() }
+
+// ResetUsage clears accumulated totals. Called between TUI prompts to scope
+// usage reporting to a single run.
+func (h *tuiEventHandler) ResetUsage() { h.usage.Reset() }
 
 func (h *tuiEventHandler) OnToolCall(name string, args string) {
 	// Skip spinner/indicator for think tool — its content is shown dimmed on result.
@@ -2270,7 +2316,9 @@ func (h *tuiEventHandler) SetCloudStreaming(enabled bool) {
 	h.cloudStreaming = enabled
 }
 
-func (h *tuiEventHandler) OnUsage(usage agent.TurnUsage) {}
+func (h *tuiEventHandler) OnUsage(usage agent.TurnUsage) {
+	h.usage.Add(usage)
+}
 
 func (h *tuiEventHandler) OnCloudAgent(agentID, status, message string) {
 	prefixes := map[string]string{"started": ">", "completed": "+", "thinking": "~", "tool": "?"}

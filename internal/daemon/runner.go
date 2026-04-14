@@ -934,6 +934,21 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 			sess.MessageMeta = append(sess.MessageMeta,
 				session.MessageMeta{Source: req.Source, Timestamp: session.TimePtr(time.Now())},
 			)
+			// Also fold whatever usage accumulated before the hard error so
+			// the saved session reflects real cost of the failed turn (e.g.
+			// a few successful tool iterations that ran up tokens before a
+			// later LLM call failed).
+			if up, ok := handler.(agent.UsageProvider); ok {
+				acc := up.Usage()
+				llm := acc.LLM
+				if llm.LLMCalls > 0 || acc.ToolCalls > 0 || llm.InputTokens > 0 {
+					sessMgr.AddUsage(sess.ID, session.UsageFromAccumulated(
+						llm.LLMCalls, llm.InputTokens, llm.OutputTokens, llm.TotalTokens,
+						llm.CostUSD, llm.CacheReadTokens, llm.CacheCreationTokens, llm.Model,
+						acc.ToolCalls, acc.ToolCostUSD,
+					))
+				}
+			}
 			if err := sessMgr.Save(); err != nil {
 				log.Printf("daemon: failed to save error session: %v", err)
 			} else {
@@ -1025,6 +1040,21 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 				session.MessageMeta{Source: source, Timestamp: session.TimePtr(replyTime)},
 			)
 		}
+		// Fold handler-accumulated usage (direct LLM + cloud_delegate + tool
+		// billing) into session totals before persisting. LLM and tool costs
+		// are stored in separate fields so the session JSON preserves the
+		// input+output==total_tokens invariant on the LLM side.
+		if up, ok := handler.(agent.UsageProvider); ok {
+			acc := up.Usage()
+			llm := acc.LLM
+			if llm.LLMCalls > 0 || acc.ToolCalls > 0 || llm.InputTokens > 0 {
+				sessMgr.AddUsage(sess.ID, session.UsageFromAccumulated(
+					llm.LLMCalls, llm.InputTokens, llm.OutputTokens, llm.TotalTokens,
+					llm.CostUSD, llm.CacheReadTokens, llm.CacheCreationTokens, llm.Model,
+					acc.ToolCalls, acc.ToolCostUSD,
+				))
+			}
+		}
 		saveErr = sessMgr.Save()
 		if saveErr != nil {
 			log.Printf("daemon: failed to save session: %v", saveErr)
@@ -1063,7 +1093,29 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		}
 	}
 
-	log.Printf("daemon: reply to %s (%d tokens, $%.4f)", agentName, usage.TotalTokens, usage.CostUSD)
+	// Prefer handler-accumulated LLM totals (includes cloud_delegate nested
+	// spend) for the model token fields. Tool billing rolls into CostUSD
+	// on top of LLM cost but never into the token fields, so
+	// input_tokens+output_tokens==total_tokens stays true for API consumers.
+	reportedUsage := RunAgentUsage{
+		InputTokens:  usage.InputTokens,
+		OutputTokens: usage.OutputTokens,
+		TotalTokens:  usage.TotalTokens,
+		CostUSD:      usage.CostUSD,
+	}
+	if up, ok := handler.(agent.UsageProvider); ok {
+		acc := up.Usage()
+		llm := acc.LLM
+		if llm.LLMCalls > 0 || llm.TotalTokens > 0 || llm.CostUSD > 0 || acc.ToolCostUSD > 0 {
+			reportedUsage = RunAgentUsage{
+				InputTokens:  llm.InputTokens,
+				OutputTokens: llm.OutputTokens,
+				TotalTokens:  llm.TotalTokens,
+				CostUSD:      llm.CostUSD + acc.ToolCostUSD,
+			}
+		}
+	}
+	log.Printf("daemon: reply to %s (%d tokens, $%.4f)", agentName, reportedUsage.TotalTokens, reportedUsage.CostUSD)
 
 	// Respect the keep_alive toggle after each completed turn.
 	if _, _, _, mgr := deps.RebuildLayers(); mgr != nil {
@@ -1077,15 +1129,10 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		returnedSessionID = ""
 	}
 	return &RunAgentResult{
-		Reply:     result,
-		SessionID: returnedSessionID,
-		Agent:     agentName,
-		Usage: RunAgentUsage{
-			InputTokens:  usage.InputTokens,
-			OutputTokens: usage.OutputTokens,
-			TotalTokens:  usage.TotalTokens,
-			CostUSD:      usage.CostUSD,
-		},
+		Reply:       result,
+		SessionID:   returnedSessionID,
+		Agent:       agentName,
+		Usage:       reportedUsage,
 		Partial:     status.Partial,
 		FailureCode: status.FailureCode,
 	}, nil

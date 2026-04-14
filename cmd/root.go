@@ -229,9 +229,20 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 			loop.SetContextWindow(*ac.ContextWindow)
 		}
 	}
-	loop.SetHandler(&cliEventHandler{autoApprove: autoApprove})
+	cliHandler := &cliEventHandler{autoApprove: autoApprove}
+	loop.SetHandler(cliHandler)
 	loop.SetBypassPermissions(dangerouslySkipPermissions)
 	loop.SetDeltaProvider(agent.NewTemporalDelta())
+
+	// cloud_delegate was registered before cliHandler existed (nil handler).
+	// Wire the handler now so cloud_delegate's nested LLM usage events reach
+	// the handler accumulator and end up in session totals and the CLI footer.
+	// Without this the one-shot footer under-reports cost for delegated runs.
+	if ct, ok := reg.Get("cloud_delegate"); ok {
+		if cdt, ok := ct.(*tools.CloudDelegateTool); ok {
+			cdt.SetHandler(cliHandler)
+		}
+	}
 
 	// Load skills (agent-scoped or global) and wire to loop + use_skill tool
 	var loadedSkills []*skills.Skill
@@ -276,11 +287,18 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 	loop.SetSessionCWD(effectiveCWD)
 	sessMgr.OnSessionClose(sess.ID, loop.SpillCleanupFunc())
 
-	result, usage, err := loop.Run(context.Background(), query, nil, nil)
+	result, _, err := loop.Run(context.Background(), query, nil, nil)
 	if err != nil && !errors.Is(err, agent.ErrMaxIterReached) {
 		return err
 	}
 	status := loop.LastRunStatus()
+
+	// Handler-accumulated usage includes direct LLM calls (from the loop),
+	// cloud_delegate's nested LLM calls, and gateway tool billing tracked
+	// separately. The LLM bucket preserves input+output==total_tokens; tool
+	// billing rolls up into ToolCostUSD/ToolTokens so the two don't mix.
+	totalUsage := cliHandler.Usage()
+	llm := totalUsage.LLM
 
 	// Persist session to disk
 	now := time.Now()
@@ -292,6 +310,11 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 		session.MessageMeta{Source: "local", Timestamp: session.TimePtr(now)},
 		session.MessageMeta{Source: "local", Timestamp: session.TimePtr(time.Now())},
 	)
+	sessMgr.AddUsage(sess.ID, session.UsageFromAccumulated(
+		llm.LLMCalls, llm.InputTokens, llm.OutputTokens, llm.TotalTokens, llm.CostUSD,
+		llm.CacheReadTokens, llm.CacheCreationTokens, llm.Model,
+		totalUsage.ToolCalls, totalUsage.ToolCostUSD,
+	))
 	if saveErr := sessMgr.Save(); saveErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to save session: %v\n", saveErr)
 	}
@@ -302,9 +325,14 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 	if err == nil && status.Partial && status.FailureCode == runstatus.CodeIterationLimit {
 		fmt.Fprintln(os.Stderr, "\nStopped early after repeated failed attempts.")
 	}
-	usageLine := fmt.Sprintf("\n[tokens: %d | cost: $%.4f", usage.TotalTokens, usage.CostUSD)
-	if usage.Model != "" {
-		usageLine += " | model: " + usage.Model
+	usageLine := fmt.Sprintf("\n[tokens: %d in / %d out | llm: $%.4f",
+		llm.InputTokens, llm.OutputTokens, llm.CostUSD)
+	if totalUsage.ToolCostUSD > 0 {
+		usageLine += fmt.Sprintf(" | tools: $%.4f (%d calls)", totalUsage.ToolCostUSD, totalUsage.ToolCalls)
+	}
+	usageLine += fmt.Sprintf(" | total: $%.4f | calls: %d", totalUsage.TotalCostUSD(), llm.LLMCalls)
+	if llm.Model != "" {
+		usageLine += " | " + llm.Model
 	}
 	fmt.Println(usageLine + "]")
 	return nil
@@ -332,7 +360,13 @@ func resolveOneShotCWD(agentOverride *agents.Agent) (string, error) {
 // cliEventHandler prompts for approval on stdout/stdin in one-shot mode
 type cliEventHandler struct {
 	autoApprove bool
+	usage       agent.UsageAccumulator
 }
+
+// Usage returns the cumulative usage collected during this handler's lifetime,
+// split into LLM and gateway-tool billing so tool synthetic tokens don't
+// corrupt the LLM token accounting.
+func (h *cliEventHandler) Usage() agent.AccumulatedUsage { return h.usage.Snapshot() }
 
 func (h *cliEventHandler) OnToolCall(name string, args string) {}
 
@@ -362,7 +396,9 @@ func (h *cliEventHandler) OnStreamDelta(delta string) {
 	fmt.Print(delta)
 }
 
-func (h *cliEventHandler) OnUsage(usage agent.TurnUsage) {}
+func (h *cliEventHandler) OnUsage(usage agent.TurnUsage) {
+	h.usage.Add(usage)
+}
 
 func (h *cliEventHandler) OnCloudAgent(agentID, status, message string) {
 	prefixes := map[string]string{"started": ">", "completed": "+", "thinking": "~", "tool": "?"}

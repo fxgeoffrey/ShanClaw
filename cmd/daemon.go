@@ -574,9 +574,19 @@ type daemonEventHandler struct {
 	sessionID   string         // set by RunAgent after session resolution (EventBus spans sessions)
 	wsClient    *daemon.Client // for event forwarding to Cloud
 	messageID   string         // scoped to current message
+	usage       agent.UsageAccumulator
 }
 
 func (h *daemonEventHandler) SetSessionID(id string) { h.sessionID = id }
+
+// Usage returns the cumulative usage collected during this handler's lifetime,
+// split into LLM and gateway-tool billing so tool synthetic tokens don't
+// corrupt the LLM token accounting.
+func (h *daemonEventHandler) Usage() agent.AccumulatedUsage { return h.usage.Snapshot() }
+
+// ResetUsage clears accumulated totals. Use between independent messages on
+// the same long-lived handler so per-message cost reporting is accurate.
+func (h *daemonEventHandler) ResetUsage() { h.usage.Reset() }
 
 func (h *daemonEventHandler) OnToolCall(name string, args string) {
 	if h.deps.EventBus != nil {
@@ -620,7 +630,9 @@ func (h *daemonEventHandler) OnStreamDelta(delta string) {
 		}
 	}
 }
-func (h *daemonEventHandler) OnUsage(usage agent.TurnUsage) {}
+func (h *daemonEventHandler) OnUsage(usage agent.TurnUsage) {
+	h.usage.Add(usage)
+}
 func (h *daemonEventHandler) OnCloudAgent(agentID, status, message string) {
 	if h.deps.EventBus != nil {
 		payload, _ := json.Marshal(map[string]string{"agent_id": agentID, "status": status, "message": message})
@@ -673,7 +685,12 @@ func (h *daemonEventHandler) OnApprovalNeeded(tool string, args string) bool {
 }
 
 // autoApproveHandler is a minimal EventHandler for internal triggers (watcher, heartbeat).
-type autoApproveHandler struct{}
+type autoApproveHandler struct {
+	usage agent.UsageAccumulator
+}
+
+// Usage returns the cumulative usage collected during this handler's lifetime.
+func (h *autoApproveHandler) Usage() agent.AccumulatedUsage { return h.usage.Snapshot() }
 
 func (h *autoApproveHandler) OnToolCall(name string, args string) {}
 func (h *autoApproveHandler) OnToolResult(name string, args string, result agent.ToolResult, elapsed time.Duration) {
@@ -681,7 +698,7 @@ func (h *autoApproveHandler) OnToolResult(name string, args string, result agent
 }
 func (h *autoApproveHandler) OnText(text string)                                     {}
 func (h *autoApproveHandler) OnStreamDelta(delta string)                             {}
-func (h *autoApproveHandler) OnUsage(usage agent.TurnUsage)                          {}
+func (h *autoApproveHandler) OnUsage(usage agent.TurnUsage)                          { h.usage.Add(usage) }
 func (h *autoApproveHandler) OnCloudAgent(agentID, status, message string)           {}
 func (h *autoApproveHandler) OnCloudProgress(completed, total int)                   {}
 func (h *autoApproveHandler) OnCloudPlan(planType, content string, needsReview bool) {}

@@ -38,6 +38,80 @@ type Session struct {
 	Channel         string           `json:"channel,omitempty"`           // source channel/group identifier
 	SummaryCache    string           `json:"summary_cache,omitempty"`     // cached summary Markdown
 	SummaryCacheKey string           `json:"summary_cache_key,omitempty"` // invalidation key for cached summary
+	Usage           *UsageSummary    `json:"usage,omitempty"`             // cumulative LLM + tool cost/token totals
+}
+
+// UsageSummary captures cumulative LLM and gateway-tool costs across a session.
+// LLM fields come from agent.TurnUsage (input/output tokens, cache tokens, cost).
+// Tool fields come from gateway tools that report usage (e.g. x_search→xAI Grok,
+// web_search→SerpAPI). Fields are additive across turns; zero-valued fields are
+// omitted from JSON for smaller session files.
+type UsageSummary struct {
+	LLMCalls            int     `json:"llm_calls,omitempty"`
+	InputTokens         int     `json:"input_tokens,omitempty"`
+	OutputTokens        int     `json:"output_tokens,omitempty"`
+	TotalTokens         int     `json:"total_tokens,omitempty"`
+	CostUSD             float64 `json:"cost_usd,omitempty"`
+	CacheReadTokens     int     `json:"cache_read_tokens,omitempty"`
+	CacheCreationTokens int     `json:"cache_creation_tokens,omitempty"`
+	Model               string  `json:"model,omitempty"` // last-seen model
+	// Gateway tool costs (populated once Shannon Cloud returns usage per tool call).
+	ToolCalls   int     `json:"tool_calls,omitempty"`
+	ToolCostUSD float64 `json:"tool_cost_usd,omitempty"`
+}
+
+// UsageFromTurn converts LLM-only numeric values into a UsageSummary.
+// Left in place for callers that only have LLM data; new code should prefer
+// UsageFromAccumulated which carries both LLM and gateway-tool costs.
+func UsageFromTurn(llmCalls, inputTokens, outputTokens, totalTokens int, costUSD float64, cacheRead, cacheCreation int, model string) UsageSummary {
+	return UsageSummary{
+		LLMCalls:            llmCalls,
+		InputTokens:         inputTokens,
+		OutputTokens:        outputTokens,
+		TotalTokens:         totalTokens,
+		CostUSD:             costUSD,
+		CacheReadTokens:     cacheRead,
+		CacheCreationTokens: cacheCreation,
+		Model:               model,
+	}
+}
+
+// UsageFromAccumulated builds a UsageSummary carrying both LLM and gateway
+// tool costs as separate fields so totals stay unambiguous when a run
+// touched billed tools (x_search, web_search).
+func UsageFromAccumulated(
+	llmCalls, inputTokens, outputTokens, totalTokens int, costUSD float64,
+	cacheRead, cacheCreation int, model string,
+	toolCalls int, toolCostUSD float64,
+) UsageSummary {
+	return UsageSummary{
+		LLMCalls:            llmCalls,
+		InputTokens:         inputTokens,
+		OutputTokens:        outputTokens,
+		TotalTokens:         totalTokens,
+		CostUSD:             costUSD,
+		CacheReadTokens:     cacheRead,
+		CacheCreationTokens: cacheCreation,
+		Model:               model,
+		ToolCalls:           toolCalls,
+		ToolCostUSD:         toolCostUSD,
+	}
+}
+
+// Add accumulates another UsageSummary into u.
+func (u *UsageSummary) Add(o UsageSummary) {
+	u.LLMCalls += o.LLMCalls
+	u.InputTokens += o.InputTokens
+	u.OutputTokens += o.OutputTokens
+	u.TotalTokens += o.TotalTokens
+	u.CostUSD += o.CostUSD
+	u.CacheReadTokens += o.CacheReadTokens
+	u.CacheCreationTokens += o.CacheCreationTokens
+	u.ToolCalls += o.ToolCalls
+	u.ToolCostUSD += o.ToolCostUSD
+	if o.Model != "" {
+		u.Model = o.Model
+	}
 }
 
 // SourceAt returns the source for message at index i, or "unknown" if not available.

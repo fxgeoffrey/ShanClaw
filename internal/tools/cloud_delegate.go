@@ -65,10 +65,26 @@ func (t *CloudDelegateTool) SetAgentContext(name, prompt string) {
 func (t *CloudDelegateTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
 		Name: "cloud_delegate",
-		Description: "Delegate a complex task to Shannon Cloud for multi-agent processing. " +
-			"Use for research, analysis, or tasks that benefit from multiple specialized agents " +
-			"working together. The task runs remotely and streams progress back. " +
-			"Returns the final result when complete.",
+		Description: "Delegate to Shannon Cloud. Remote, 5-15 min, expensive.\n\n" +
+			"Use cloud_delegate ONLY when the task contains 3+ sub-investigations that\n" +
+			"each require a DIFFERENT source and a DIFFERENT query strategy, and only\n" +
+			"need to converge at the end (intermediate state sharing between agents is fine).\n\n" +
+			"Key distinction — do not confuse these:\n" +
+			"  - OUTPUT cardinality (return N items in a list)        → NOT parallelism\n" +
+			"  - INVESTIGATION cardinality (run N different queries\n" +
+			"    on N different sources with N different strategies)  → may warrant cloud\n\n" +
+			"A single platform returning a long list is ONE investigation, regardless\n" +
+			"of list length. Use local tools.\n\n" +
+			"Do NOT use cloud_delegate when:\n" +
+			"  - One query on one platform can return the list (even if list is long)\n" +
+			"  - Task iterates on a single topic/entity with follow-up queries\n" +
+			"  - The task names one domain, one source, or one entity\n" +
+			"  - The user asks to \"find N X's\" on a specific platform\n\n" +
+			"Local routing by task shape:\n" +
+			"  - List/enumerate/find on any single platform   → x_search\n" +
+			"  - Iterative research on one topic              → x_search + web_fetch\n" +
+			"  - Fetch a specific URL                         → web_fetch or http\n" +
+			"  - Save output                                  → file_write",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -81,9 +97,12 @@ func (t *CloudDelegateTool) Info() agent.ToolInfo {
 					"description": "Optional context to include with the task (max 8000 chars). Can include relevant code snippets, data, or background information.",
 				},
 				"workflow_type": map[string]any{
-					"type":        "string",
-					"enum":        []string{"research", "swarm", "auto"},
-					"description": "Workflow type: 'research' for deep multi-source research with web search and synthesis. 'swarm' for complex tasks requiring a lead agent coordinating dynamic sub-agents (researcher, coder, analyst) with a shared workspace — best for open-ended analysis, multi-step problem solving, or tasks combining research + computation + writing. 'auto' (default) routes to a fixed DAG plan — good for structured tasks with clear subtask dependencies.",
+					"type": "string",
+					"enum": []string{"research", "swarm", "auto"},
+					"description": "Execution mode. Assumes the gate in the top-level description has already passed — this parameter does NOT expand eligibility for calling cloud_delegate. " +
+						"'auto' (default): system picks a DAG based on task shape. " +
+						"'research': fixed research DAG, ~5 min. " +
+						"'swarm': dynamic sub-agent spawning with shared workspace, 10-15 min; use only when sub-agents need to exchange intermediate files.",
 				},
 				"terminal": map[string]any{
 					"type":        "boolean",

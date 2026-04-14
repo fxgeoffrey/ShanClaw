@@ -125,6 +125,7 @@ var gatewayAllowedTools = map[string]bool{
 	"web_fetch":         true,
 	"web_subpage_fetch": true,
 	"web_crawl":         true,
+	"x_search":          true,
 	// Financial
 	"getStockBars":      true,
 	"alpaca_news":       true,

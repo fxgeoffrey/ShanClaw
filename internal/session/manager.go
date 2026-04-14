@@ -120,6 +120,36 @@ func (m *Manager) PatchSummaryCache(id, summary, cacheKey string) error {
 	return m.store.PatchSummaryCache(id, summary, cacheKey)
 }
 
+// AddUsage merges a usage delta into the session's cumulative UsageSummary.
+// If the target session is currently loaded it updates the in-memory copy too.
+// Caller is expected to follow up with Save() — this keeps persistence batching
+// up to the orchestration layer (daemon runner, CLI main) rather than doing a
+// write per LLM call.
+//
+// Provenance marker: when AddUsage initializes a fresh Usage field (nil →
+// non-nil) the session is marked SchemaVersion 2, because every value in
+// that new Usage will be written with split LLM/tool semantics. Sessions
+// that already had a Usage field from an earlier build are left at their
+// current SchemaVersion so we don't advertise a clean split we can't
+// guarantee — those totals may be mixed from intermediate builds.
+func (m *Manager) AddUsage(sessionID string, delta UsageSummary) {
+	if sessionID == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.current != nil && m.current.ID == sessionID {
+		freshUsage := m.current.Usage == nil
+		if freshUsage {
+			m.current.Usage = &UsageSummary{}
+			if m.current.SchemaVersion < 2 {
+				m.current.SchemaVersion = 2
+			}
+		}
+		m.current.Usage.Add(delta)
+	}
+}
+
 func (m *Manager) List() ([]SessionSummary, error) {
 	return m.store.List()
 }

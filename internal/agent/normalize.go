@@ -20,6 +20,7 @@ type FamilySpec struct {
 var ToolFamilies = map[string]string{
 	"web_search":    "web",
 	"web_fetch":     "web",
+	"x_search":      "web",
 	"browser":       "browser",
 	"accessibility": "gui",
 	"screenshot":    "gui",

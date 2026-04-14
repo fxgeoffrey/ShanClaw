@@ -162,7 +162,7 @@ const cloudDelegationGuidance = `
 
 ## Cloud Delegation
 
-You have access to cloud_delegate for tasks that exceed local capability.
+You have access to cloud_delegate for tasks with genuine parallel structure. Read cloud_delegate's own description for the exact cardinality rule; the guidance here is a summary.
 
 ALWAYS LOCAL (never delegate):
 - File read/write/edit on user's machine
@@ -175,25 +175,23 @@ ALWAYS LOCAL (never delegate):
 
 NEVER use cloud_delegate for writing files, running scripts, or any task where the result should exist on the user's machine. Cloud runs in a remote sandbox — files saved there are NOT accessible locally. If the user says "save", "write", "download", or "create a file", that MUST run locally.
 
-ALWAYS CLOUD (delegate):
-- Multi-source research ("compare X", "find all Y across Z")
-- Parallel independent subtasks (3+ that don't share state)
-- Web scraping / data collection at scale
-- Long analysis requiring multiple LLM reasoning steps
-- Tasks needing cloud-only tools (Python sandbox, calculators, data diffing) — these are NOT available locally but the cloud agent has them
+USE CLOUD (delegate) ONLY when the task contains 3+ sub-investigations that each require a DIFFERENT source AND a DIFFERENT query strategy, and only need to converge at the end. A single platform returning a long list is ONE investigation regardless of list length — handle locally.
 
-PREFER LOCAL (delegate only if struggling):
-- Single web search -> local http tool first
-- Simple Q&A with one source -> local first
+NOT A FALLBACK — do not escalate to cloud after local search struggles:
+cloud_delegate uses the SAME search backends (xAI Grok, SERP) as x_search and web_search. Delegating does NOT unlock new data sources or broader coverage. If x_search / web_search return sparse results, a small pool, or transient errors, that reflects either real-world data scarcity or transient infrastructure — neither is a signal to switch tools. Return what you collected, note the scope limitation, and stop. Do not interpret "I have tried local search N times" as a reason to try cloud_delegate.
 
-WORKFLOW TYPE SELECTION:
-- "research": Deep multi-source research with web search, citation, and synthesis. Use when the user wants thorough investigation of a topic from multiple angles.
-- "swarm": A lead agent dynamically coordinates sub-agents (researcher, coder, analyst) with a shared workspace. Use for open-ended complex tasks that combine research + computation + writing, or when the task scope is unclear and needs adaptive decomposition.
-- "auto": Routes to a fixed DAG plan with parallel subtasks. Good for structured tasks with clear steps.
+OUTPUT vs INVESTIGATION cardinality — do not confuse these:
+- OUTPUT cardinality ("return N items in a list") → NOT parallelism. Use local tools.
+- INVESTIGATION cardinality ("run N different queries on N different sources with N different strategies") → may warrant cloud.
 
-CRITICAL: Call cloud_delegate ONCE per task. When it returns a result, present the full result to the user — do not summarize or truncate it. The cloud already ran multiple agents and produced a polished deliverable. Never re-call cloud_delegate with the same or similar task.
+WORKFLOW TYPE SELECTION (only after the cardinality rule above passes):
+- "research": Deep research spanning 3+ distinct sources with citation and synthesis.
+- "swarm": Lead agent dynamically coordinates sub-agents (researcher, coder, analyst) with a shared workspace. For open-ended tasks combining research + computation + writing.
+- "auto": Fixed DAG plan with parallel subtasks. For structured tasks with clear steps.
 
-INDEPENDENT REVIEW: When you need to review code, analysis, or content you just produced in this session, consider delegating to cloud_delegate with workflow_type "review". The cloud agent has no prior context from this session, making it better at catching issues you might overlook due to reasoning inertia. Good candidates: code review of files you just wrote, fact-checking analysis you just produced, second opinion on a design decision.`
+CRITICAL: Call cloud_delegate ONCE per task. When it returns a result, present the full result to the user — do not summarize or truncate it. Never re-call cloud_delegate with the same or similar task.
+
+INDEPENDENT REVIEW: When you need a second opinion on code, analysis, or content you just produced in this session, cloud_delegate with workflow_type "review" is valid. The cloud agent has no prior context from this session, making it better at catching issues you might overlook due to reasoning inertia. Good candidates: code review of files you just wrote, fact-checking analysis you just produced, second opinion on a design decision.`
 
 // contrastExamplesCore contains behavioral GOOD/BAD pairs that apply to all agents.
 // These target the highest-impact cowork failure modes.
@@ -225,7 +223,11 @@ const contrastExamplesCloud = `
 
 ### Wrong cloud vs local boundary
 Anti-pattern: Delegating a task to cloud_delegate that depends on the user's local machine, local files, logged-in desktop apps, clipboard, or UI state.
-Correct: Keep tasks local when they require the user's environment or should leave artifacts on their machine. Use cloud delegation for broad research, parallel analysis, or large remote synthesis.`
+Correct: Keep tasks local when they require the user's environment or should leave artifacts on their machine. Use cloud delegation only for tasks with 3+ distinct sub-investigations, each needing a different source and a different query strategy.
+
+### Treating cloud_delegate as a fallback for local search
+Anti-pattern: After several x_search or web_search calls return sparse results or transient errors, delegating the same task to cloud_delegate to "get broader coverage" or "try a different approach".
+Correct: cloud_delegate uses the same search backends (xAI Grok, SERP) as x_search and web_search. Escalating does NOT unlock new data. If a single-platform search yields a small stable pool, that IS the answer — return the accumulated list with a note on scope, do not delegate.`
 
 type TurnUsage struct {
 	InputTokens         int

@@ -65,10 +65,13 @@ func (t *CloudDelegateTool) SetAgentContext(name, prompt string) {
 func (t *CloudDelegateTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
 		Name: "cloud_delegate",
-		Description: "Delegate a complex task to Shannon Cloud for multi-agent processing. " +
-			"Use for research, analysis, or tasks that benefit from multiple specialized agents " +
-			"working together. The task runs remotely and streams progress back. " +
-			"Returns the final result when complete.",
+		Description: "Delegate to Shannon Cloud for parallel multi-agent orchestration. " +
+			"Takes 5-15 minutes. Use ONLY when the task has multiple independent sub-problems " +
+			"that benefit from separate agents working simultaneously (e.g., comparing 5 companies " +
+			"in parallel, cross-referencing data from unrelated domains). " +
+			"Do NOT use for tasks you can handle yourself with x_search, web_search, web_fetch, " +
+			"or other available tools — even if the task requires many sequential searches. " +
+			"Single-threaded work (one topic, one domain, iterative searching) is always faster locally.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

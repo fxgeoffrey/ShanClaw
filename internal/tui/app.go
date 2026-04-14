@@ -998,9 +998,16 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			switch {
 			case sessionUsage != nil && (sessionUsage.InputTokens > 0 || sessionUsage.OutputTokens > 0):
+				// Show the combined total as "cost:". Resumed sessions may
+				// carry a mix of pre-split and split-aware writes (e.g. a
+				// legacy session that accrued more spend after upgrading),
+				// so an llm/tools breakdown cannot be rendered accurately
+				// from the stored summary alone. Users who want the per-
+				// turn breakdown can see it in the one-shot CLI footer.
+				total := sessionUsage.CostUSD + sessionUsage.ToolCostUSD
 				usageStr := fmt.Sprintf("  tokens: %d in / %d out | cost: $%.4f | calls: %d",
 					sessionUsage.InputTokens, sessionUsage.OutputTokens,
-					sessionUsage.CostUSD, sessionUsage.LLMCalls)
+					total, sessionUsage.LLMCalls)
 				if sessionUsage.Model != "" {
 					usageStr += " | " + sessionUsage.Model
 				}

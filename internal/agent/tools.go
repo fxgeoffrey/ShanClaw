@@ -56,6 +56,25 @@ type ToolResult struct {
 	IsRetryable   bool          // true only for transient errors
 	Images        []ImageBlock
 	CloudResult   bool // true when result is a cloud deliverable (bypass LLM summarization)
+	// Usage optionally reports per-call cost for this tool. Gateway tools
+	// whose server returns billing info (x_search → xAI tokens, web_search
+	// → SerpAPI query count) populate this so the audit logger can write a
+	// cost breakdown per tool call. nil when the tool does not bill per call.
+	Usage *ToolUsage
+}
+
+// ToolUsage is ToolResult's per-call cost breakdown. Mirrors client.ToolUsage
+// (see internal/client/gateway.go) so tool implementations depending on agent
+// don't need the client import.
+type ToolUsage struct {
+	Provider     string
+	Model        string
+	InputTokens  int
+	OutputTokens int
+	TotalTokens  int
+	CostUSD      float64
+	Units        int
+	UnitType     string
 }
 
 // TransientError returns a ToolResult for timeout/network failures where retry may help.

@@ -120,6 +120,25 @@ func (m *Manager) PatchSummaryCache(id, summary, cacheKey string) error {
 	return m.store.PatchSummaryCache(id, summary, cacheKey)
 }
 
+// AddUsage merges a usage delta into the session's cumulative UsageSummary.
+// If the target session is currently loaded it updates the in-memory copy too.
+// Caller is expected to follow up with Save() — this keeps persistence batching
+// up to the orchestration layer (daemon runner, CLI main) rather than doing a
+// write per LLM call.
+func (m *Manager) AddUsage(sessionID string, delta UsageSummary) {
+	if sessionID == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.current != nil && m.current.ID == sessionID {
+		if m.current.Usage == nil {
+			m.current.Usage = &UsageSummary{}
+		}
+		m.current.Usage.Add(delta)
+	}
+}
+
 func (m *Manager) List() ([]SessionSummary, error) {
 	return m.store.List()
 }

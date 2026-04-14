@@ -59,6 +59,12 @@ func partitionToolCalls(approved []approvedToolCall) [][]approvedToolCall {
 // If handler is non-nil, OnToolCall is fired for each call immediately
 // before execution begins (so "running" status reflects actual execution).
 func executeBatches(ctx context.Context, batches [][]approvedToolCall, execResults []toolExecResult, readTracker *ReadTracker, handler EventHandler) {
+	// Attach the handler's OnUsage as the per-run usage emitter so tools
+	// that bill per call (gateway tools reporting xAI/Grok or SerpAPI costs)
+	// can fold their usage into the session totals.
+	if handler != nil {
+		ctx = WithUsageEmit(ctx, handler.OnUsage)
+	}
 	for _, batch := range batches {
 		if len(batch) == 1 {
 			// Single call: run directly, no goroutine overhead.

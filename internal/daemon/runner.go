@@ -934,6 +934,19 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 			sess.MessageMeta = append(sess.MessageMeta,
 				session.MessageMeta{Source: req.Source, Timestamp: session.TimePtr(time.Now())},
 			)
+			// Also fold whatever usage accumulated before the hard error so
+			// the saved session reflects real cost of the failed turn (e.g.
+			// a few successful tool iterations that ran up tokens before a
+			// later LLM call failed).
+			if up, ok := handler.(agent.UsageProvider); ok {
+				tu := up.Usage()
+				if tu.LLMCalls > 0 || tu.InputTokens > 0 || tu.OutputTokens > 0 {
+					sessMgr.AddUsage(sess.ID, session.UsageFromTurn(
+						tu.LLMCalls, tu.InputTokens, tu.OutputTokens, tu.TotalTokens,
+						tu.CostUSD, tu.CacheReadTokens, tu.CacheCreationTokens, tu.Model,
+					))
+				}
+			}
 			if err := sessMgr.Save(); err != nil {
 				log.Printf("daemon: failed to save error session: %v", err)
 			} else {
@@ -1025,6 +1038,19 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 				session.MessageMeta{Source: source, Timestamp: session.TimePtr(replyTime)},
 			)
 		}
+		// Fold handler-accumulated usage (direct LLM + cloud_delegate) into
+		// the session totals before persisting. Handler is an interface, so
+		// the accumulator is opt-in via UsageProvider; non-accumulating
+		// handlers are silently skipped.
+		if up, ok := handler.(agent.UsageProvider); ok {
+			tu := up.Usage()
+			if tu.LLMCalls > 0 || tu.InputTokens > 0 || tu.OutputTokens > 0 {
+				sessMgr.AddUsage(sess.ID, session.UsageFromTurn(
+					tu.LLMCalls, tu.InputTokens, tu.OutputTokens, tu.TotalTokens,
+					tu.CostUSD, tu.CacheReadTokens, tu.CacheCreationTokens, tu.Model,
+				))
+			}
+		}
 		saveErr = sessMgr.Save()
 		if saveErr != nil {
 			log.Printf("daemon: failed to save session: %v", saveErr)
@@ -1063,7 +1089,27 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		}
 	}
 
-	log.Printf("daemon: reply to %s (%d tokens, $%.4f)", agentName, usage.TotalTokens, usage.CostUSD)
+	// Prefer handler-accumulated totals (includes cloud_delegate nested spend)
+	// over loop.Run's direct-only return. Falls back to the return value when
+	// the handler does not implement UsageProvider.
+	reportedUsage := RunAgentUsage{
+		InputTokens:  usage.InputTokens,
+		OutputTokens: usage.OutputTokens,
+		TotalTokens:  usage.TotalTokens,
+		CostUSD:      usage.CostUSD,
+	}
+	if up, ok := handler.(agent.UsageProvider); ok {
+		tu := up.Usage()
+		if tu.LLMCalls > 0 || tu.TotalTokens > 0 || tu.CostUSD > 0 {
+			reportedUsage = RunAgentUsage{
+				InputTokens:  tu.InputTokens,
+				OutputTokens: tu.OutputTokens,
+				TotalTokens:  tu.TotalTokens,
+				CostUSD:      tu.CostUSD,
+			}
+		}
+	}
+	log.Printf("daemon: reply to %s (%d tokens, $%.4f)", agentName, reportedUsage.TotalTokens, reportedUsage.CostUSD)
 
 	// Respect the keep_alive toggle after each completed turn.
 	if _, _, _, mgr := deps.RebuildLayers(); mgr != nil {
@@ -1077,15 +1123,10 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		returnedSessionID = ""
 	}
 	return &RunAgentResult{
-		Reply:     result,
-		SessionID: returnedSessionID,
-		Agent:     agentName,
-		Usage: RunAgentUsage{
-			InputTokens:  usage.InputTokens,
-			OutputTokens: usage.OutputTokens,
-			TotalTokens:  usage.TotalTokens,
-			CostUSD:      usage.CostUSD,
-		},
+		Reply:       result,
+		SessionID:   returnedSessionID,
+		Agent:       agentName,
+		Usage:       reportedUsage,
 		Partial:     status.Partial,
 		FailureCode: status.FailureCode,
 	}, nil

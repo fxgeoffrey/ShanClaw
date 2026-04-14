@@ -20,6 +20,18 @@ type AuditEntry struct {
 	Decision      string    `json:"decision"`
 	Approved      bool      `json:"approved"`
 	DurationMs    int64     `json:"duration_ms"`
+	// Cost fields (populated when tool reports usage, e.g. gateway tools that
+	// call xAI Grok / SerpAPI). Omitted when the tool does not return usage.
+	// TotalTokens is the aggregate; for tools that only report a flat count
+	// (SERP APIs, current Shannon Cloud schema) only TotalTokens is populated.
+	// LLM-backed tools that expose input/output split also fill InputTokens/OutputTokens.
+	InputTokens         int     `json:"input_tokens,omitempty"`
+	OutputTokens        int     `json:"output_tokens,omitempty"`
+	TotalTokens         int     `json:"total_tokens,omitempty"`
+	CostUSD             float64 `json:"cost_usd,omitempty"`
+	Model               string  `json:"model,omitempty"`
+	CacheReadTokens     int     `json:"cache_read_tokens,omitempty"`
+	CacheCreationTokens int     `json:"cache_creation_tokens,omitempty"`
 }
 
 // AuditLogger writes audit entries as JSON lines to a log file.

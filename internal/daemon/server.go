@@ -1115,7 +1115,12 @@ func (s *Server) handlePermissionsRequest(w http.ResponseWriter, r *http.Request
 }
 
 // httpEventHandler is an EventHandler for synchronous HTTP responses.
-type httpEventHandler struct{}
+type httpEventHandler struct {
+	usage agent.UsageAccumulator
+}
+
+// Usage returns the cumulative LLM usage collected during this handler's lifetime.
+func (h *httpEventHandler) Usage() agent.TurnUsage { return h.usage.Snapshot() }
 
 func (h *httpEventHandler) OnToolCall(name string, args string) {}
 func (h *httpEventHandler) OnToolResult(name string, args string, result agent.ToolResult, elapsed time.Duration) {
@@ -1123,7 +1128,7 @@ func (h *httpEventHandler) OnToolResult(name string, args string, result agent.T
 }
 func (h *httpEventHandler) OnText(text string)            {}
 func (h *httpEventHandler) OnStreamDelta(delta string)    {}
-func (h *httpEventHandler) OnUsage(usage agent.TurnUsage) {}
+func (h *httpEventHandler) OnUsage(usage agent.TurnUsage) { h.usage.Add(usage) }
 
 // OnApprovalNeeded auto-approves for local HTTP API calls.
 // Threat model: localhost-only, unauthenticated but local-trusted.
@@ -1145,7 +1150,11 @@ type sseEventHandler struct {
 	ctx         context.Context
 	autoApprove bool
 	deps        *ServerDeps
+	usage       agent.UsageAccumulator
 }
+
+// Usage returns the cumulative LLM usage collected during this handler's lifetime.
+func (h *sseEventHandler) Usage() agent.TurnUsage { return h.usage.Snapshot() }
 
 func (h *sseEventHandler) OnToolCall(name string, args string) {
 	data := mustJSON(map[string]interface{}{"tool": name, "status": "running"})
@@ -1174,7 +1183,20 @@ func (h *sseEventHandler) OnStreamDelta(delta string) {
 	h.flusher.Flush()
 }
 
-func (h *sseEventHandler) OnUsage(usage agent.TurnUsage) {}
+func (h *sseEventHandler) OnUsage(usage agent.TurnUsage) {
+	h.usage.Add(usage)
+	// Also emit as SSE event so clients can render live cost meters.
+	data := mustJSON(map[string]interface{}{
+		"input_tokens":  usage.InputTokens,
+		"output_tokens": usage.OutputTokens,
+		"total_tokens":  usage.TotalTokens,
+		"cost_usd":      usage.CostUSD,
+		"llm_calls":     usage.LLMCalls,
+		"model":         usage.Model,
+	})
+	fmt.Fprintf(h.w, "event: usage\ndata: %s\n\n", data)
+	h.flusher.Flush()
+}
 
 func (h *sseEventHandler) OnCloudAgent(agentID, status, message string) {
 	data, _ := json.Marshal(map[string]interface{}{

@@ -690,6 +690,34 @@ type ToolExecuteResponse struct {
 	Text            *string         `json:"text"`
 	Error           *string         `json:"error"`
 	ExecutionTimeMs int             `json:"execution_time_ms,omitempty"`
+	// Usage reports resource consumption from the underlying provider (e.g.
+	// xAI Grok tokens for x_search, SerpAPI query count for web_search).
+	// Server-populated when available; nil when the tool does not bill per call.
+	Usage *ToolUsage `json:"usage,omitempty"`
+}
+
+// ToolUsage captures cost information reported by a gateway tool execution.
+// Shannon Cloud's current schema is flat: a single `tokens` count and
+// `cost_usd`. For SERP tools (web_search), `tokens` is a synthetic billing
+// count (e.g. 7500 per query at $2/1M rate). For LLM-backed tools (x_search
+// → xAI Responses API), `tokens` is the real input+output token total and
+// `cost_usd` includes both the per-call fee and token cost.
+//
+// Expanded fields (Input/OutputTokens, Provider, Model, Units) are reserved
+// for future gateway schema upgrades; today only Tokens+CostUSD are populated.
+type ToolUsage struct {
+	Tokens    int     `json:"tokens,omitempty"`     // gateway's current flat token count
+	CostUSD   float64 `json:"cost_usd,omitempty"`
+	CostModel string  `json:"cost_model,omitempty"` // synthetic model tag (e.g. "shannon_web_search", "grok-3")
+
+	// Forward-compat fields — populated only if/when the gateway schema adds them.
+	Provider     string `json:"provider,omitempty"`
+	Model        string `json:"model,omitempty"`
+	InputTokens  int    `json:"input_tokens,omitempty"`
+	OutputTokens int    `json:"output_tokens,omitempty"`
+	TotalTokens  int    `json:"total_tokens,omitempty"`
+	Units        int    `json:"units,omitempty"`
+	UnitType     string `json:"unit_type,omitempty"`
 }
 
 // ListTools fetches available server-side tool schemas from the gateway.

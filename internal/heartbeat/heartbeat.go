@@ -311,7 +311,11 @@ func (m *Manager) Close() {
 // TranscriptCollector captures all messages during a run for post-run inspection.
 type TranscriptCollector struct {
 	Messages []client.Message
+	usage    agent.UsageAccumulator
 }
+
+// Usage returns the cumulative LLM usage collected during the heartbeat run.
+func (tc *TranscriptCollector) Usage() agent.TurnUsage { return tc.usage.Snapshot() }
 
 func (tc *TranscriptCollector) OnToolCall(name string, args string) {}
 func (tc *TranscriptCollector) OnToolResult(name string, args string, result agent.ToolResult, elapsed time.Duration) {
@@ -320,7 +324,7 @@ func (tc *TranscriptCollector) OnText(text string) {
 	tc.Messages = append(tc.Messages, client.Message{Role: "assistant", Content: client.NewTextContent(text)})
 }
 func (tc *TranscriptCollector) OnStreamDelta(delta string)                             {}
-func (tc *TranscriptCollector) OnUsage(usage agent.TurnUsage)                          {}
+func (tc *TranscriptCollector) OnUsage(usage agent.TurnUsage)                          { tc.usage.Add(usage) }
 func (tc *TranscriptCollector) OnCloudAgent(agentID, status, message string)           {}
 func (tc *TranscriptCollector) OnCloudProgress(completed, total int)                   {}
 func (tc *TranscriptCollector) OnCloudPlan(planType, content string, needsReview bool) {}

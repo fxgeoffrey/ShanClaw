@@ -65,13 +65,20 @@ func (t *CloudDelegateTool) SetAgentContext(name, prompt string) {
 func (t *CloudDelegateTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
 		Name: "cloud_delegate",
-		Description: "Delegate to Shannon Cloud for parallel multi-agent orchestration. " +
-			"Takes 5-15 minutes. Use ONLY when the task has multiple independent sub-problems " +
-			"that benefit from separate agents working simultaneously (e.g., comparing 5 companies " +
-			"in parallel, cross-referencing data from unrelated domains). " +
-			"Do NOT use for tasks you can handle yourself with x_search, web_search, web_fetch, " +
-			"or other available tools — even if the task requires many sequential searches. " +
-			"Single-threaded work (one topic, one domain, iterative searching) is always faster locally.",
+		Description: "Delegate to Shannon Cloud. Remote execution, 5-15 minutes.\n\n" +
+			"Call ONLY when ALL of these are true:\n" +
+			"  1. Task decomposes into 3+ independent sub-tasks on different entities/domains/time-windows\n" +
+			"  2. Each sub-task itself would need multiple searches/fetches\n" +
+			"  3. Sub-tasks don't need each other's intermediate results (combine only at the end)\n\n" +
+			"If any condition fails, use local tools instead:\n" +
+			"  - Find/list people or accounts on social media → x_search\n" +
+			"  - Fetch a specific web page → web_fetch or http\n" +
+			"  - Single-topic iterative research → x_search loop locally\n" +
+			"  - Write the result to a file → file_write\n\n" +
+			"Examples:\n" +
+			"  USE:     \"Compare EV policy in US/EU/JP/CN markets\"  (4 independent regions)\n" +
+			"  DO NOT:  \"Find Japanese SaaS marketers on Twitter\"   (single domain → x_search)\n" +
+			"  DO NOT:  \"Research company X's competitors\"          (iterative single-thread → x_search)",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -84,9 +91,12 @@ func (t *CloudDelegateTool) Info() agent.ToolInfo {
 					"description": "Optional context to include with the task (max 8000 chars). Can include relevant code snippets, data, or background information.",
 				},
 				"workflow_type": map[string]any{
-					"type":        "string",
-					"enum":        []string{"research", "swarm", "auto"},
-					"description": "Workflow type: 'research' for deep multi-source research with web search and synthesis. 'swarm' for complex tasks requiring a lead agent coordinating dynamic sub-agents (researcher, coder, analyst) with a shared workspace — best for open-ended analysis, multi-step problem solving, or tasks combining research + computation + writing. 'auto' (default) routes to a fixed DAG plan — good for structured tasks with clear subtask dependencies.",
+					"type": "string",
+					"enum": []string{"research", "swarm", "auto"},
+					"description": "Execution mode. Assumes the gate in the top-level description has already passed — this parameter does NOT expand eligibility for calling cloud_delegate. " +
+						"'auto' (default): system picks a DAG based on task shape. " +
+						"'research': fixed research DAG, ~5 min. " +
+						"'swarm': dynamic sub-agent spawning with shared workspace, 10-15 min; use only when sub-agents need to exchange intermediate files.",
 				},
 				"terminal": map[string]any{
 					"type":        "boolean",

@@ -991,6 +991,18 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			return "", err
 		}
 		usage.Add(finalResp.Usage)
+		if a.handler != nil && (finalResp.Usage.InputTokens > 0 || finalResp.Usage.OutputTokens > 0) {
+			a.handler.OnUsage(TurnUsage{
+				InputTokens:         finalResp.Usage.InputTokens,
+				OutputTokens:        finalResp.Usage.OutputTokens,
+				TotalTokens:         finalResp.Usage.TotalTokens,
+				CostUSD:             finalResp.Usage.CostUSD,
+				CacheReadTokens:     finalResp.Usage.CacheReadTokens,
+				CacheCreationTokens: finalResp.Usage.CacheCreationTokens,
+				LLMCalls:            1,
+				Model:               finalResp.Model,
+			})
+		}
 
 		text := strings.TrimSpace(finalResp.OutputText)
 		if text == "" {
@@ -1425,6 +1437,21 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		}
 
 		usage.Add(resp.Usage)
+		// Emit incremental usage delta to handler for accumulation/persistence.
+		// Handler sums these into session totals. Model is carried so the last-seen
+		// model wins at the session level (handler decides its own precedence).
+		if a.handler != nil && (resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0) {
+			a.handler.OnUsage(TurnUsage{
+				InputTokens:         resp.Usage.InputTokens,
+				OutputTokens:        resp.Usage.OutputTokens,
+				TotalTokens:         resp.Usage.TotalTokens,
+				CostUSD:             resp.Usage.CostUSD,
+				CacheReadTokens:     resp.Usage.CacheReadTokens,
+				CacheCreationTokens: resp.Usage.CacheCreationTokens,
+				LLMCalls:            1,
+				Model:               resp.Model,
+			})
+		}
 		// Log cache metrics for debugging prompt cache effectiveness
 		if resp.Usage.CacheReadTokens > 0 || resp.Usage.CacheCreationTokens > 0 {
 			// Cache hit ratio: cache_read / total_prompt_tokens.
@@ -1737,7 +1764,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			callMeta[idx].decision = decision
 			callMeta[idx].wasApproved = wasApproved
 			if decision == "deny" {
-				a.logAudit(fc.Name, argsStr, "tool call denied by permission policy", decision, false, 0)
+				a.logAudit(fc.Name, argsStr, "tool call denied by permission policy", decision, false, 0, nil)
 				callMeta[idx].resolved = true
 				execResults[idx] = toolExecResult{
 					result: ToolResult{Content: "tool call denied by permission policy", IsError: true},
@@ -1748,7 +1775,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				continue
 			}
 			if decision == "ask" && !wasApproved {
-				a.logAudit(fc.Name, argsStr, "tool call denied by user", decision, false, 0)
+				a.logAudit(fc.Name, argsStr, "tool call denied by user", decision, false, 0, nil)
 				callMeta[idx].resolved = true
 				execResults[idx] = toolExecResult{
 					result: ToolResult{Content: "Tool execution was DENIED by the user. The command did NOT run. Do not claim it completed or report any output from it.", IsError: true},
@@ -1767,7 +1794,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 					fmt.Fprintf(os.Stderr, "[hooks] pre-tool-use error: %v\n", hookErr)
 				}
 				if hookDecision == "deny" {
-					a.logAudit(fc.Name, argsStr, "tool call denied by hook: "+hookReason, "deny", false, 0)
+					a.logAudit(fc.Name, argsStr, "tool call denied by hook: "+hookReason, "deny", false, 0, nil)
 					callMeta[idx].resolved = true
 					execResults[idx] = toolExecResult{
 						result: ToolResult{Content: "tool call denied by hook: " + hookReason, IsError: true},
@@ -1844,7 +1871,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 					_ = a.hookRunner.RunPostToolUse(ctx, fc.Name, argsStr, result.Content, "")
 				}
 
-				a.logAudit(fc.Name, argsStr, result.Content, decision, wasApproved, elapsed.Milliseconds())
+				a.logAudit(fc.Name, argsStr, result.Content, decision, wasApproved, elapsed.Milliseconds(), result.Usage)
 
 				if a.handler != nil {
 					a.handler.OnToolResult(fc.Name, argsStr, result, elapsed)
@@ -2316,11 +2343,14 @@ func extractToolPath(toolName, argsJSON string) string {
 }
 
 // logAudit writes an audit entry if the auditor is configured.
-func (a *AgentLoop) logAudit(toolName, argsStr, outputSummary, decision string, approved bool, durationMs int64) {
+// Optional usage (from gateway tools reporting xAI/Grok or SerpAPI costs)
+// is written alongside the tool call so per-call cost is discoverable in
+// the audit log.
+func (a *AgentLoop) logAudit(toolName, argsStr, outputSummary, decision string, approved bool, durationMs int64, usage *ToolUsage) {
 	if a.auditor == nil {
 		return
 	}
-	a.auditor.Log(audit.AuditEntry{
+	entry := audit.AuditEntry{
 		Timestamp:     time.Now(),
 		SessionID:     a.sessionID,
 		ToolName:      toolName,
@@ -2329,7 +2359,15 @@ func (a *AgentLoop) logAudit(toolName, argsStr, outputSummary, decision string, 
 		Decision:      decision,
 		Approved:      approved,
 		DurationMs:    durationMs,
-	})
+	}
+	if usage != nil {
+		entry.InputTokens = usage.InputTokens
+		entry.OutputTokens = usage.OutputTokens
+		entry.TotalTokens = usage.TotalTokens
+		entry.CostUSD = usage.CostUSD
+		entry.Model = usage.Model
+	}
+	a.auditor.Log(entry)
 }
 
 // base64ImagePattern matches long base64 strings that start with known image signatures.

@@ -870,7 +870,16 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		if ac.ContextWindow != nil {
 			loop.SetContextWindow(*ac.ContextWindow)
 		}
+		if ac.IdleSoftTimeoutSecs != nil {
+			runCfg.Agent.IdleSoftTimeoutSecs = *ac.IdleSoftTimeoutSecs
+		}
+		if ac.IdleHardTimeoutSecs != nil {
+			runCfg.Agent.IdleHardTimeoutSecs = *ac.IdleHardTimeoutSecs
+		}
 	}
+	// Apply idle-timeout config AFTER per-agent overrides have been folded
+	// into runCfg, otherwise agent-level opt-in/override silently does nothing.
+	loop.SetIdleTimeouts(runCfg.Agent.IdleSoftTimeoutSecs, runCfg.Agent.IdleHardTimeoutSecs)
 	if req.ModelOverride != "" {
 		loop.SetModelTier(req.ModelOverride)
 	}
@@ -925,10 +934,59 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 	// Always set (even nil) to clear paths from a previous run on a reused loop.
 	loop.SetUserFilePaths(extractUserFilePaths(req.Content))
 	sessMgr.OnSessionClose(sess.ID, loop.SpillCleanupFunc())
+
+	// file:// preview bridge: lazily-started loopback HTTP server that
+	// rewrites browser_navigate(file://...) into http://127.0.0.1/<token>/…
+	// so Playwright's Chromium deny-list doesn't strand the agent.
+	//
+	// Allowlist: the bridge only serves files already reachable by the
+	// agent's other tools — the effective session CWD subtree plus any
+	// explicit user-attached files. This prevents browser_navigate from
+	// becoming an escape hatch that reads arbitrary local files outside
+	// the normal file-access boundary.
+	filePreview := tools.NewFilePreviewBridge()
+	if effectiveCWD != "" {
+		filePreview.AllowRoot(effectiveCWD)
+	}
+	for _, p := range extractUserFilePaths(req.Content) {
+		filePreview.AllowFile(p)
+	}
+	sessMgr.OnSessionClose(sess.ID, func() { _ = filePreview.Close() })
+	ctx = tools.WithFilePreview(ctx, filePreview)
 	if attachmentCleanup != nil {
 		attachmentRegistered = true // cancel the defer safety net
 		sessMgr.OnClose(attachmentCleanup)
 	}
+
+	// Turn persistence: capture the session state at turn start so both the
+	// mid-turn checkpoint hook and the post-turn final save can rebuild
+	// messages + usage idempotently from (baseline + current loop state).
+	// This is the single source of truth — no append-on-top anywhere in
+	// the turn's persistence path, which would otherwise double-write any
+	// transcript that crossed a checkpoint boundary.
+	checkpointSource := req.Source
+	if checkpointSource == "" {
+		checkpointSource = "unknown"
+	}
+	turnBase := captureTurnBaseline(sess, checkpointSource, preLoopUserAppended)
+	// The daemon handler implements agent.UsageProvider; extract once so
+	// callsites pass a strongly-typed provider (or nil) to applyTurnState.
+	var turnUsage usageProvider
+	if up, ok := handler.(agent.UsageProvider); ok {
+		turnUsage = up
+	}
+	loop.SetCheckpointMinInterval(2 * time.Second) // debounce in the loop, not here
+	loop.SetCheckpointFunc(func(ctx context.Context) error {
+		applyTurnState(sess, loop, turnUsage, turnBase)
+		sess.InProgress = true
+		if err := sessMgr.Save(); err != nil {
+			log.Printf("daemon: mid-turn checkpoint save failed: %v", err)
+			// Return the error so AgentLoop.maybeCheckpoint keeps the
+			// dirty flag set and the next fire point retries.
+			return err
+		}
+		return nil
+	})
 
 	result, usage, runErr := loop.Run(ctx, prompt, resolvedContent, history)
 	status := loop.LastRunStatus()
@@ -943,27 +1001,27 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		userErr := FriendlyAgentError(runErr)
 		savedSessionID := ""
 		if !req.Ephemeral && result == "" {
+			// Use the same idempotent rebuild as the mid-turn checkpoint
+			// and the normal final save: reset messages+usage to
+			// (baseline + current snapshot), then append the friendly
+			// error stub on top. This handles three previously-broken cases:
+			//   (a) a prior checkpoint already persisted partial transcript
+			//       — we must not duplicate it by appending the error on
+			//       top of what's already there.
+			//   (b) a dirty checkpoint was debounced just before the error
+			//       — rebuilding from RunMessages picks up the trailing
+			//       batches that never got their own save.
+			//   (c) usage was already folded by a checkpoint — AddUsage
+			//       would double-count, so use baseline+current instead.
+			applyTurnMessages(sess, loop, turnBase)
 			sess.Messages = append(sess.Messages,
 				client.Message{Role: "assistant", Content: client.NewTextContent(userErr)},
 			)
 			sess.MessageMeta = append(sess.MessageMeta,
 				session.MessageMeta{Source: req.Source, Timestamp: session.TimePtr(time.Now())},
 			)
-			// Also fold whatever usage accumulated before the hard error so
-			// the saved session reflects real cost of the failed turn (e.g.
-			// a few successful tool iterations that ran up tokens before a
-			// later LLM call failed).
-			if up, ok := handler.(agent.UsageProvider); ok {
-				acc := up.Usage()
-				llm := acc.LLM
-				if llm.LLMCalls > 0 || acc.ToolCalls > 0 || llm.InputTokens > 0 {
-					sessMgr.AddUsage(sess.ID, session.UsageFromAccumulated(
-						llm.LLMCalls, llm.InputTokens, llm.OutputTokens, llm.TotalTokens,
-						llm.CostUSD, llm.CacheReadTokens, llm.CacheCreationTokens, llm.Model,
-						acc.ToolCalls, acc.ToolCostUSD,
-					))
-				}
-			}
+			applyTurnUsage(sess, turnUsage, turnBase)
+			sess.InProgress = false // hard-error path: turn is over, clear marker
 			if err := sessMgr.Save(); err != nil {
 				log.Printf("daemon: failed to save error session: %v", err)
 			} else {
@@ -1003,48 +1061,28 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 			}
 		}
 
-		// Append the turn to the session and persist.
-		// Prefer full conversation messages (including tool_use/tool_result turns)
-		// from RunMessages() so resumed sessions give the LLM tool-call evidence.
-		// Falls back to flat text if RunMessages() is empty (early LLM error).
-		source := req.Source
-		if source == "" {
-			source = "unknown"
-		}
-		runMsgs := loop.RunMessages()
-		runInjected := loop.RunMessageInjected()
-		runTimestamps := loop.RunMessageTimestamps()
-		if len(runMsgs) > 0 {
-			// RunMessages includes: [user prompt, assistant+tool_use, tool_result, ..., final assistant].
-			// If the user message was already appended pre-loop, skip the first
-			// message from runMsgs (same user prompt) to avoid duplication.
-			startIdx := 0
-			if preLoopUserAppended && len(runMsgs) > 0 && runMsgs[0].Role == "user" {
-				startIdx = 1
-			}
-			fallbackTime := time.Now()
-			for i, msg := range runMsgs[startIdx:] {
-				idx := i + startIdx
-				ts := fallbackTime
-				if idx < len(runTimestamps) && !runTimestamps[idx].IsZero() {
-					ts = runTimestamps[idx]
-				}
-				sess.Messages = append(sess.Messages, msg)
-				meta := session.MessageMeta{Source: source, Timestamp: session.TimePtr(ts)}
-				if idx < len(runInjected) && runInjected[idx] {
-					meta.SystemInjected = true
-				}
-				sess.MessageMeta = append(sess.MessageMeta, meta)
-			}
+		// Final save uses the same (baseline + current snapshot) rebuild as
+		// mid-turn checkpoints, so a turn that produced checkpoints never
+		// gets its transcript double-written here.
+		if len(loop.RunMessages()) > 0 {
+			applyTurnMessages(sess, loop, turnBase)
 		} else {
-			// Fallback: flat text (early error or no messages accumulated).
+			// Fallback: flat text (early LLM error with nothing accumulated).
+			// Truncate to baseline first so this path is also idempotent
+			// under the (unusual) case where a prior checkpoint ran.
+			if len(sess.Messages) > turnBase.msgCount {
+				sess.Messages = sess.Messages[:turnBase.msgCount]
+			}
+			if len(sess.MessageMeta) > turnBase.metaCount {
+				sess.MessageMeta = sess.MessageMeta[:turnBase.metaCount]
+			}
 			if !preLoopUserAppended {
 				fallbackContent := buildUserMsgContent(prompt, resolvedContent)
 				sess.Messages = append(sess.Messages,
 					client.Message{Role: "user", Content: fallbackContent},
 				)
 				sess.MessageMeta = append(sess.MessageMeta,
-					session.MessageMeta{Source: source, Timestamp: session.TimePtr(userMsgTime)},
+					session.MessageMeta{Source: checkpointSource, Timestamp: session.TimePtr(userMsgTime)},
 				)
 			}
 			replyTime := time.Now()
@@ -1052,24 +1090,11 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 				client.Message{Role: "assistant", Content: client.NewTextContent(result)},
 			)
 			sess.MessageMeta = append(sess.MessageMeta,
-				session.MessageMeta{Source: source, Timestamp: session.TimePtr(replyTime)},
+				session.MessageMeta{Source: checkpointSource, Timestamp: session.TimePtr(replyTime)},
 			)
 		}
-		// Fold handler-accumulated usage (direct LLM + cloud_delegate + tool
-		// billing) into session totals before persisting. LLM and tool costs
-		// are stored in separate fields so the session JSON preserves the
-		// input+output==total_tokens invariant on the LLM side.
-		if up, ok := handler.(agent.UsageProvider); ok {
-			acc := up.Usage()
-			llm := acc.LLM
-			if llm.LLMCalls > 0 || acc.ToolCalls > 0 || llm.InputTokens > 0 {
-				sessMgr.AddUsage(sess.ID, session.UsageFromAccumulated(
-					llm.LLMCalls, llm.InputTokens, llm.OutputTokens, llm.TotalTokens,
-					llm.CostUSD, llm.CacheReadTokens, llm.CacheCreationTokens, llm.Model,
-					acc.ToolCalls, acc.ToolCostUSD,
-				))
-			}
-		}
+		applyTurnUsage(sess, turnUsage, turnBase) // idempotent: baseline + current
+		sess.InProgress = false                   // turn completed — clear mid-turn crash marker
 		saveErr = sessMgr.Save()
 		if saveErr != nil {
 			log.Printf("daemon: failed to save session: %v", saveErr)
@@ -1184,8 +1209,123 @@ func closeRouteDone(done chan struct{}) {
 // full conversation from RunMessages(), not just a friendly error stub.
 func isSoftRunError(err error) bool {
 	return errors.Is(err, agent.ErrMaxIterReached) ||
+		errors.Is(err, agent.ErrHardIdleTimeout) ||
 		errors.Is(err, context.Canceled) ||
 		errors.Is(err, context.DeadlineExceeded)
+}
+
+// turnBaseline captures pre-turn session state so both mid-turn checkpoints
+// and the post-turn final save can idempotently rebuild the session from
+// (baseline + current loop snapshot) — never append-on-top. This is the
+// single persistence invariant for a turn: after applyTurnState runs, the
+// session reflects exactly one canonical transcript and one usage total
+// for the accumulated turn, no matter how many times the function is
+// called.
+type turnBaseline struct {
+	msgCount    int
+	metaCount   int
+	usage       session.UsageSummary // pre-turn cumulative usage; zero if sess.Usage was nil
+	hadUsage    bool                 // true if sess.Usage was non-nil at baseline
+	source      string
+	preLoopUser bool
+}
+
+// captureTurnBaseline snapshots sess state at turn start so subsequent
+// applyTurnState calls can rebuild idempotently.
+func captureTurnBaseline(sess *session.Session, source string, preLoopUserAppended bool) turnBaseline {
+	b := turnBaseline{
+		msgCount:    len(sess.Messages),
+		metaCount:   len(sess.MessageMeta),
+		source:      source,
+		preLoopUser: preLoopUserAppended,
+	}
+	if sess.Usage != nil {
+		b.usage = *sess.Usage
+		b.hadUsage = true
+	}
+	return b
+}
+
+// applyTurnMessages rebuilds sess.Messages/MessageMeta from baseline +
+// loop.RunMessages(). Idempotent — safe to call any number of times with
+// changing loop state (compaction shrinks etc.).
+func applyTurnMessages(sess *session.Session, loop *agent.AgentLoop, b turnBaseline) {
+	if len(sess.Messages) > b.msgCount {
+		sess.Messages = sess.Messages[:b.msgCount]
+	}
+	if len(sess.MessageMeta) > b.metaCount {
+		sess.MessageMeta = sess.MessageMeta[:b.metaCount]
+	}
+	runMsgs := loop.RunMessages()
+	if len(runMsgs) == 0 {
+		return
+	}
+	runInjected := loop.RunMessageInjected()
+	runTimestamps := loop.RunMessageTimestamps()
+	startIdx := 0
+	if b.preLoopUser && runMsgs[0].Role == "user" {
+		startIdx = 1
+	}
+	fallbackTime := time.Now()
+	for i := startIdx; i < len(runMsgs); i++ {
+		ts := fallbackTime
+		if i < len(runTimestamps) && !runTimestamps[i].IsZero() {
+			ts = runTimestamps[i]
+		}
+		sess.Messages = append(sess.Messages, runMsgs[i])
+		meta := session.MessageMeta{Source: b.source, Timestamp: session.TimePtr(ts)}
+		if i < len(runInjected) && runInjected[i] {
+			meta.SystemInjected = true
+		}
+		sess.MessageMeta = append(sess.MessageMeta, meta)
+	}
+}
+
+// usageProvider is the local interface applyTurnUsage needs. Defined here
+// (rather than accepting agent.UsageProvider directly) so the caller type
+// is restricted at compile time — a future refactor that dropped the
+// interface on the daemon handler would fail to compile instead of
+// silently no-op'ing the usage folding at runtime.
+type usageProvider interface {
+	Usage() agent.AccumulatedUsage
+}
+
+// applyTurnUsage sets sess.Usage to (baseline + current accumulator).
+// Idempotent — no double-counting across checkpoint + final-save calls.
+// A nil provider is a no-op (used by unit tests that exercise only the
+// message path).
+func applyTurnUsage(sess *session.Session, up usageProvider, b turnBaseline) {
+	if up == nil {
+		return
+	}
+	acc := up.Usage()
+	llm := acc.LLM
+	hasTurnUsage := llm.LLMCalls > 0 || acc.ToolCalls > 0 || llm.InputTokens > 0 ||
+		llm.CostUSD > 0 || acc.ToolCostUSD > 0
+	if !b.hadUsage && !hasTurnUsage {
+		return
+	}
+	total := b.usage
+	if hasTurnUsage {
+		total.Add(session.UsageFromAccumulated(
+			llm.LLMCalls, llm.InputTokens, llm.OutputTokens, llm.TotalTokens,
+			llm.CostUSD, llm.CacheReadTokens, llm.CacheCreationTokens, llm.Model,
+			acc.ToolCalls, acc.ToolCostUSD,
+		))
+	}
+	sess.Usage = &total
+	if sess.SchemaVersion < 2 {
+		sess.SchemaVersion = 2
+	}
+}
+
+// applyTurnState is the combined rebuild — messages + usage — used by
+// both mid-turn checkpoints and the post-turn final save so a turn is
+// never persisted twice via different paths. up may be nil (usage skipped).
+func applyTurnState(sess *session.Session, loop *agent.AgentLoop,
+	up usageProvider, b turnBaseline) {
+	applyTurnMessages(sess, loop, b)
+	applyTurnUsage(sess, up, b)
 }
 
 // FriendlyAgentError maps raw agent errors to user-facing messages.

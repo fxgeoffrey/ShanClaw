@@ -289,6 +289,20 @@ type EventHandler interface {
 	OnCloudPlan(planType string, content string, needsReview bool)
 }
 
+// RunStatusHandler is an optional interface a handler may implement to receive
+// turn-level status updates (watchdog soft/hard idle, retries). The agent loop
+// checks for it via a type assertion, so handlers that do not implement it
+// simply miss these events with no breakage.
+//
+// Known codes:
+//
+//	"idle_soft"  — no activity for IdleSoftTimeout; informational, turn continues
+//	"idle_hard"  — no activity for IdleHardTimeout; turn about to be cancelled
+//	"llm_retry"  — transient LLM error, retrying
+type RunStatusHandler interface {
+	OnRunStatus(code string, detail string)
+}
+
 // InjectedMessage is a mid-run follow-up message delivered by the caller.
 // Text is appended as a new user turn at the next iteration boundary.
 // CWD is optional metadata used by higher layers to enforce immutable
@@ -335,7 +349,44 @@ type AgentLoop struct {
 	runMsgInjected    []bool           // parallel to runMessages: true = system-injected guardrail/nudge
 	runMsgTimestamps  []time.Time      // parallel to runMessages: when each message was created
 	lastRunStatus     RunStatus
+
+	// Watchdog thresholds (0 = disabled). The watchdog observes the loop's
+	// phase tracker and only measures duration in "idle-counted" phases
+	// (PhaseAwaitingLLM, PhaseForceStop) — see phase.go. Tool execution,
+	// approval waits, and compaction wrappers are structurally excluded by
+	// their phase, not by manual suspend bookkeeping.
+	idleSoftTimeout time.Duration
+	idleHardTimeout time.Duration
+	// watchdogTick overrides the default 1s tick for tests. Production
+	// should leave this zero.
+	watchdogTick time.Duration
+
+	// checkpointFn is fired mid-turn at specific phase-exit boundaries
+	// (after a tool batch, after successful reactive compaction, before
+	// ForceStop), gated on the tracker's dirty flag so no-op transitions do
+	// not trigger I/O. It runs synchronously on the loop goroutine and must
+	// return promptly (typically session.Save()).
+	checkpointFn CheckpointFunc
+	// checkpointMinInterval debounces maybeCheckpoint so tool-heavy turns
+	// do not thrash persistence. Zero disables the debounce. The check
+	// runs BEFORE TakeDirty so a skipped tick leaves the dirty flag set
+	// for the next fire point — dirty state is never silently dropped.
+	checkpointMinInterval time.Duration
+	lastCheckpointAt      time.Time
+
+	// tracker is the per-Run phase state machine. Created at Run() entry,
+	// set to PhaseDone + AssertClean via defer on exit. Reads are safe from
+	// any goroutine (watchdog observer); writes are loop-goroutine only.
+	tracker *phaseTracker
 }
+
+// CheckpointFunc is invoked mid-turn at phase-exit boundaries by AgentLoop.Run
+// so the caller can persist partial session state. Implementations should
+// rebuild the session from loop.RunMessages() idempotently — no diff-append.
+// Return a non-nil error to indicate the persistence attempt failed; the
+// loop will leave the tracker's dirty flag set and skip the debounce
+// stamp so the next fire point retries the save immediately.
+type CheckpointFunc func(ctx context.Context) error
 
 func NewAgentLoop(gw client.LLMClient, tools *ToolRegistry, modelTier string, shannonDir string, maxIter int, resultTrunc int, argsTrunc int, perms *permissions.PermissionsConfig, auditor *audit.AuditLogger, hookRunner *hooks.HookRunner) *AgentLoop {
 	if maxIter <= 0 {
@@ -364,6 +415,85 @@ func NewAgentLoop(gw client.LLMClient, tools *ToolRegistry, modelTier string, sh
 
 func (a *AgentLoop) SetHandler(h EventHandler) {
 	a.handler = h
+}
+
+// SetCheckpointFunc installs a mid-turn persistence hook. It is invoked at
+// durable phase-exit boundaries (after tool batches, after successful
+// reactive compaction, before ForceStop) when the tracker's dirty flag is
+// set. Implementations must be idempotent and fast — typically
+// session.Save() that rebuilds the transcript from loop.RunMessages().
+func (a *AgentLoop) SetCheckpointFunc(fn CheckpointFunc) {
+	a.checkpointFn = fn
+}
+
+// SetCheckpointMinInterval sets a debounce window between checkpoint
+// fires. When a fire point is reached within this window of the previous
+// successful checkpoint, the call is skipped and the dirty flag is left
+// set so the next fire point will pick up the pending durable state.
+// Zero disables the debounce.
+func (a *AgentLoop) SetCheckpointMinInterval(d time.Duration) {
+	a.checkpointMinInterval = d
+}
+
+// maybeCheckpoint fires the checkpoint hook only if the tracker's dirty
+// flag is set AND the debounce window has elapsed. Safe to call at any
+// phase boundary; no-ops when no durable state was produced since the
+// last checkpoint OR when called too soon after the previous fire.
+//
+// Failure-preserving invariants:
+//   - Debounce check happens BEFORE consulting the dirty flag — a
+//     throttled tick leaves the dirty flag set.
+//   - Dirty is only CLEARED on successful save. A checkpoint callback
+//     returning a non-nil error leaves dirty set AND skips the debounce
+//     stamp, so the very next fire point retries.
+//   - Peek-then-take: we read the dirty flag without clearing it, fire
+//     the callback, and only take-and-clear on success. This keeps the
+//     "dirty means unsaved durable state" invariant intact across
+//     storage errors and callback panics.
+//
+// Context-cancellation caveat: when ctx.Err() is set we skip without
+// firing the callback. Dirty stays set, but since Run is exiting, no
+// further fire point will occur. This is safe because the daemon runner
+// always reaches the final-save path (soft or hard error) after Run
+// returns, and that path uses the SAME idempotent rebuild — so the
+// pending durable state is persisted there, not dropped.
+func (a *AgentLoop) maybeCheckpoint(ctx context.Context) {
+	if a.checkpointFn == nil || a.tracker == nil {
+		return
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	if a.checkpointMinInterval > 0 && !a.lastCheckpointAt.IsZero() &&
+		time.Since(a.lastCheckpointAt) < a.checkpointMinInterval {
+		return // dirty flag intentionally left set for next fire
+	}
+	if !a.tracker.IsDirty() {
+		return
+	}
+	if err := a.checkpointFn(ctx); err != nil {
+		// Leave dirty set and do NOT stamp lastCheckpointAt — the next
+		// fire point retries the save without being throttled.
+		return
+	}
+	a.tracker.TakeDirty() // only clear on successful save
+	a.lastCheckpointAt = time.Now()
+}
+
+// SetIdleTimeouts configures the per-run watchdog. Zero disables that
+// threshold individually. Typical defaults (soft=90s, hard=0) keep the
+// watchdog in visibility-only mode.
+func (a *AgentLoop) SetIdleTimeouts(softSecs, hardSecs int) {
+	if softSecs > 0 {
+		a.idleSoftTimeout = time.Duration(softSecs) * time.Second
+	} else {
+		a.idleSoftTimeout = 0
+	}
+	if hardSecs > 0 {
+		a.idleHardTimeout = time.Duration(hardSecs) * time.Second
+	} else {
+		a.idleHardTimeout = 0
+	}
 }
 
 func (a *AgentLoop) SetModelTier(tier string) {
@@ -641,6 +771,47 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	a.runMsgInjected = nil   // reset for this run
 	a.runMsgTimestamps = nil // reset for this run
 	a.lastRunStatus = RunStatus{}
+
+	// Phase tracker: initialized per Run. AssertClean fires the fail-closed
+	// invariant if any EnterTransient restore was forgotten (panics in
+	// testing.Testing() or SHANNON_PHASE_STRICT=1, logs otherwise).
+	a.tracker = newPhaseTracker()
+	defer func() {
+		a.tracker.Enter(PhaseDone)
+		a.tracker.AssertClean()
+	}()
+	a.tracker.Enter(PhaseSetup)
+
+	// Turn-level watchdog. Hard=0 keeps production in visibility-only mode:
+	// soft status events flow to any RunStatusHandler on the handler, hard
+	// cancellation is off until we flip defaults after dogfood. Using
+	// WithCancelCause so context.Cause(ctx) carries ErrHardIdleTimeout when
+	// the watchdog does fire, letting callers distinguish from user cancel.
+	ctx, cancelCause := context.WithCancelCause(ctx)
+	defer cancelCause(nil)
+	watchdogTick := a.watchdogTick
+	if watchdogTick <= 0 {
+		watchdogTick = defaultWatchdogTick
+	}
+	stopWatchdog := runWatchdogWithTick(ctx, a.tracker,
+		a.idleSoftTimeout, a.idleHardTimeout, watchdogTick,
+		func(phase TurnPhase, idle time.Duration) {
+			if rs, ok := a.handler.(RunStatusHandler); ok {
+				rs.OnRunStatus("idle_soft",
+					fmt.Sprintf("no LLM activity for %s (phase=%s)",
+						idle.Round(time.Second), phase))
+			}
+		},
+		func(phase TurnPhase, idle time.Duration) {
+			if rs, ok := a.handler.(RunStatusHandler); ok {
+				rs.OnRunStatus("idle_hard",
+					fmt.Sprintf("cancelling after %s idle (phase=%s)",
+						idle.Round(time.Second), phase))
+			}
+		},
+		cancelCause,
+	)
+	defer stopWatchdog()
 
 	if a.workingSet == nil {
 		a.workingSet = NewWorkingSet()
@@ -976,6 +1147,23 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			Content: client.NewTextContent("[system] " + reason),
 		})
 		markInjected()
+		// Pre-ForceStop: the loop-detector verdict + accumulated tool state
+		// are durable; mark dirty so the checkpoint hook saves before the
+		// final LLM call, then fire it. PhaseForceStop is idle-counted so
+		// the watchdog still observes the final LLM call — this is
+		// intentional. If the ForceStop itself stalls, a second idle_soft
+		// event fires (seq bumps on every Enter), which is the correct
+		// behavior: the ForceStop is our last-resort stop-the-bleeding
+		// turn and its LLM call deserves the same liveness guarantee as
+		// a normal AwaitingLLM.
+		if a.tracker != nil {
+			a.tracker.MarkDirty()
+		}
+		captureRunMessages()
+		a.maybeCheckpoint(ctx)
+		if a.tracker != nil {
+			a.tracker.Enter(PhaseForceStop)
+		}
 
 		req := client.CompletionRequest{
 			Messages:        messages,
@@ -989,7 +1177,15 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		finalResp, err := a.completeWithRetry(ctx, req)
 		if err != nil {
 			captureRunMessages()
-			setRunStatus(runstatus.CodeFromError(err), false)
+			// Hard-idle during ForceStop is still a soft/partial outcome,
+			// not a hard error — the decision to stop was already durable
+			// (MarkDirty fired before the call). Match the main-loop
+			// classification at loop.go's AwaitingLLM cancel path.
+			if errors.Is(err, ErrHardIdleTimeout) {
+				setRunStatus(runstatus.CodeDeadlineExceeded, true)
+			} else {
+				setRunStatus(runstatus.CodeFromError(err), false)
+			}
 			return "", err
 		}
 		usage.Add(finalResp.Usage)
@@ -1104,6 +1300,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				}
 			}
 			if len(injected) > 0 {
+				a.tracker.Enter(PhaseInjectingMessage)
 				combined := strings.Join(injected, "\n\n")
 				latestUserText = combined // track for deferred-tool continuation nudge
 				messages = append(messages, client.Message{
@@ -1171,18 +1368,24 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				shouldCompact = ctxwin.ShouldCompact(est, 0, a.contextWindow)
 			}
 			if shouldCompact {
+				a.tracker.Enter(PhaseCompacting)
 				if compactionSummary == "" {
 					// Write-before-compact: persist durable learnings to MEMORY.md
 					// before messages are discarded by compaction.
 					if a.memoryDir != "" {
-						if pErr := ctxwin.PersistLearnings(ctx, a.client, messages, a.memoryDir); pErr != nil {
+						restoreLLM := a.tracker.EnterTransient(PhaseAwaitingLLM)
+						pErr := ctxwin.PersistLearnings(ctx, a.client, messages, a.memoryDir)
+						restoreLLM()
+						if pErr != nil {
 							fmt.Fprintf(os.Stderr, "[context] persist learnings failed: %v\n", pErr)
 						} else {
 							fmt.Fprintf(os.Stderr, "[context] persisted learnings to MEMORY.md\n")
 						}
 					}
 
+					restoreLLM := a.tracker.EnterTransient(PhaseAwaitingLLM)
 					summary, sumErr := ctxwin.GenerateSummary(ctx, a.client, messages)
+					restoreLLM()
 					if sumErr != nil {
 						summaryFailures++
 						fmt.Fprintf(os.Stderr, "[context] compaction summary failed (%d/%d): %v\n", summaryFailures, maxSummaryFailures, sumErr)
@@ -1256,6 +1459,11 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 
 		const maxLLMRetries = 3
 		for attempt := 0; ; attempt++ {
+			// Enter (or re-enter) the idle-counted phase for this attempt.
+			// The watchdog (Slice 3) measures duration here. Post-call we
+			// transition out based on outcome (tool exec, error, etc.).
+			a.tracker.Enter(PhaseAwaitingLLM)
+
 			// On retries, skip streaming to avoid duplicate partial deltas.
 			if attempt == 0 && a.enableStreaming && a.handler != nil {
 				streamingText.Reset()
@@ -1293,6 +1501,15 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 					stampMessage()
 				}
 				captureRunMessages()
+				// Distinguish watchdog hard-timeout from user-initiated cancel.
+				// ErrHardIdleTimeout is attached via context.WithCancelCause at
+				// Run() entry. Treat hard-timeout as a soft failure (partial=true)
+				// so consumers can render a non-error "timed out, here's what we
+				// have" hint, matching the loop-detector ForceStop UX.
+				if errors.Is(context.Cause(ctx), ErrHardIdleTimeout) {
+					setRunStatus(runstatus.CodeDeadlineExceeded, true)
+					return partial, usage, fmt.Errorf("turn aborted: %w", ErrHardIdleTimeout)
+				}
 				setRunStatus(runstatus.CodeFromError(ctx.Err()), false)
 				return partial, usage, fmt.Errorf("LLM call cancelled: %w", ctx.Err())
 			}
@@ -1302,10 +1519,18 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			// only if the shaped history is still estimated to be over budget.
 			if isContextLengthError(err) && !reactiveCompacted {
 				fmt.Fprintf(os.Stderr, "[agent] context length exceeded, attempting reactive compaction\n")
+				// Outer phase for the whole compaction block. Nested LLM
+				// calls below use EnterTransient(PhaseAwaitingLLM) so they
+				// remain idle-watched; everything else (ShapeHistory, local
+				// I/O) is intentionally not idle-counted.
+				a.tracker.Enter(PhaseCompacting)
 
 				// Write-before-compact: persist durable learnings before discarding history.
 				if a.memoryDir != "" {
-					if pErr := ctxwin.PersistLearnings(ctx, a.client, messages, a.memoryDir); pErr != nil {
+					restoreLLM := a.tracker.EnterTransient(PhaseAwaitingLLM)
+					pErr := ctxwin.PersistLearnings(ctx, a.client, messages, a.memoryDir)
+					restoreLLM()
+					if pErr != nil {
 						fmt.Fprintf(os.Stderr, "[context] reactive persist learnings failed: %v\n", pErr)
 					}
 				}
@@ -1315,7 +1540,9 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 
 				softMessages := cloneMessages(messages)
 				compressOldToolResults(ctx, softMessages, compressAfter, maxResultChars, a.client)
+				restoreLLM := a.tracker.EnterTransient(PhaseAwaitingLLM)
 				summary, sumErr := ctxwin.GenerateSummary(ctx, a.client, reactiveSummaryInput(softMessages, nextSummary))
+				restoreLLM()
 				if sumErr != nil {
 					if nextSummary != "" {
 						fmt.Fprintf(os.Stderr, "[context] reactive summary failed, reusing prior summary: %v\n", sumErr)
@@ -1332,7 +1559,9 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 					emergencyMessages := cloneMessages(messages)
 					compressOldToolResults(ctx, emergencyMessages, 1, 100, nil)
 
+					restoreLLM := a.tracker.EnterTransient(PhaseAwaitingLLM)
 					summary, sumErr = ctxwin.GenerateSummary(ctx, a.client, reactiveSummaryInput(emergencyMessages, nextSummary))
+					restoreLLM()
 					if sumErr != nil {
 						if nextSummary != "" {
 							fmt.Fprintf(os.Stderr, "[context] emergency reactive summary failed, keeping prior summary: %v\n", sumErr)
@@ -1350,6 +1579,10 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				compactionSummary = nextSummary
 				compactionApplied = true
 				reactiveCompacted = true // never reset — prevents infinite reactive loops
+				// Durable: the summary was expensive; checkpoint before we
+				// retry the LLM call so a crash in the retry does not force
+				// redoing the summary on next run.
+				a.tracker.MarkDirty()
 
 				// Rebase run-local indices — same bookkeeping as proactive compaction.
 				if len(messages) < before {
@@ -1400,6 +1633,11 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 					Thinking:        a.thinking,
 					ReasoningEffort: a.reasoningEffort,
 				}
+				// Checkpoint the compacted state before retrying. Gated on
+				// the dirty flag we just set — a no-op compaction path
+				// (same message count, no MarkDirty) would not write.
+				captureRunMessages()
+				a.maybeCheckpoint(ctx)
 				continue // retry with compacted request
 			}
 			if !isRetryableLLMError(err) || attempt >= maxLLMRetries-1 {
@@ -1416,6 +1654,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			if a.handler != nil {
 				a.handler.OnCloudAgent("", "retry", fmt.Sprintf("Retrying request (attempt %d/%d): %s", attempt+1, maxLLMRetries, reason))
 			}
+			a.tracker.Enter(PhaseRetryingLLM)
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
@@ -1814,7 +2053,12 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		// ---- Phase 2 (batched): partition by read-only, execute with concurrency limits ----
 		if len(approved) > 0 {
 			batches := partitionToolCalls(approved)
+			a.tracker.Enter(PhaseExecutingTools)
 			executeBatches(ctx, batches, execResults, readTracker, a.handler)
+			a.tracker.MarkDirty() // tool batch is durable state for checkpoint
+			// Fire mid-turn checkpoint after captureRunMessages below, so
+			// RunMessages() reflects the just-completed batch. The actual
+			// call happens at the iteration-tail checkpoint below.
 		}
 
 		// Deferred mode: check if tool_search loaded new tools, rebuild schemas.
@@ -2107,6 +2351,12 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				markInjected()
 			}
 		}
+
+		// End-of-iteration checkpoint: if the tool-exec phase dirtied the
+		// tracker, snapshot the conversation now so a mid-turn crash does
+		// not lose this batch's work. No-op otherwise.
+		captureRunMessages()
+		a.maybeCheckpoint(ctx)
 	}
 
 	// Graceful degradation: return last text with a sentinel error so the
@@ -2138,6 +2388,12 @@ func (a *AgentLoop) completeWithRetry(ctx context.Context, req client.Completion
 			return resp, nil
 		}
 		if ctx.Err() != nil {
+			// Prefer the context cause when available so watchdog hard
+			// timeout surfaces as ErrHardIdleTimeout and not a generic
+			// user-cancel. Callers use errors.Is to branch on it.
+			if cause := context.Cause(ctx); cause != nil && cause != ctx.Err() {
+				return nil, fmt.Errorf("LLM call cancelled: %w", cause)
+			}
 			return nil, fmt.Errorf("LLM call cancelled: %w", ctx.Err())
 		}
 		if !isRetryableLLMError(err) || attempt >= maxRetries-1 {
@@ -2151,6 +2407,9 @@ func (a *AgentLoop) completeWithRetry(ctx context.Context, req client.Completion
 		select {
 		case <-time.After(backoff):
 		case <-ctx.Done():
+			if cause := context.Cause(ctx); cause != nil && cause != ctx.Err() {
+				return nil, fmt.Errorf("LLM call cancelled: %w", cause)
+			}
 			return nil, fmt.Errorf("LLM call cancelled: %w", ctx.Err())
 		}
 	}
@@ -2292,7 +2551,15 @@ func (a *AgentLoop) checkPermissionAndApproval(ctx context.Context, toolName, ar
 		}
 		approved := false
 		if a.handler != nil {
+			// Approval is not idle-counted — we may be waiting on a human.
+			// Transient so the outer phase (tool resolution) is restored
+			// even if multiple tool calls require approval in sequence.
+			restoreApproval := func() {}
+			if a.tracker != nil {
+				restoreApproval = a.tracker.EnterTransient(PhaseAwaitingApproval)
+			}
 			approved = a.handler.OnApprovalNeeded(toolName, argsStr)
+			restoreApproval()
 		}
 		if approved && cache != nil {
 			cache.RecordApproval(toolName, argsStr)

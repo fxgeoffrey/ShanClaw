@@ -219,10 +219,8 @@ shan "fetch https://httpbin.org/ip and show my public IP"
 
 **MCP Integrations** (requires MCP server config in `~/.shannon/config.yaml`)
 ```bash
-shan "list my github repos"
-shan "create an issue in myrepo titled 'Bug: login fails'"
-shan "search slack for messages about deployment"
-shan "show all tables in the database"
+shan "list the files in my Desktop folder"          # filesystem MCP
+shan "show all tables in the database"              # sqlite MCP
 ```
 
 ### Multi-step Cowork Recipes
@@ -473,42 +471,6 @@ Each server supports:
 - `context` — guidance injected into the LLM system prompt (critical for correct tool usage)
 - `disabled: true` — skip without removing config
 
-### GitHub
-
-```yaml
-mcp_servers:
-  github:
-    command: "npx"
-    args: ["-y", "@modelcontextprotocol/server-github"]
-    env:
-      GITHUB_PERSONAL_ACCESS_TOKEN: "ghp_xxxxx"
-    context: "Authenticated as GitHub user 'yourname'. Use search_repositories with query 'user:yourname'."
-```
-
-```bash
-shan "list my github repos"
-shan "create an issue in myrepo titled 'Bug: login fails'"
-shan "show open PRs in shan"
-```
-
-### Slack
-
-```yaml
-mcp_servers:
-  slack:
-    command: "npx"
-    args: ["-y", "@modelcontextprotocol/server-slack"]
-    env:
-      SLACK_BOT_TOKEN: "xoxb-xxxxx"
-      SLACK_TEAM_ID: "T01234567"
-    context: "Connected to Slack workspace 'MyTeam'. Use list_channels to find channels."
-```
-
-```bash
-shan "list slack channels"
-shan "search slack for messages about deployment"
-```
-
 ### Filesystem
 
 ```yaml
@@ -525,36 +487,6 @@ shan "search for .md files in my Documents"
 shan "create a notes.txt file on my Desktop"
 ```
 
-### Puppeteer (Browser Automation)
-
-```yaml
-mcp_servers:
-  puppeteer:
-    command: "npx"
-    args: ["-y", "@modelcontextprotocol/server-puppeteer"]
-    context: "Browser automation via Puppeteer. Use puppeteer_navigate, puppeteer_screenshot, puppeteer_click, puppeteer_fill, puppeteer_evaluate."
-```
-
-```bash
-shan -y "navigate to https://example.com and take a screenshot"
-shan -y "navigate to https://news.ycombinator.com and get the top 5 story titles"
-```
-
-### PostgreSQL
-
-```yaml
-mcp_servers:
-  postgres:
-    command: "npx"
-    args: ["-y", "@modelcontextprotocol/server-postgres", "postgresql://user:pass@localhost:5432/mydb"]
-    context: "Connected to mydb PostgreSQL database. Use query tool for SELECT."
-```
-
-```bash
-shan "show all tables in the database"
-shan "how many users signed up this week?"
-```
-
 ### SQLite
 
 ```yaml
@@ -563,64 +495,6 @@ mcp_servers:
     command: "npx"
     args: ["-y", "mcp-server-sqlite-npx", "/path/to/database.db"]
     context: "Connected to SQLite database. Use read_query for SELECT, write_query for writes."
-```
-
-### Brave Search
-
-```yaml
-mcp_servers:
-  brave-search:
-    command: "npx"
-    args: ["-y", "@modelcontextprotocol/server-brave-search"]
-    env:
-      BRAVE_API_KEY: "BSAxxxxx"
-    context: "Use brave_web_search for web queries. Use brave_local_search for local businesses."
-```
-
-### Google Maps
-
-```yaml
-mcp_servers:
-  google-maps:
-    command: "npx"
-    args: ["-y", "@modelcontextprotocol/server-google-maps"]
-    env:
-      GOOGLE_MAPS_API_KEY: "AIzaxxxxx"
-    context: "Use maps_search_places to find places. Use maps_directions for routing."
-```
-
-### Sentry (Error Tracking)
-
-```yaml
-mcp_servers:
-  sentry:
-    command: "npx"
-    args: ["@sentry/mcp-server"]
-    env:
-      SENTRY_ACCESS_TOKEN: "sntrys_xxxxx"
-    context: "Connected to Sentry org. Use to query issues, error events, and stack traces."
-```
-
-### Linear (Project Management)
-
-```yaml
-mcp_servers:
-  linear:
-    command: "npx"
-    args: ["-y", "@linear/mcp-server"]
-    env:
-      LINEAR_API_KEY: "lin_api_xxxxx"
-    context: "Connected to Linear workspace. Use to list/create issues, search projects."
-```
-
-### Git (Repo Analysis)
-
-```yaml
-mcp_servers:
-  git:
-    command: "npx"
-    args: ["-y", "@modelcontextprotocol/server-git"]
-    context: "Use git_log, git_diff, git_show for repository analysis."
 ```
 
 ### HTTP Transport (Remote MCP Server)
@@ -639,23 +513,14 @@ You can run multiple MCP servers simultaneously:
 
 ```yaml
 mcp_servers:
-  github:
+  filesystem:
     command: "npx"
-    args: ["-y", "@modelcontextprotocol/server-github"]
-    env:
-      GITHUB_PERSONAL_ACCESS_TOKEN: "ghp_xxxxx"
-    context: "GitHub user 'yourname'. query 'user:yourname' for repos."
-  slack:
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/Users/you/Desktop"]
+    context: "Filesystem access to ~/Desktop."
+  sqlite:
     command: "npx"
-    args: ["-y", "@modelcontextprotocol/server-slack"]
-    env:
-      SLACK_BOT_TOKEN: "xoxb-xxxxx"
-      SLACK_TEAM_ID: "T01234567"
-    context: "Slack workspace 'MyTeam'."
-  postgres:
-    command: "npx"
-    args: ["-y", "@modelcontextprotocol/server-postgres", "postgresql://localhost/mydb"]
-    context: "PostgreSQL mydb."
+    args: ["-y", "mcp-server-sqlite-npx", "/path/to/database.db"]
+    context: "SQLite database."
 ```
 
 ### MCP Client Notes
@@ -705,12 +570,10 @@ permissions:
 
 # MCP servers (external tool sources)
 mcp_servers:
-  github:
+  filesystem:
     command: "npx"
-    args: ["-y", "@modelcontextprotocol/server-github"]
-    env:
-      GITHUB_PERSONAL_ACCESS_TOKEN: "ghp_xxxxx"
-    context: "GitHub user 'yourname'."
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/Users/you/Desktop"]
+    context: "Filesystem access to ~/Desktop."
 
 # Agent behavior
 agent:
@@ -865,10 +728,9 @@ tools:
 # _inherit: true  → merge on top of global servers
 mcp_servers:
   _inherit: false
-  github:
-    command: mcp-server-github
-    env:
-      GITHUB_TOKEN: "${GITHUB_TOKEN}"
+  filesystem:
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/Users/you/Desktop"]
 
 # Model and behavior overrides
 agent:

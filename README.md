@@ -220,6 +220,15 @@ shan "search slack for messages about deployment"
 shan "show all tables in the database"
 ```
 
+### Multi-step Cowork Recipes
+
+Beyond one-shot prompts, the daemon is meant to carry multi-step work that spans research, browser automation, and artifact generation in a single session. A growing set of recipes lives in [`examples/cookbook/`](examples/cookbook/):
+
+- **[Publish a Truth Social digest to note.com from Slack](examples/cookbook/slack-to-note-publish.md)** — `web_search` + `web_fetch` for research → Playwright MCP to publish in the user's authenticated browser.
+- **[Scrape a Substack and generate a Word doc](examples/cookbook/substack-scrape-to-docx.md)** — attempted browser scraping, pivot to the site's JSON API, then `docx` skill → doc on the user's Desktop.
+
+Each recipe is short and pattern-focused — key tools, gotchas, when to reach for it. Add one when you find a task shape you keep coming back to; [`examples/cookbook/README.md`](examples/cookbook/README.md) has the format.
+
 ## Requirements
 
 - **macOS** (clipboard, notifications, AppleScript, screencapture, accessibility)

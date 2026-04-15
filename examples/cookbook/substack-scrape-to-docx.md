@@ -8,7 +8,7 @@ Desktop app (ShanClaw Desktop) → local daemon over the HTTP API.
 
 Prompt:
 
-> https://deepmanifold.substack.com/ 把所有文章给我爬一边，总结成一个 word，放到我的桌面并新建一个文件夹 "substack"
+> Scrape every article from https://deepmanifold.substack.com/, summarize them into a Word document, and put it on my Desktop in a new folder called "substack".
 
 ## Key tools (in order)
 

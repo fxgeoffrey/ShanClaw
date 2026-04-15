@@ -2,6 +2,11 @@
 
 AI agent runtime powered by Shannon. Daemon mode connects to Shannon Cloud via WebSocket for channel messaging (Slack, LINE, Feishu, Telegram, webhook), with local tool execution and streaming results. Also provides interactive TUI, one-shot CLI, and MCP server. Named agents with independent instructions/memory, local tools for macOS computer control, MCP client for third-party integrations (GitHub, databases, etc.), local scheduled tasks via launchd, and remote research/swarm orchestration via the Shannon Gateway API.
 
+## Architecture
+
+Interactive diagram of how the daemon, Shannon Cloud, MCP servers, and local tools fit together:
+[**waylandz.com/diagrams/shanclaw-architecture.html**](https://www.waylandz.com/diagrams/shanclaw-architecture.html)
+
 ## Installation
 
 ### Option A: npm (Recommended)

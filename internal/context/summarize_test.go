@@ -18,7 +18,7 @@ type mockCompleter struct {
 
 func (m *mockCompleter) Complete(ctx context.Context, req client.CompletionRequest) (*client.CompletionResponse, error) {
 	m.lastReq = &req
-	if m.response != nil && m.usage != (client.Usage{}) {
+	if m.response != nil {
 		m.response.Usage = m.usage
 	}
 	return m.response, m.err

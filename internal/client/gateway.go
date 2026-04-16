@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -30,6 +31,8 @@ func cacheDebugLogPath() string {
 
 const cacheDebugMaxBytes = 10 * 1024 * 1024 // 10 MB
 
+var cacheDebugMu sync.Mutex
+
 func appendCacheDebug(entry map[string]any) {
 	path := cacheDebugLogPath()
 	if path == "" {
@@ -40,10 +43,14 @@ func appendCacheDebug(entry map[string]any) {
 		return
 	}
 	data, _ := json.Marshal(entry)
+
+	cacheDebugMu.Lock()
+	defer cacheDebugMu.Unlock()
+
 	// Simple single-file rotation: if the log exceeds the cap, truncate it
 	// to the most recent half. Best-effort — never block the request path.
 	if info, err := os.Stat(path); err == nil && info.Size() > cacheDebugMaxBytes {
-		_ = rotateCacheDebugLog(path, info.Size())
+		_ = rotateCacheDebugLog(path)
 	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
@@ -56,7 +63,7 @@ func appendCacheDebug(entry map[string]any) {
 // rotateCacheDebugLog keeps the last half of the log file. Best-effort, no
 // error propagation — a failed rotation just means the file stays large until
 // the next append retries.
-func rotateCacheDebugLog(path string, size int64) error {
+func rotateCacheDebugLog(path string) error {
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -142,6 +149,8 @@ func logCacheResponse(reqID, sessionID string, resp *CompletionResponse) {
 		"in":            resp.Usage.InputTokens,
 		"out":           resp.Usage.OutputTokens,
 		"cc":            resp.Usage.CacheCreationTokens,
+		"cc_5m":         resp.Usage.CacheCreation5mTokens,
+		"cc_1h":         resp.Usage.CacheCreation1hTokens,
 		"cr":            resp.Usage.CacheReadTokens,
 	})
 }

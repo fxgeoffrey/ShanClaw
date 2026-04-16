@@ -42,6 +42,9 @@ func (m *Model) runCompact(customInstructions string) func() compactDoneMsg {
 		if m.agentOverride != nil {
 			memoryDir = fmt.Sprintf("%s/agents/%s", m.shannonDir, m.agentOverride.Name)
 		}
+		// Usage intentionally discarded: /compact runs outside the agent loop
+		// and has no UsageAccumulator to emit to. The cost is small (small-tier
+		// LLM) and user-triggered, so the omission is acceptable.
 		_, _ = ctxwin.PersistLearnings(ctx, m.gateway, messages, memoryDir)
 
 		// Step 2: generate summary

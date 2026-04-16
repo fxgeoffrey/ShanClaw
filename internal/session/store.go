@@ -67,23 +67,7 @@ type UsageSummary struct {
 	ToolCostUSD float64 `json:"tool_cost_usd,omitempty"`
 }
 
-// UsageFromTurn converts LLM-only numeric values into a UsageSummary.
-// Left in place for callers that only have LLM data; new code should prefer
-// UsageFromAccumulated which carries both LLM and gateway-tool costs.
-func UsageFromTurn(llmCalls, inputTokens, outputTokens, totalTokens int, costUSD float64, cacheRead, cacheCreation, cacheCreation5m, cacheCreation1h int, model string) UsageSummary {
-	return UsageSummary{
-		LLMCalls:              llmCalls,
-		InputTokens:           inputTokens,
-		OutputTokens:          outputTokens,
-		TotalTokens:           totalTokens,
-		CostUSD:               costUSD,
-		CacheReadTokens:       cacheRead,
-		CacheCreationTokens:   cacheCreation,
-		CacheCreation5mTokens: cacheCreation5m,
-		CacheCreation1hTokens: cacheCreation1h,
-		Model:                 model,
-	}
-}
+
 
 // UsageFromAccumulated builds a UsageSummary carrying both LLM and gateway
 // tool costs as separate fields so totals stay unambiguous when a run

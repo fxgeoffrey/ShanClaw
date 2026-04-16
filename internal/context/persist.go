@@ -67,9 +67,9 @@ Format rules:
 // memoryDir is the directory containing MEMORY.md (e.g. ~/.shannon/memory/ or
 // ~/.shannon/agents/<name>/).
 // Returns nil if nothing worth persisting, or if memoryDir is empty.
-func PersistLearnings(ctx context.Context, c Completer, messages []client.Message, memoryDir string) error {
+func PersistLearnings(ctx context.Context, c Completer, messages []client.Message, memoryDir string) (client.Usage, error) {
 	if memoryDir == "" {
-		return nil
+		return client.Usage{}, nil
 	}
 
 	// Read existing memory to include in prompt (avoids duplicate extraction)
@@ -90,7 +90,7 @@ func PersistLearnings(ctx context.Context, c Completer, messages []client.Messag
 	}
 
 	if transcript.Len() == 0 {
-		return nil
+		return client.Usage{}, nil
 	}
 
 	// Build the user message with existing memory context
@@ -112,18 +112,18 @@ func PersistLearnings(ctx context.Context, c Completer, messages []client.Messag
 
 	resp, err := c.Complete(ctx, req)
 	if err != nil {
-		return fmt.Errorf("persist learnings failed: %w", err)
+		return client.Usage{}, fmt.Errorf("persist learnings failed: %w", err)
 	}
 
 	result := strings.TrimSpace(resp.OutputText)
 	if result == "" || strings.EqualFold(result, "NONE") {
-		return nil
+		return resp.Usage, nil
 	}
 
 	// Wrap with header so auto-persisted entries are distinguishable
 	timestamp := time.Now().Format("2006-01-02 15:04")
 	entry := fmt.Sprintf("\n## Auto-persisted (%s)\n\n%s", timestamp, result)
-	return BoundedAppend(memoryDir, entry)
+	return resp.Usage, BoundedAppend(memoryDir, entry)
 }
 
 // MaxMemoryLines is the maximum number of lines in MEMORY.md before overflow
@@ -223,22 +223,22 @@ func countLines(content []byte) int {
 // memory is preserved verbatim.
 // Runs only when ≥12 auto-*.md files exist and last GC was ≥7 days ago.
 // Safe for concurrent use (flock on MEMORY.md.lock).
-func ConsolidateMemory(ctx context.Context, c Completer, memoryDir string) error {
+func ConsolidateMemory(ctx context.Context, c Completer, memoryDir string) (client.Usage, error) {
 	if memoryDir == "" {
-		return nil
+		return client.Usage{}, nil
 	}
 
 	// Check threshold: need ≥12 auto-*.md files
 	autoFiles, err := filepath.Glob(filepath.Join(memoryDir, "auto-*.md"))
 	if err != nil || len(autoFiles) < consolidateThreshold {
-		return nil
+		return client.Usage{}, nil
 	}
 
 	// Check cooldown: skip if .memory_gc was touched < 7 days ago
 	markerPath := filepath.Join(memoryDir, ".memory_gc")
 	if info, err := os.Stat(markerPath); err == nil {
 		if time.Since(info.ModTime()) < consolidateCooldown {
-			return nil
+			return client.Usage{}, nil
 		}
 	}
 
@@ -247,11 +247,11 @@ func ConsolidateMemory(ctx context.Context, c Completer, memoryDir string) error
 	lockPath := memoryPath + ".lock"
 	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
-		return fmt.Errorf("consolidate: open lock: %w", err)
+		return client.Usage{}, fmt.Errorf("consolidate: open lock: %w", err)
 	}
 	defer lockFile.Close()
 	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("consolidate: flock: %w", err)
+		return client.Usage{}, fmt.Errorf("consolidate: flock: %w", err)
 	}
 	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
 
@@ -280,12 +280,12 @@ func ConsolidateMemory(ctx context.Context, c Completer, memoryDir string) error
 	}
 
 	if autoContent.Len() == 0 {
-		return nil
+		return client.Usage{}, nil
 	}
 
 	// LLM consolidation call
 	if c == nil {
-		return nil // no completer (skip-logic tests)
+		return client.Usage{}, nil // no completer (skip-logic tests)
 	}
 
 	req := client.CompletionRequest{
@@ -300,7 +300,7 @@ func ConsolidateMemory(ctx context.Context, c Completer, memoryDir string) error
 
 	resp, err := c.Complete(ctx, req)
 	if err != nil {
-		return fmt.Errorf("consolidate: LLM call failed: %w", err)
+		return client.Usage{}, fmt.Errorf("consolidate: LLM call failed: %w", err)
 	}
 
 	consolidated := strings.TrimSpace(resp.OutputText)
@@ -321,11 +321,11 @@ func ConsolidateMemory(ctx context.Context, c Completer, memoryDir string) error
 	// Atomic write: temp file + rename
 	tmpPath := memoryPath + ".tmp"
 	if err := os.WriteFile(tmpPath, []byte(result.String()), 0644); err != nil {
-		return fmt.Errorf("consolidate: write temp: %w", err)
+		return resp.Usage, fmt.Errorf("consolidate: write temp: %w", err)
 	}
 	if err := os.Rename(tmpPath, memoryPath); err != nil {
 		os.Remove(tmpPath)
-		return fmt.Errorf("consolidate: rename: %w", err)
+		return resp.Usage, fmt.Errorf("consolidate: rename: %w", err)
 	}
 
 	// Delete consumed auto-*.md files
@@ -336,10 +336,10 @@ func ConsolidateMemory(ctx context.Context, c Completer, memoryDir string) error
 	// Touch marker — failure here means consolidation would re-trigger next run,
 	// wasting an LLM call. Return the error so callers can log it.
 	if err := os.WriteFile(markerPath, []byte(time.Now().Format(time.RFC3339)), 0644); err != nil {
-		return fmt.Errorf("consolidate: write marker: %w", err)
+		return resp.Usage, fmt.Errorf("consolidate: write marker: %w", err)
 	}
 
-	return nil
+	return resp.Usage, nil
 }
 
 // splitMemory separates MEMORY.md content into user-written lines and

@@ -871,7 +871,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	// Memory consolidation: merge auto-*.md detail files when accumulated.
 	// Runs at most once per 7 days, only when ≥12 detail files exist.
 	if a.memoryDir != "" {
-		if gcErr := ctxwin.ConsolidateMemory(ctx, a.client, a.memoryDir); gcErr != nil {
+		if _, gcErr := ctxwin.ConsolidateMemory(ctx, a.client, a.memoryDir); gcErr != nil {
 			fmt.Fprintf(os.Stderr, "[context] memory consolidation failed: %v\n", gcErr)
 		}
 	}
@@ -1445,7 +1445,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 					// before messages are discarded by compaction.
 					if a.memoryDir != "" {
 						restoreLLM := a.tracker.EnterTransient(PhaseAwaitingLLM)
-						pErr := ctxwin.PersistLearnings(ctx, a.client, messages, a.memoryDir)
+						_, pErr := ctxwin.PersistLearnings(ctx, a.client, messages, a.memoryDir)
 						restoreLLM()
 						if pErr != nil {
 							fmt.Fprintf(os.Stderr, "[context] persist learnings failed: %v\n", pErr)
@@ -1601,7 +1601,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				// Write-before-compact: persist durable learnings before discarding history.
 				if a.memoryDir != "" {
 					restoreLLM := a.tracker.EnterTransient(PhaseAwaitingLLM)
-					pErr := ctxwin.PersistLearnings(ctx, a.client, messages, a.memoryDir)
+					_, pErr := ctxwin.PersistLearnings(ctx, a.client, messages, a.memoryDir)
 					restoreLLM()
 					if pErr != nil {
 						fmt.Fprintf(os.Stderr, "[context] reactive persist learnings failed: %v\n", pErr)

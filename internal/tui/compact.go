@@ -42,7 +42,7 @@ func (m *Model) runCompact(customInstructions string) func() compactDoneMsg {
 		if m.agentOverride != nil {
 			memoryDir = fmt.Sprintf("%s/agents/%s", m.shannonDir, m.agentOverride.Name)
 		}
-		_ = ctxwin.PersistLearnings(ctx, m.gateway, messages, memoryDir)
+		_, _ = ctxwin.PersistLearnings(ctx, m.gateway, messages, memoryDir)
 
 		// Step 2: generate summary
 		msgsForSummary := messages

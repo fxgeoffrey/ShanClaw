@@ -68,7 +68,7 @@ func TestConsolidateMemory_RealWorld(t *testing.T) {
 	}
 
 	// 4. Run consolidation
-	err := ConsolidateMemory(context.Background(), mock, dir)
+	_, err := ConsolidateMemory(context.Background(), mock, dir)
 	if err != nil {
 		t.Fatalf("ConsolidateMemory failed: %v", err)
 	}

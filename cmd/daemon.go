@@ -25,6 +25,7 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/mcp"
 	"github.com/Kocoro-lab/ShanClaw/internal/permissions"
 	"github.com/Kocoro-lab/ShanClaw/internal/schedule"
+	"github.com/Kocoro-lab/ShanClaw/internal/skills"
 	"github.com/Kocoro-lab/ShanClaw/internal/tools"
 	"github.com/Kocoro-lab/ShanClaw/internal/watcher"
 	"github.com/spf13/cobra"
@@ -55,6 +56,9 @@ var daemonStartCmd = &cobra.Command{
 
 		if err := agents.EnsureBuiltins(agentsDir, Version); err != nil {
 			log.Printf("WARNING: failed to sync builtin agents: %v", err)
+		}
+		if err := skills.EnsureBuiltinSkills(shanDir); err != nil {
+			log.Printf("WARNING: failed to sync builtin skills: %v", err)
 		}
 
 		force, _ := cmd.Flags().GetBool("force")

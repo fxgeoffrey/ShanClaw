@@ -17,6 +17,10 @@ type ruleEntry struct {
 }
 
 func (s *Server) handleListRules(w http.ResponseWriter, r *http.Request) {
+	if s.deps == nil {
+		writeError(w, http.StatusInternalServerError, "daemon deps not configured")
+		return
+	}
 	rulesDir := filepath.Join(s.deps.ShannonDir, "rules")
 	entries, err := os.ReadDir(rulesDir)
 	if err != nil {
@@ -50,6 +54,10 @@ func (s *Server) handleListRules(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetRule(w http.ResponseWriter, r *http.Request) {
+	if s.deps == nil {
+		writeError(w, http.StatusInternalServerError, "daemon deps not configured")
+		return
+	}
 	name := r.PathValue("name")
 	if err := skills.ValidateSkillName(name); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -69,6 +77,10 @@ func (s *Server) handleGetRule(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePutRule(w http.ResponseWriter, r *http.Request) {
+	if s.deps == nil {
+		writeError(w, http.StatusInternalServerError, "daemon deps not configured")
+		return
+	}
 	name := r.PathValue("name")
 	if err := skills.ValidateSkillName(name); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -107,6 +119,10 @@ func (s *Server) handlePutRule(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteRule(w http.ResponseWriter, r *http.Request) {
+	if s.deps == nil {
+		writeError(w, http.StatusInternalServerError, "daemon deps not configured")
+		return
+	}
 	if r.URL.Query().Get("confirm") != "true" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error":   "confirmation_required",

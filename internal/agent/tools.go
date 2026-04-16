@@ -66,6 +66,11 @@ type ToolResult struct {
 	// tool_result content when the gateway/model supports the protocol.
 	// When nil, loop.go falls back to the Content string path.
 	ContentBlocks []client.ContentBlock
+	// SkillToolFilter, when non-nil, restricts the tool schemas sent to
+	// the LLM for the remainder of this Run() call. Only tools whose names
+	// appear in this list (plus use_skill itself) will be visible. Set by
+	// use_skill when the activated skill declares allowed-tools.
+	SkillToolFilter []string
 }
 
 // ToolUsage is ToolResult's per-call cost breakdown. Mirrors client.ToolUsage

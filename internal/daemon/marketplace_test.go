@@ -384,14 +384,21 @@ func TestHandleListSkillsIncludesMarketplaceProvenance(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
 		t.Fatalf("unmarshal list: %v", err)
 	}
-	if len(body.Skills) != 1 {
-		t.Fatalf("expected 1 skill, got %d", len(body.Skills))
+	var found *skills.SkillMeta
+	for i := range body.Skills {
+		if body.Skills[i].Name == "demo" {
+			found = &body.Skills[i]
+			break
+		}
 	}
-	if body.Skills[0].InstallSource != skills.InstallSourceMarketplace {
-		t.Errorf("install_source = %q, want %q", body.Skills[0].InstallSource, skills.InstallSourceMarketplace)
+	if found == nil {
+		t.Fatalf("skill 'demo' not found in list of %d skills", len(body.Skills))
 	}
-	if body.Skills[0].MarketplaceSlug != "demo" {
-		t.Errorf("marketplace_slug = %q, want demo", body.Skills[0].MarketplaceSlug)
+	if found.InstallSource != skills.InstallSourceMarketplace {
+		t.Errorf("install_source = %q, want %q", found.InstallSource, skills.InstallSourceMarketplace)
+	}
+	if found.MarketplaceSlug != "demo" {
+		t.Errorf("marketplace_slug = %q, want demo", found.MarketplaceSlug)
 	}
 }
 
@@ -451,14 +458,21 @@ func TestHandleLocalSkillCollisionStaysLocal(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
 		t.Fatalf("unmarshal list: %v", err)
 	}
-	if len(body.Skills) != 1 {
-		t.Fatalf("expected 1 skill, got %d", len(body.Skills))
+	var found *skills.SkillMeta
+	for i := range body.Skills {
+		if body.Skills[i].Name == "ontology" {
+			found = &body.Skills[i]
+			break
+		}
 	}
-	if body.Skills[0].InstallSource != skills.InstallSourceLocal {
-		t.Errorf("install_source = %q, want %q", body.Skills[0].InstallSource, skills.InstallSourceLocal)
+	if found == nil {
+		t.Fatalf("skill 'ontology' not found in list of %d skills", len(body.Skills))
 	}
-	if body.Skills[0].MarketplaceSlug != "" {
-		t.Errorf("marketplace_slug = %q, want empty", body.Skills[0].MarketplaceSlug)
+	if found.InstallSource != skills.InstallSourceLocal {
+		t.Errorf("install_source = %q, want %q", found.InstallSource, skills.InstallSourceLocal)
+	}
+	if found.MarketplaceSlug != "" {
+		t.Errorf("marketplace_slug = %q, want empty", found.MarketplaceSlug)
 	}
 }
 

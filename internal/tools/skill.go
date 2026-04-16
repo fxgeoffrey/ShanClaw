@@ -29,7 +29,7 @@ func newUseSkillTool(s *[]*skills.Skill) *useSkillTool {
 func (t *useSkillTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
 		Name:        "use_skill",
-		Description: "Activate a named skill to load its specialized instructions. Only call this when the user's request clearly matches a skill's purpose. Returns the full skill content as your working instructions.",
+		Description: "Activate a named skill to load its specialized instructions and restrict tools to only those the skill needs. Call this when the user's request matches a skill's purpose — check the Available Skills list. Returns the skill content as your working instructions.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -84,14 +84,18 @@ func (t *useSkillTool) Run(ctx context.Context, argsJSON string) (agent.ToolResu
 	if args.Args != "" {
 		body += "\n\n## User Context\n\n" + args.Args
 	}
-	return agent.ToolResult{Content: body}, nil
+	var filter []string
+	if len(skill.AllowedTools) > 0 {
+		filter = skill.AllowedTools
+	}
+	return agent.ToolResult{Content: body, SkillToolFilter: filter}, nil
 }
 
-var relativePathPattern = regexp.MustCompile(`(?m)(^|\s)((?:scripts|references|assets)/[^\s)]+)`)
+var relativePathPattern = regexp.MustCompile("(?m)(^|[\\s`])((?:scripts|references|assets)/[^\\s)`]+)")
 
 func rewriteRelativePaths(body, dir string) string {
 	return relativePathPattern.ReplaceAllStringFunc(body, func(match string) string {
-		trimmed := strings.TrimLeft(match, " \t")
+		trimmed := strings.TrimLeft(match, " \t`")
 		prefix := match[:len(match)-len(trimmed)]
 		absPath := filepath.Join(dir, trimmed)
 		if _, err := os.Stat(absPath); err == nil {

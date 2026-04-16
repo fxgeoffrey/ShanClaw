@@ -1354,8 +1354,8 @@ func (s *Server) skillSources() ([]skills.SkillSource, error) {
 	if s.deps == nil {
 		return nil, fmt.Errorf("daemon deps not configured")
 	}
-	// Only return global (installed) skills — bundled skills are hidden from
-	// the skills list API. Users install them on demand via POST /skills/install.
+	// Only return global (installed) skills. Builtin skills (kocoro) are
+	// auto-installed to global by EnsureBuiltinSkills at startup.
 	global := skills.SkillSource{
 		Dir:    filepath.Join(s.deps.ShannonDir, "skills"),
 		Source: skills.SourceGlobal,

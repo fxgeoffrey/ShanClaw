@@ -295,6 +295,9 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 		// Non-fatal: log and continue
 		log.Printf("WARNING: failed to sync builtin agents: %v", err)
 	}
+	if err := skills.EnsureBuiltinSkills(shannonDir); err != nil {
+		log.Printf("WARNING: failed to sync builtin skills: %v", err)
+	}
 	sessDir := shannonDir + "/sessions"
 	if agentOverride != nil {
 		sessDir = filepath.Join(shannonDir, "agents", agentOverride.Name, "sessions")

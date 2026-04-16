@@ -54,7 +54,7 @@ const (
 
 // defaultPersona is the identity line for the default (non-overridden) agent.
 // Named agents replace this with their AGENT.md content.
-const defaultPersona = `You are Shannon, an AI assistant running in a CLI terminal on the user's macOS computer. You have both local tools (file ops, shell, GUI control) and remote server tools (web search, research, analytics, multi-agent workflows).`
+const defaultPersona = `You are Shannon, an AI assistant running on the Kocoro platform on the user's macOS computer. You have both local tools (file ops, shell, GUI control) and remote server tools (web search, research, analytics, multi-agent workflows). For platform setup and configuration (creating agents, installing skills, managing settings, connecting external services), use the kocoro skill.`
 
 // coreOperationalRules contains behavioral constraints that apply to ALL agents
 // (default and named). These are non-negotiable and must never be dropped.
@@ -2345,6 +2345,28 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			}
 			// No break on ForceStop — continue processing remaining results into
 			// context so the final LLM call has complete information.
+		}
+
+		// Skill tool filter: when use_skill returns a SkillToolFilter,
+		// restrict toolSchemas for subsequent iterations so the LLM only
+		// sees the skill's allowed tools (plus use_skill itself).
+		for _, ac := range approved {
+			er := execResults[ac.index]
+			if ac.fc.Name == "use_skill" && !er.result.IsError && len(er.result.SkillToolFilter) > 0 {
+				allowed := make(map[string]bool, len(er.result.SkillToolFilter)+1)
+				for _, name := range er.result.SkillToolFilter {
+					allowed[name] = true
+				}
+				allowed["use_skill"] = true
+				filtered := make([]client.Tool, 0, len(allowed))
+				for _, s := range toolSchemas {
+					if allowed[s.Function.Name] {
+						filtered = append(filtered, s)
+					}
+				}
+				toolSchemas = filtered
+				break
+			}
 		}
 
 		// Append tool result messages to context

@@ -10,6 +10,10 @@ import (
 )
 
 func (s *Server) handleProjectInit(w http.ResponseWriter, r *http.Request) {
+	if s.deps == nil {
+		writeError(w, http.StatusInternalServerError, "daemon deps not configured")
+		return
+	}
 	var req struct {
 		CWD          string `json:"cwd"`
 		Instructions string `json:"instructions,omitempty"`

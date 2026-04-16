@@ -3470,19 +3470,7 @@ func extractPathArg(argsJSON string) string {
 // persist-learnings, memory consolidation) to the handler so they are
 // counted in session billing alongside normal agent-loop turns.
 func (a *AgentLoop) emitInternalUsage(u client.Usage) {
-	if a.handler != nil && (u.InputTokens > 0 || u.OutputTokens > 0) {
-		a.handler.OnUsage(TurnUsage{
-			InputTokens:           u.InputTokens,
-			OutputTokens:          u.OutputTokens,
-			TotalTokens:           u.TotalTokens,
-			CostUSD:               u.CostUSD,
-			CacheReadTokens:       u.CacheReadTokens,
-			CacheCreationTokens:   u.CacheCreationTokens,
-			CacheCreation5mTokens: u.CacheCreation5mTokens,
-			CacheCreation1hTokens: u.CacheCreation1hTokens,
-			LLMCalls:              1,
-		})
-	}
+	a.reportLLMUsage(u, "")
 }
 
 // ctxWithUsageEmit returns ctx with the handler's OnUsage attached as an

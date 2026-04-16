@@ -301,3 +301,92 @@ func containsString(items []string, want string) bool {
 	}
 	return false
 }
+
+func TestToolSearch_ReturnsToolReferenceBlocksAlongsideLegacyString(t *testing.T) {
+	reg := NewToolRegistry()
+	reg.Register(&mockMCPTool{name: "x_search"})
+	reg.Register(&mockMCPTool{name: "web_fetch"})
+	deferred := map[string]bool{"x_search": true, "web_fetch": true}
+
+	ts := newToolSearchTool(reg, deferred)
+	res, err := ts.Run(context.Background(), `{"query":"select:x_search,web_fetch"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Legacy Content must still have the LOADED: header (non-breaking fallback)
+	if !strings.HasPrefix(res.Content, "LOADED:") {
+		t.Fatalf("expected LOADED: prefix in legacy Content, got %q", res.Content)
+	}
+	// New path: ContentBlocks populated with tool_reference blocks
+	if len(res.ContentBlocks) != 2 {
+		t.Fatalf("expected 2 tool_reference blocks, got %d: %+v", len(res.ContentBlocks), res.ContentBlocks)
+	}
+	names := map[string]bool{}
+	for _, b := range res.ContentBlocks {
+		if b.Type != "tool_reference" {
+			t.Fatalf("wrong block type: %q", b.Type)
+		}
+		names[b.ToolName] = true
+	}
+	if !names["x_search"] || !names["web_fetch"] {
+		t.Fatalf("missing expected tool_reference names: %v", names)
+	}
+}
+
+func TestToolSearch_EmptyMatchNoBlocks(t *testing.T) {
+	reg := NewToolRegistry()
+	reg.Register(&mockMCPTool{name: "a"})
+	deferred := map[string]bool{"a": true}
+	ts := newToolSearchTool(reg, deferred)
+
+	res, err := ts.Run(context.Background(), `{"query":"select:does_not_exist"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Zero matches → zero blocks, legacy Content says no match
+	if len(res.ContentBlocks) != 0 {
+		t.Fatalf("expected no blocks on empty match, got %d", len(res.ContentBlocks))
+	}
+	if !strings.Contains(res.Content, "No matching") {
+		t.Fatalf("expected 'No matching' in Content, got %q", res.Content)
+	}
+}
+
+func TestModelSupportsToolRef(t *testing.T) {
+	cases := []struct {
+		model string
+		want  bool
+	}{
+		{"claude-sonnet-4-5-20250929", true},
+		{"claude-sonnet-4-20250514", true},
+		{"claude-opus-4-6", true},
+		{"claude-opus-4-5", true},
+		{"claude-haiku-4-5-20251001", false}, // Haiku excluded per Anthropic docs
+		{"claude-3-5-sonnet-20241022", false}, // Pre-4 excluded
+		{"gpt-4o", false},
+		{"llama3", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := modelSupportsToolRef(c.model); got != c.want {
+			t.Errorf("modelSupportsToolRef(%q)=%v, want %v", c.model, got, c.want)
+		}
+	}
+}
+
+func TestHasAnyNonDeferred(t *testing.T) {
+	all := []client.Tool{
+		{Name: "a", DeferLoading: true},
+		{Name: "b", DeferLoading: true},
+	}
+	if hasAnyNonDeferred(all) {
+		t.Fatal("expected false when every tool is deferred")
+	}
+	mixed := []client.Tool{
+		{Name: "a", DeferLoading: true},
+		{Name: "b"},
+	}
+	if !hasAnyNonDeferred(mixed) {
+		t.Fatal("expected true when at least one tool is non-deferred")
+	}
+}

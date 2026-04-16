@@ -80,6 +80,20 @@ func (t *toolSearchTool) Run(_ context.Context, argsJSON string) (ToolResult, er
 	}
 	matched = expandDeferredFamilyCore(t.registry, t.deferred, matched)
 
+	// Build structured tool_reference blocks for the new protocol path.
+	// Zero matches → zero blocks (loop.go falls back to the Content string).
+	var blocks []client.ContentBlock
+	for _, name := range matched {
+		blocks = append(blocks, client.ContentBlock{
+			Type:     "tool_reference",
+			ToolName: name,
+		})
+	}
+
+	// Legacy Content string: preserved as the fallback path for non-supporting
+	// backends (Ollama, pre-3.1 shannon-cloud gateway). Contains the LOADED:
+	// header + full schema JSON so the model can still discover tools when
+	// the tool_reference protocol is unavailable.
 	var sb strings.Builder
 	sb.WriteString("LOADED:")
 	sb.WriteString(strings.Join(matched, ","))
@@ -95,7 +109,10 @@ func (t *toolSearchTool) Run(_ context.Context, argsJSON string) (ToolResult, er
 		}
 	}
 
-	return ToolResult{Content: sb.String()}, nil
+	return ToolResult{
+		Content:       sb.String(),
+		ContentBlocks: blocks,
+	}, nil
 }
 
 func expandDeferredFamilyCore(reg *ToolRegistry, deferred map[string]bool, matched []string) []string {
@@ -241,6 +258,61 @@ func remainingDeferredNames(deferred map[string]bool, loaded map[string]client.T
 		remaining[name] = true
 	}
 	return remaining
+}
+
+// modelSupportsToolRef reports whether the configured model supports the
+// defer_loading + tool_reference protocol. Sonnet 4.0+ / Opus 4.0+ only,
+// per Anthropic tool-search docs (Haiku excluded, pre-4 excluded).
+// Non-Anthropic providers always fall back to the legacy rebuildSchemas path.
+func modelSupportsToolRef(modelID string) bool {
+	m := strings.ToLower(modelID)
+	if !strings.Contains(m, "claude") {
+		return false
+	}
+	if strings.Contains(m, "haiku") {
+		return false
+	}
+	// claude-sonnet-4*, claude-opus-4*, claude-sonnet-5*, etc.
+	return strings.Contains(m, "sonnet-4") ||
+		strings.Contains(m, "opus-4") ||
+		strings.Contains(m, "sonnet-5") ||
+		strings.Contains(m, "opus-5")
+}
+
+// hasAnyNonDeferred returns true if at least one tool in the slice is NOT deferred.
+// Anthropic rejects requests where every tool has defer_loading: true (400 error).
+// tool_search itself is always non-deferred (registered outside the defer set),
+// so this invariant holds whenever deferred mode is active.
+func hasAnyNonDeferred(tools []client.Tool) bool {
+	for _, t := range tools {
+		if !t.DeferLoading {
+			return true
+		}
+	}
+	return false
+}
+
+// buildFullSchemasWithDefer emits the complete tools array (local + MCP + gateway)
+// with defer_loading: true on the cold set. Anthropic strips deferred entries from
+// the cache-key hash before caching, so tools[] stays byte-stable across sessions
+// while retaining full input_schema for tool_search's BM25/regex matching.
+//
+// Caller is responsible for ensuring at least one tool (typically tool_search
+// itself) is non-deferred — verify with hasAnyNonDeferred.
+func buildFullSchemasWithDefer(reg *ToolRegistry, cold map[string]bool) []client.Tool {
+	out := make([]client.Tool, 0)
+	for _, name := range reg.SortedNames() {
+		tool, ok := reg.Get(name)
+		if !ok {
+			continue
+		}
+		s := buildToolSchema(tool)
+		if cold[name] {
+			s.DeferLoading = true
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // deferredToolSummariesForNames returns sorted summaries for the named deferred tools.

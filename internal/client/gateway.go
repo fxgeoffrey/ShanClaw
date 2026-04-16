@@ -4,14 +4,122 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
+
+// cacheDebugLogPath returns the absolute path of the cache-debug log file,
+// or "" when the home dir is unavailable.
+func cacheDebugLogPath() string {
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".shannon", "logs", "cache-debug.log")
+}
+
+func appendCacheDebug(entry map[string]any) {
+	path := cacheDebugLogPath()
+	if path == "" {
+		return
+	}
+	// Ensure parent dir exists; silent on failure (never block request)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return
+	}
+	data, _ := json.Marshal(entry)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.Write(append(data, '\n'))
+}
+
+// logCacheDebug appends a "dir":"req" JSON line containing content hashes
+// for the system / tools / first-user / last-user parts of the outgoing
+// request, plus a freshly generated req_id. The returned req_id is passed
+// to logCacheResponse so the response's cache_creation / cache_read tokens
+// can be joined to the same request line. Silent on any error; never
+// affects the request.
+func logCacheDebug(req CompletionRequest, tag string) string {
+	if os.Getenv("SHANNON_CACHE_DEBUG") != "1" {
+		return ""
+	}
+	h := func(b []byte) string {
+		sum := sha256.Sum256(b)
+		return hex.EncodeToString(sum[:6])
+	}
+	var systemBytes, firstUserBytes, lastUserBytes []byte
+	for _, m := range req.Messages {
+		b, _ := json.Marshal(m.Content)
+		switch m.Role {
+		case "system":
+			systemBytes = b
+		case "user":
+			if firstUserBytes == nil {
+				firstUserBytes = b
+			}
+			lastUserBytes = b
+		}
+	}
+	toolsJSON, _ := json.Marshal(req.Tools)
+	var idBuf [6]byte
+	_, _ = rand.Read(idBuf[:])
+	reqID := hex.EncodeToString(idBuf[:])
+	appendCacheDebug(map[string]any{
+		"ts":             time.Now().Format(time.RFC3339Nano),
+		"dir":            "req",
+		"req_id":         reqID,
+		"session_id":     req.SessionID,
+		"cache_source":   req.CacheSource,
+		"tag":            tag,
+		"msgs":           len(req.Messages),
+		"model":          req.SpecificModel + "/" + req.ModelTier,
+		"system_h":       h(systemBytes),
+		"system_len":     len(systemBytes),
+		"tools_h":        h(toolsJSON),
+		"tools_count":    len(req.Tools),
+		"first_user_h":   h(firstUserBytes),
+		"first_user_len": len(firstUserBytes),
+		"last_user_h":    h(lastUserBytes),
+		"last_user_len":  len(lastUserBytes),
+	})
+	return reqID
+}
+
+// logCacheResponse appends a "dir":"resp" JSON line joined to the request
+// via req_id, recording the cache_creation / cache_read / input / output
+// token counts returned by the gateway. Silent on any error.
+func logCacheResponse(reqID, sessionID string, resp *CompletionResponse) {
+	if reqID == "" || resp == nil {
+		return
+	}
+	if os.Getenv("SHANNON_CACHE_DEBUG") != "1" {
+		return
+	}
+	appendCacheDebug(map[string]any{
+		"ts":            time.Now().Format(time.RFC3339Nano),
+		"dir":           "resp",
+		"req_id":        reqID,
+		"session_id":    sessionID,
+		"gateway_reqid": resp.RequestID,
+		"in":            resp.Usage.InputTokens,
+		"out":           resp.Usage.OutputTokens,
+		"cc":            resp.Usage.CacheCreationTokens,
+		"cr":            resp.Usage.CacheReadTokens,
+	})
+}
 
 // APIError represents an HTTP error from the LLM API with a status code.
 type APIError struct {
@@ -42,6 +150,10 @@ type ContentBlock struct {
 	ToolUseID   string `json:"tool_use_id,omitempty"`
 	IsError     bool   `json:"is_error,omitempty"`
 	ToolContent any    `json:"-"` // string or []ContentBlock; serialized as "content" for tool_result
+	// ToolName is set when Type == "tool_reference" (deferred-tool expansion hint
+	// returned by tool_search). Anthropic expands the full schema server-side
+	// for deferred tools referenced by name. Only populated for tool_reference blocks.
+	ToolName string `json:"tool_name,omitempty"`
 }
 
 // MarshalJSON handles the polymorphic "content" field for tool_result blocks
@@ -86,7 +198,7 @@ func (cb ContentBlock) MarshalJSON() ([]byte, error) {
 // Anthropic's tool_use.input validator ("Input should be a valid
 // dictionary") will accept when we can do so unambiguously.
 //
-// Two normalizations are applied:
+// Three normalizations are applied:
 //  1. null / empty / whitespace → "{}" (issue #45).
 //  2. JSON-encoded string wrapping a JSON object → unwrap once. Some
 //     providers (OpenAI-shaped Chat Completions adapters) return tool
@@ -96,11 +208,17 @@ func (cb ContentBlock) MarshalJSON() ([]byte, error) {
 //     be persisted verbatim in the assistant turn, causing the next call
 //     to Anthropic to drop that turn with a 400 — which llm-service then
 //     silently sanitized out, losing tool history from the model.
+//  3. **Canonical key ordering** — if the input is a JSON object, roundtrip
+//     through Unmarshal→Marshal so nested map keys are lexicographic. Without
+//     this, two conceptually-identical tool_use calls can serialize with
+//     different key orders on different goroutines → cross-turn prompt-cache
+//     miss (observed in session 2026-04-15-69f601dc1c98: same system_len,
+//     17 system_h variants → −13pp CHR). Roundtrip is a no-op for already-
+//     canonical inputs, so it's safe to apply unconditionally.
 //
 // Non-object inputs (numbers, arrays, plain strings, bools) are passed
 // through unchanged on purpose: those are provider bugs, and masking
-// them with "{}" would hide the anomaly. Only the unambiguous
-// null/empty and double-encoded-object cases are rewritten.
+// them with "{}" would hide the anomaly.
 func normalizeToolInput(raw json.RawMessage) json.RawMessage {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
@@ -111,7 +229,28 @@ func normalizeToolInput(raw json.RawMessage) json.RawMessage {
 		if err := json.Unmarshal(trimmed, &s); err == nil {
 			inner := bytes.TrimSpace([]byte(s))
 			if len(inner) > 0 && inner[0] == '{' && json.Valid(inner) {
-				return json.RawMessage(inner)
+				trimmed = inner
+			}
+		}
+	}
+	// Canonicalize JSON objects so nested map-key ordering is deterministic.
+	// encoding/json sorts map keys since Go 1.12 for top-level map[string]X,
+	// but `any`-wrapped maps (which is what Unmarshal produces for object
+	// inputs) also sort on re-marshal. This closes the door on producer-side
+	// non-determinism (e.g. Go map iteration order in tool wrappers).
+	//
+	// Use Decoder.UseNumber() — plain Unmarshal into any decodes every JSON
+	// number as float64, which truncates integers > 2^53 (Unix nanos, 64-bit
+	// IDs, byte sizes). json.Number preserves the exact source digits so the
+	// roundtrip is lossless for numeric inputs while still canonicalizing key
+	// order.
+	if len(trimmed) > 0 && trimmed[0] == '{' {
+		dec := json.NewDecoder(bytes.NewReader(trimmed))
+		dec.UseNumber()
+		var v any
+		if err := dec.Decode(&v); err == nil {
+			if canonical, err := json.Marshal(v); err == nil {
+				return json.RawMessage(canonical)
 			}
 		}
 	}
@@ -164,6 +303,15 @@ func NewToolResultBlockWithImages(toolUseID, text string, images []ContentBlock,
 	nested := []ContentBlock{{Type: "text", Text: text}}
 	nested = append(nested, images...)
 	return ContentBlock{Type: "tool_result", ToolUseID: toolUseID, IsError: isError, ToolContent: nested}
+}
+
+// NewToolResultBlockWithBlocks creates a tool_result whose content is a list
+// of structured blocks (currently tool_reference blocks emitted by
+// tool_search when the defer_loading/tool_reference protocol is active).
+// Anthropic expects list-shaped content for tool_result when you want to
+// preserve block type (text, image, tool_reference).
+func NewToolResultBlockWithBlocks(toolUseID string, blocks []ContentBlock, isError bool) ContentBlock {
+	return ContentBlock{Type: "tool_result", ToolUseID: toolUseID, IsError: isError, ToolContent: blocks}
 }
 
 // ToolResultText extracts the text from a tool_result's content.
@@ -289,6 +437,10 @@ type Tool struct {
 	Name            string      `json:"name,omitempty"`
 	DisplayWidthPx  int         `json:"display_width_px,omitempty"`
 	DisplayHeightPx int         `json:"display_height_px,omitempty"`
+	// DeferLoading signals Anthropic to strip this tool from the cache-key prefix.
+	// Server expands the schema inline when tool_search returns a tool_reference
+	// block naming it. Only use on tools the model can discover via tool_search.
+	DeferLoading bool `json:"defer_loading,omitempty"`
 }
 
 type CompletionRequest struct {
@@ -304,6 +456,18 @@ type CompletionRequest struct {
 	Thinking        *ThinkingConfig `json:"thinking,omitempty"`
 	ReasoningEffort string          `json:"reasoning_effort,omitempty"` // OpenAI o-models: minimal/low/medium/high
 	ToolChoice      any             `json:"tool_choice,omitempty"`      // nil=auto, "any", or {"type":"tool","name":"..."}
+
+	// SessionID is sent to the gateway so the Anthropic provider can preserve
+	// the previous turn's rolling cache_control marker across turns (long-session
+	// CER recovery — without this, gateway sees session_id=None and falls back
+	// to single rolling marker per request).
+	SessionID string `json:"session_id,omitempty"`
+
+	// CacheSource tags the call-site origin so the gateway can route prompt-cache
+	// TTL by logical source (channels/TUI → 1h; cron/webhook/mcp/oneshot/
+	// subagent → 5m). See docs/cache-strategy.md for the authoritative table.
+	// Unset → gateway treats as "unknown" and falls back to 5m (fail cheap).
+	CacheSource string `json:"cache_source,omitempty"`
 }
 
 // ThinkingConfig for Anthropic extended thinking.
@@ -333,12 +497,14 @@ func (fc *FunctionCall) ArgumentsString() string {
 }
 
 type Usage struct {
-	InputTokens        int     `json:"input_tokens"`
-	OutputTokens       int     `json:"output_tokens"`
-	TotalTokens        int     `json:"total_tokens"`
-	CostUSD            float64 `json:"cost_usd"`
-	CacheReadTokens    int     `json:"cache_read_tokens,omitempty"`
-	CacheCreationTokens int    `json:"cache_creation_tokens,omitempty"`
+	InputTokens           int     `json:"input_tokens"`
+	OutputTokens          int     `json:"output_tokens"`
+	TotalTokens           int     `json:"total_tokens"`
+	CostUSD               float64 `json:"cost_usd"`
+	CacheReadTokens       int     `json:"cache_read_tokens,omitempty"`
+	CacheCreationTokens   int     `json:"cache_creation_tokens,omitempty"`
+	CacheCreation5mTokens int     `json:"cache_creation_5m_tokens,omitempty"`
+	CacheCreation1hTokens int     `json:"cache_creation_1h_tokens,omitempty"`
 }
 
 type CompletionResponse struct {
@@ -422,6 +588,7 @@ func (c *GatewayClient) Complete(ctx context.Context, req CompletionRequest) (*C
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
+	reqID := logCacheDebug(req, "complete")
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/completions", bytes.NewReader(body))
 	if err != nil {
@@ -447,6 +614,7 @@ func (c *GatewayClient) Complete(ctx context.Context, req CompletionRequest) (*C
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 
+	logCacheResponse(reqID, req.SessionID, &result)
 	return &result, nil
 }
 
@@ -463,6 +631,7 @@ func (c *GatewayClient) CompleteStream(ctx context.Context, req CompletionReques
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
+	reqID := logCacheDebug(req, "stream")
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/completions", bytes.NewReader(body))
 	if err != nil {
@@ -540,6 +709,7 @@ func (c *GatewayClient) CompleteStream(ctx context.Context, req CompletionReques
 		return nil, fmt.Errorf("stream ended without done event")
 	}
 
+	logCacheResponse(reqID, req.SessionID, result)
 	return result, nil
 }
 

@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -199,6 +200,35 @@ func TestExecuteTool_403(t *testing.T) {
 	_, err := gw.ExecuteTool(ctx, "dangerous_tool", map[string]any{}, "")
 	if err == nil {
 		t.Fatal("expected error for 403")
+	}
+}
+
+func TestCompletionRequest_MarshalsCacheSourceField(t *testing.T) {
+	req := CompletionRequest{
+		Messages:    []Message{{Role: "user", Content: NewTextContent("hi")}},
+		CacheSource: "webhook",
+	}
+	b, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	if !bytes.Contains(b, []byte(`"cache_source":"webhook"`)) {
+		t.Fatalf("cache_source missing on wire: %s", b)
+	}
+}
+
+func TestCompletionRequest_OmitsCacheSourceWhenEmpty(t *testing.T) {
+	// Unset CacheSource must not emit the field — Shannon interprets absence
+	// as "unknown" and falls back to 5m TTL.
+	req := CompletionRequest{
+		Messages: []Message{{Role: "user", Content: NewTextContent("hi")}},
+	}
+	b, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	if bytes.Contains(b, []byte("cache_source")) {
+		t.Fatalf("expected cache_source omitted when empty, got: %s", b)
 	}
 }
 
@@ -449,6 +479,95 @@ func TestNormalizeToolInput(t *testing.T) {
 	}
 }
 
+// TestNormalizeToolInput_CanonicalizesKeyOrdering verifies multi-key objects
+// produce identical bytes regardless of source key order. This closes the
+// byte-drift class that caused session 2026-04-15-69f601dc1c98's 17 distinct
+// system_h variants over 61 requests (same system_len) → −13pp CHR regression
+// vs the session-peer median.
+func TestNormalizeToolInput_CanonicalizesKeyOrdering(t *testing.T) {
+	// Same logical content, different source key orders → must marshal identically.
+	cases := []struct {
+		name string
+		a, b json.RawMessage
+	}{
+		{
+			"flat two keys",
+			json.RawMessage(`{"path":"/etc","line":5}`),
+			json.RawMessage(`{"line":5,"path":"/etc"}`),
+		},
+		{
+			"nested map",
+			json.RawMessage(`{"x":{"b":1,"a":2},"y":{"d":3,"c":4}}`),
+			json.RawMessage(`{"y":{"c":4,"d":3},"x":{"a":2,"b":1}}`),
+		},
+		{
+			"deeply nested",
+			json.RawMessage(`{"outer":{"mid":{"z":1,"a":2}}}`),
+			json.RawMessage(`{"outer":{"mid":{"a":2,"z":1}}}`),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ga := normalizeToolInput(tc.a)
+			gb := normalizeToolInput(tc.b)
+			if string(ga) != string(gb) {
+				t.Fatalf("canonical output differs:\n  a=%s\n  b=%s\n  got_a=%s\n  got_b=%s",
+					tc.a, tc.b, ga, gb)
+			}
+		})
+	}
+}
+
+// TestNormalizeToolInput_PreservesLargeIntegerPrecision guards against a
+// regression where the canonical-ordering roundtrip decoded JSON numbers into
+// float64 and silently truncated integers above 2^53. Real payloads that hit
+// this: Unix nanosecond timestamps (19 digits), 64-bit row IDs, byte sizes.
+// The fix uses json.Decoder.UseNumber() so digits round-trip verbatim.
+func TestNormalizeToolInput_PreservesLargeIntegerPrecision(t *testing.T) {
+	cases := []struct {
+		name string
+		in   json.RawMessage
+		want string // substring that must appear in the normalized output
+	}{
+		{
+			"unix nanoseconds",
+			json.RawMessage(`{"nanos":1716398400000000000}`),
+			`1716398400000000000`,
+		},
+		{
+			"near max int64",
+			json.RawMessage(`{"id":9223372036854775807}`),
+			`9223372036854775807`,
+		},
+		{
+			"nested large int",
+			json.RawMessage(`{"meta":{"row_id":1234567890123456789}}`),
+			`1234567890123456789`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := string(normalizeToolInput(tc.in))
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("precision lost:\n  in=%s\n  want substring=%s\n  got=%s",
+					tc.in, tc.want, got)
+			}
+		})
+	}
+}
+
+// TestNormalizeToolInput_DoubleEncodedCanonicalization verifies that
+// double-encoded multi-key objects get both unwrapped AND canonicalized.
+func TestNormalizeToolInput_DoubleEncodedCanonicalization(t *testing.T) {
+	// Keys in reverse-alpha order inside the double-encoded string.
+	in := json.RawMessage(`"{\"z_path\":\"/etc\",\"a_line\":5}"`)
+	got := string(normalizeToolInput(in))
+	want := `{"a_line":5,"z_path":"/etc"}`
+	if got != want {
+		t.Fatalf("double-encoded multi-key not canonicalized:\n  got =%s\n  want=%s", got, want)
+	}
+}
+
 // TestNewToolUseBlock_NormalizesInput verifies that the constructor coerces
 // null/empty input to {} so in-memory consumers (ollama.go, microcompact, etc.)
 // never see a literal "null" when reading block.Input.
@@ -661,5 +780,47 @@ func TestArgumentsString_NullHandling(t *testing.T) {
 				t.Errorf("ArgumentsString() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestUsage_JSON_5m1hSplit(t *testing.T) {
+	raw := []byte(`{
+        "input_tokens": 100,
+        "output_tokens": 50,
+        "cache_creation_tokens": 300,
+        "cache_creation_5m_tokens": 100,
+        "cache_creation_1h_tokens": 200
+    }`)
+	var u Usage
+	if err := json.Unmarshal(raw, &u); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if u.CacheCreation5mTokens != 100 {
+		t.Errorf("expected CacheCreation5mTokens=100, got %d", u.CacheCreation5mTokens)
+	}
+	if u.CacheCreation1hTokens != 200 {
+		t.Errorf("expected CacheCreation1hTokens=200, got %d", u.CacheCreation1hTokens)
+	}
+	if u.CacheCreationTokens != 300 {
+		t.Errorf("expected legacy CacheCreationTokens=300, got %d", u.CacheCreationTokens)
+	}
+}
+
+func TestUsage_JSON_BackwardCompat_MissingSplit(t *testing.T) {
+	// Old gateway responses that don't include the split fields yet must parse cleanly.
+	raw := []byte(`{
+        "input_tokens": 100,
+        "cache_creation_tokens": 300
+    }`)
+	var u Usage
+	if err := json.Unmarshal(raw, &u); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if u.CacheCreationTokens != 300 {
+		t.Errorf("legacy field broken, got %d", u.CacheCreationTokens)
+	}
+	if u.CacheCreation5mTokens != 0 || u.CacheCreation1hTokens != 0 {
+		t.Errorf("expected zero for absent split fields, got 5m=%d 1h=%d",
+			u.CacheCreation5mTokens, u.CacheCreation1hTokens)
 	}
 }

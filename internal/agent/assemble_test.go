@@ -86,3 +86,18 @@ func TestAssembleUserMessage_CacheBreakRegression(t *testing.T) {
 		}
 	})
 }
+
+func TestAssembleUserMessage_SessionPlaceholderEmitsCacheBreak(t *testing.T) {
+	parts := prompt.PromptParts{
+		System:          "static",
+		StableContext:   "## Session\nActive agent context.",
+		VolatileContext: "## Context\nDate: 2026-04-14",
+	}
+	msg := assembleUserMessage(parts, "hello")
+	if !strings.Contains(msg, "<!-- cache_break -->") {
+		t.Fatalf("cache_break marker missing when only session placeholder present")
+	}
+	if !strings.Contains(msg, "Active agent context.") {
+		t.Fatalf("session placeholder not preserved: %q", msg)
+	}
+}

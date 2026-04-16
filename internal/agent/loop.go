@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -349,6 +350,8 @@ type AgentLoop struct {
 	runMsgInjected    []bool           // parallel to runMessages: true = system-injected guardrail/nudge
 	runMsgTimestamps  []time.Time      // parallel to runMessages: when each message was created
 	lastRunStatus     RunStatus
+	toolRefSupported  bool   // true when the configured model supports defer_loading + tool_reference protocol
+	cacheSource       string // tag sent to gateway on every Complete call for prompt-cache TTL routing
 
 	// Watchdog thresholds (0 = disabled). The watchdog observes the loop's
 	// phase tracker and only measures duration in "idle-counted" phases
@@ -502,6 +505,14 @@ func (a *AgentLoop) SetModelTier(tier string) {
 
 func (a *AgentLoop) SetMCPContext(ctx string) {
 	a.mcpContext = ctx
+}
+
+// SetCacheSource tags every subsequent gateway Complete call with the given
+// cache_source string. Shannon uses it to route prompt-cache TTL (1h for
+// human-conversation channels; 5m for webhook/cron/mcp/one-shot/subagent paths).
+// Empty string is treated as "unknown" (5m fallback) by Shannon.
+func (a *AgentLoop) SetCacheSource(src string) {
+	a.cacheSource = src
 }
 
 func (a *AgentLoop) SetBypassPermissions(bypass bool) {
@@ -710,9 +721,16 @@ type approvedToolCall struct {
 	argsStr string              // parsed args, available for IsReadOnlyCall + execution
 }
 
-// assembleUserMessage combines volatile context and user query with cache_break markers.
+// assembleUserMessage combines stable per-session context with the user query.
 // The gateway's Anthropic provider splits on <!-- cache_break -->, caching the prefix.
-// Layout: [stableContext]\n<!-- cache_break -->\n[volatileContext]\n\n[userMessage]
+// Layout: [stableContext]\n<!-- cache_break -->\n[userMessage]
+//
+// Note: VolatileContext (memory, date/time, CWD, MCP) is stitched into the
+// System prompt by prompt.BuildSystemPrompt (after a `<!-- volatile -->`
+// marker so Shannon excludes it from the cached prefix). It is NOT consumed
+// here — this keeps user message bytes stable across turns so cross-turn
+// cache hits don't drift every minute due to embedded timestamps.
+// The defensive concat below handles callers that manually populate the field.
 func assembleUserMessage(parts prompt.PromptParts, userMessage string) string {
 	var sb strings.Builder
 
@@ -720,9 +738,10 @@ func assembleUserMessage(parts prompt.PromptParts, userMessage string) string {
 		sb.WriteString(parts.StableContext)
 		sb.WriteString("\n<!-- cache_break -->\n")
 	}
-
-	sb.WriteString(parts.VolatileContext)
-	sb.WriteString("\n\n")
+	if parts.VolatileContext != "" {
+		sb.WriteString(parts.VolatileContext)
+		sb.WriteString("\n\n")
+	}
 	sb.WriteString(userMessage)
 
 	return sb.String()
@@ -875,7 +894,62 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	var toolSchemas []client.Tool
 	var baseSchemas []client.Tool
 
-	if deferredMode {
+	// Model identity: prefer specificModel, fall back to modelTier.
+	// Computed early so the deferred-mode branch can gate on capability.
+	modelID := a.specificModel
+	if modelID == "" {
+		modelID = a.modelTier
+	}
+	a.toolRefSupported = modelSupportsToolRef(modelID)
+
+	if deferredMode && a.toolRefSupported {
+		// New path: send full tools[] with defer_loading flags; Anthropic strips
+		// deferred entries from the prefix hash so tools_h stays stable, while
+		// tool_search returns tool_reference blocks that the server expands inline.
+		tsSearch := newToolSearchTool(a.tools, coldDeferred)
+		effTools = a.tools.Clone()
+		effTools.Register(tsSearch)
+
+		baseSchemas = buildFullSchemasWithDefer(effTools, coldDeferred)
+		toolSchemas = baseSchemas
+		toolNames = liveToolNames(toolSchemas)
+
+		// Surface deferred summaries in the system prompt regardless of path.
+		// Anthropic already sees the full descriptions in tools[] (defer_loading
+		// strips from the cache-key prefix, not from the model's view), but the
+		// prompt's Deferred Tools section is a discovery hint — keeps parity
+		// with the legacy branch and avoids subtle model behavior drift.
+		for _, s := range deferredToolSummariesForNames(a.tools, coldDeferred) {
+			deferredSummaries = append(deferredSummaries, prompt.DeferredToolSummary{
+				Name:        s.Name,
+				Description: s.Description,
+			})
+		}
+
+		// Invariant check: Anthropic 400s if every tool is deferred.
+		// tool_search is registered without the defer flag so this should hold;
+		// downgrade defensively rather than risk a 400. The downgrade is
+		// unreachable in practice — log loudly if it ever fires so the registry
+		// misconfiguration is visible instead of silent.
+		if !hasAnyNonDeferred(toolSchemas) {
+			log.Printf("[cache-warn] hasAnyNonDeferred invariant violated: "+
+				"all %d tools have defer_loading=true; downgrading to legacy path. "+
+				"Check that tool_search registration preserves DeferLoading=false.",
+				len(toolSchemas))
+			a.toolRefSupported = false
+		}
+	}
+	if deferredMode && !a.toolRefSupported {
+		// Legacy path (Haiku, non-Anthropic, downgrade-on-invariant-violation):
+		// build local-only, let rebuildSchemas patch in cold schemas on demand,
+		// and surface deferred summaries in the system prompt.
+		//
+		// Reset deferredSummaries: when the upstream `toolRefSupported` branch
+		// downgraded (set a.toolRefSupported=false after already populating
+		// summaries), both branches would otherwise append the same entries and
+		// the system prompt's Deferred Tools section would list each tool twice.
+		deferredSummaries = nil
+
 		tsSearch := newToolSearchTool(a.tools, coldDeferred)
 		effTools = a.tools.Clone()
 		effTools.Register(tsSearch)
@@ -894,16 +968,11 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				Description: s.Description,
 			})
 		}
-	} else {
+	}
+	if !deferredMode {
 		effTools = a.tools
 		toolSchemas = effTools.SortedSchemas()
 		toolNames = liveToolNames(toolSchemas)
-	}
-
-	// Model identity: prefer specificModel, fall back to modelTier.
-	modelID := a.specificModel
-	if modelID == "" {
-		modelID = a.modelTier
 	}
 
 	parts := prompt.BuildSystemPrompt(prompt.PromptOptions{
@@ -1173,6 +1242,8 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			MaxTokens:       a.maxTokens,
 			Thinking:        a.thinking,
 			ReasoningEffort: a.reasoningEffort,
+			SessionID:       a.sessionID,
+			CacheSource:     a.cacheSource,
 		}
 		finalResp, err := a.completeWithRetry(ctx, req)
 		if err != nil {
@@ -1455,6 +1526,8 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			Tools:           toolSchemas,
 			Thinking:        a.thinking,
 			ReasoningEffort: a.reasoningEffort,
+			SessionID:       a.sessionID,
+			CacheSource:     a.cacheSource,
 		}
 
 		const maxLLMRetries = 3
@@ -1632,6 +1705,8 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 					Tools:           toolSchemas,
 					Thinking:        a.thinking,
 					ReasoningEffort: a.reasoningEffort,
+					SessionID:       a.sessionID,
+					CacheSource:     a.cacheSource,
 				}
 				// Checkpoint the compacted state before retrying. Gated on
 				// the dirty flag we just set — a no-op compaction path
@@ -2177,7 +2252,13 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			}
 
 			if useNative {
-				if len(result.Images) > 0 {
+				// Prefer structured blocks when tool_search produced them AND the
+				// model supports the tool_reference protocol. Falls back to the
+				// text/image paths when blocks are absent or the gate is off.
+				if len(result.ContentBlocks) > 0 && a.toolRefSupported {
+					resultBlocks = append(resultBlocks, client.NewToolResultBlockWithBlocks(
+						fc.ID, result.ContentBlocks, result.IsError))
+				} else if len(result.Images) > 0 {
 					var imageBlocks []client.ContentBlock
 					for _, img := range result.Images {
 						imageBlocks = append(imageBlocks, client.ContentBlock{

@@ -18,6 +18,37 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/session"
 )
 
+func TestCacheSourceFromDaemonSource(t *testing.T) {
+	cases := []struct {
+		source string
+		want   string
+	}{
+		{"slack", "slack"},
+		{"Slack", "slack"},
+		{"  line  ", "line"},
+		{"feishu", "feishu"},
+		{"telegram", "telegram"},
+		{"tui", "tui"},
+		// Empty source is defaulted to "shanclaw" in server.go before reaching
+		// this function; the dedicated empty-string case was removed. Falls
+		// through to "unknown" (5m) defensively in case the default is ever
+		// bypassed — matches the fail-cheap policy documented in
+		// docs/cache-strategy.md.
+		{"", "unknown"},
+		{"webhook", "webhook"},
+		{"cron", "cron"},
+		{"schedule", "schedule"},
+		{"mcp", "mcp"},
+		{"cache_bench", "cache_bench"},
+		{"never-classified-source", "unknown"},
+	}
+	for _, c := range cases {
+		if got := cacheSourceFromDaemonSource(c.source); got != c.want {
+			t.Errorf("cacheSourceFromDaemonSource(%q) = %q, want %q", c.source, got, c.want)
+		}
+	}
+}
+
 func TestRunAgentRequest_Validate_EmptyText(t *testing.T) {
 	req := RunAgentRequest{Text: ""}
 	if err := req.Validate(); err == nil {

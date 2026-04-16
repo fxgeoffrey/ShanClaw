@@ -353,6 +353,8 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 	loop.SetMaxTokens(runtimeCfg.Agent.MaxTokens)
 	loop.SetTemperature(runtimeCfg.Agent.Temperature)
 	loop.SetContextWindow(runtimeCfg.Agent.ContextWindow)
+	// Interactive TUI — long-lived session with iteration, 1h cache pays off.
+	loop.SetCacheSource("tui")
 	if runtimeCfg.Agent.Model != "" {
 		loop.SetSpecificModel(runtimeCfg.Agent.Model)
 	}
@@ -495,6 +497,8 @@ func (m *Model) rebuildAgentLoop() {
 	loop.SetMaxTokens(m.cfg.Agent.MaxTokens)
 	loop.SetTemperature(m.cfg.Agent.Temperature)
 	loop.SetContextWindow(m.cfg.Agent.ContextWindow)
+	// Interactive TUI (switched agent) — same routing as the primary loop.
+	loop.SetCacheSource("tui")
 	if m.cfg.Agent.Model != "" {
 		loop.SetSpecificModel(m.cfg.Agent.Model)
 	} else if m.cfg.Provider == "ollama" && m.cfg.Ollama.Model != "" {

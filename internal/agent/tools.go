@@ -61,6 +61,11 @@ type ToolResult struct {
 	// → SerpAPI query count) populate this so the audit logger can write a
 	// cost breakdown per tool call. nil when the tool does not bill per call.
 	Usage *ToolUsage
+	// ContentBlocks, when non-nil, carries structured output (e.g. tool_reference
+	// blocks from tool_search) that loop.go passes through verbatim as
+	// tool_result content when the gateway/model supports the protocol.
+	// When nil, loop.go falls back to the Content string path.
+	ContentBlocks []client.ContentBlock
 }
 
 // ToolUsage is ToolResult's per-call cost breakdown. Mirrors client.ToolUsage

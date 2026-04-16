@@ -1,11 +1,44 @@
 package prompt
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/skills"
 )
+
+// TestBuildSystemPrompt_NudgesParallelToolUse verifies the system prompt
+// encourages batching independent tool calls into a single response. This
+// cuts block churn in the agent loop — the dominant long-session CHR drag
+// once msgs * 1.5 exceeds Anthropic's ~20-block auto-lookback.
+func TestBuildSystemPrompt_NudgesParallelToolUse(t *testing.T) {
+	parts := BuildSystemPrompt(PromptOptions{
+		BasePrompt: "Base.",
+		ToolNames:  []string{"file_read", "bash", "grep"},
+	})
+
+	// Text signals — must mention parallelism AND the mechanism (tool_use block / single response).
+	// Case-insensitive: nudge may emphasize words in uppercase.
+	lower := strings.ToLower(parts.System)
+	for _, keyword := range []string{"parallel", "single response", "tool_use"} {
+		if !strings.Contains(lower, keyword) {
+			t.Errorf("system prompt missing %q — should nudge parallel tool use to reduce block churn", keyword)
+		}
+	}
+}
+
+// TestBuildSystemPrompt_ParallelNudgeOnlyWhenToolsPresent verifies the nudge
+// is omitted when no tools are available — adding it would waste tokens and
+// pollute the cached prefix for tool-less agents.
+func TestBuildSystemPrompt_ParallelNudgeOnlyWhenToolsPresent(t *testing.T) {
+	parts := BuildSystemPrompt(PromptOptions{
+		BasePrompt: "You answer questions without tools.",
+	})
+	if strings.Contains(parts.System, "parallel tool_use") || strings.Contains(parts.System, "SINGLE response") {
+		t.Errorf("parallel nudge should be absent when no tools are registered:\n%s", parts.System)
+	}
+}
 
 func TestBuildSystemPrompt_SystemIsStatic(t *testing.T) {
 	// Two calls with different volatile content must produce identical System fields
@@ -169,14 +202,18 @@ func TestBuildSystemPrompt_StableContextContainsStickyFacts(t *testing.T) {
 }
 
 func TestBuildSystemPrompt_EmptyStableContext(t *testing.T) {
-	// Neither instructions nor sticky facts → StableContext must be empty
-	// (so assembleUserMessage skips the cache_break marker).
+	// Neither instructions nor sticky facts → StableContext falls back to a
+	// stable placeholder so assembleUserMessage still emits the cache_break
+	// marker and the gateway attaches its third cache_control breakpoint.
 	parts := BuildSystemPrompt(PromptOptions{
 		BasePrompt: "Base.",
 	})
 
-	if parts.StableContext != "" {
-		t.Errorf("StableContext should be empty when neither instructions nor sticky facts are set, got: %q", parts.StableContext)
+	if parts.StableContext == "" {
+		t.Fatal("StableContext should fall back to a non-empty placeholder to preserve the third cache breakpoint")
+	}
+	if !strings.Contains(parts.StableContext, "Active agent context.") {
+		t.Errorf("StableContext should contain the session placeholder, got: %q", parts.StableContext)
 	}
 }
 
@@ -213,8 +250,9 @@ func TestBuildSystemPrompt_SystemContainsSkills(t *testing.T) {
 	if !strings.Contains(parts.System, "## Available Skills") {
 		t.Error("System should contain skills section")
 	}
-	if !strings.Contains(parts.System, "| pdf") {
-		t.Error("System should contain skill entry")
+	// Compact bullet form: "- <name>: <description>"
+	if !strings.Contains(parts.System, "- pdf:") {
+		t.Error("System should contain skill entry as compact bullet")
 	}
 }
 
@@ -326,6 +364,35 @@ func TestBuildSystemPrompt_OutputFormatPlain(t *testing.T) {
 	}
 }
 
+func TestBuildSystemPrompt_SkillsListCompact(t *testing.T) {
+	opts := PromptOptions{
+		BasePrompt: "You are Shannon.",
+		Skills: []*skills.Skill{
+			{Name: "skill-a", Description: strings.Repeat("long description words ", 20)},
+			{Name: "skill-b", Description: "short desc"},
+		},
+	}
+	p := BuildSystemPrompt(opts)
+	// Each skill must appear; each skill line must be <= 120 chars (compact bullet form).
+	for _, s := range opts.Skills {
+		if !strings.Contains(p.System, s.Name) {
+			t.Fatalf("skill %s missing from system prompt", s.Name)
+		}
+	}
+	lineCount := 0
+	for _, l := range strings.Split(p.System, "\n") {
+		if strings.HasPrefix(l, "- skill-") {
+			lineCount++
+			if len(l) > 120 {
+				t.Fatalf("skill line too long (%d chars): %q", len(l), l)
+			}
+		}
+	}
+	if lineCount != 2 {
+		t.Fatalf("expected 2 skill bullet lines, got %d", lineCount)
+	}
+}
+
 func TestTruncate(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -346,5 +413,84 @@ func TestTruncate(t *testing.T) {
 				t.Errorf("truncate(%q, %d) = %q, want %q", tt.input, tt.max, got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestMacOSAutomationGuidance_NoStrandedHeader(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("darwin-only guidance")
+	}
+	// computer present but none of the bullet-emitting conditions match
+	// → no stranded "## macOS Automation\n" header
+	tests := []struct {
+		name  string
+		tools []string
+	}{
+		{"only-computer", []string{"computer"}},
+		{"computer-and-wait_for", []string{"computer", "wait_for"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out := macOSAutomationGuidance(tc.tools)
+			// "only-computer" currently produces zero bullets → must return ""
+			// "computer-and-wait_for" produces wait_for bullet → must include it
+			if tc.name == "only-computer" && out != "" {
+				t.Fatalf("expected empty string for tools=%v, got %q", tc.tools, out)
+			}
+			if tc.name == "computer-and-wait_for" {
+				if !strings.Contains(out, "## macOS Automation") {
+					t.Fatalf("expected section header for tools=%v, got %q", tc.tools, out)
+				}
+				if !strings.Contains(out, "wait_for") {
+					t.Fatalf("expected wait_for bullet for tools=%v, got %q", tc.tools, out)
+				}
+			}
+		})
+	}
+}
+
+func TestMacOSAutomationGuidance_AccessibilityOnly(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("darwin-only guidance")
+	}
+	out := macOSAutomationGuidance([]string{"accessibility"})
+	if !strings.Contains(out, "## macOS Automation") {
+		t.Fatalf("expected header, got %q", out)
+	}
+	if !strings.Contains(out, "accessibility") {
+		t.Fatalf("expected accessibility bullet, got %q", out)
+	}
+	// Should NOT include the AX fallback bullet (requires both accessibility+computer)
+	if strings.Contains(out, "Fall back to `computer`") {
+		t.Fatalf("unexpected fallback bullet when only accessibility present: %q", out)
+	}
+}
+
+func TestBuildSystemPrompt_DeferredToolsTruncated(t *testing.T) {
+	longDesc := strings.Repeat("abcdefghij", 20) // 200 chars
+	opts := PromptOptions{
+		BasePrompt: "You are Shannon.",
+		DeferredTools: []DeferredToolSummary{
+			{Name: "long-tool", Description: longDesc},
+		},
+	}
+	p := BuildSystemPrompt(opts)
+	// Find the bullet line for long-tool and assert it's truncated
+	found := false
+	for _, l := range strings.Split(p.System, "\n") {
+		if strings.HasPrefix(l, "- long-tool:") {
+			found = true
+			// Line = "- long-tool: " (13 chars) + up to 60 chars desc
+			// So total <= 75 including trailing newline excluded.
+			if len(l) > 100 {
+				t.Fatalf("deferred tool line too long (%d chars), truncation regressed: %q", len(l), l)
+			}
+			if !strings.HasSuffix(l, "...") {
+				t.Fatalf("expected truncation marker '...' on long desc, got: %q", l)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("deferred tool bullet not found in system prompt")
 	}
 }

@@ -78,6 +78,13 @@ type PromptParts struct {
 // System contains only content that is stable across turns.
 // Shared instructions and sticky facts go to StableContext (cached prefix).
 // Volatile content (memory, date/time, CWD, MCP) goes to VolatileContext.
+//
+// Note: an attempt to move VolatileContext into System (after a
+// `<!-- volatile -->` marker) was reverted — it caused tools cache to break
+// every minute because the system_volatile bytes sit BEFORE the tools
+// cache_control. Baseline placement (volatile in user_1 after cache_break) is
+// actually optimal: it only pollutes the rolling marker cache, leaving system
+// + tools + user_1.stable caches intact.
 func BuildSystemPrompt(opts PromptOptions) PromptParts {
 	system := buildStaticSystem(opts)
 	stable := buildStableContext(opts)
@@ -112,29 +119,51 @@ func buildStaticSystem(opts PromptOptions) string {
 		sb.WriteString(".")
 	}
 
-	// 3. Available Skills (stable once session starts)
+	// Parallel tool-use nudge: agent loops that fire N tool calls across N
+	// iterations grow msgs past Anthropic's ~20-block auto-lookback window,
+	// causing CHR decay in long sessions. Batching independent calls into
+	// ONE response collapses N iterations → 1, keeping the rolling marker
+	// reachable. Only add when tools are actually registered — tool-less
+	// agents would just pay extra cached-prefix tokens.
+	if len(opts.ToolNames) > 0 || len(opts.ServerTools) > 0 {
+		sb.WriteString("\n\nWhen you need independent pieces of information " +
+			"(read multiple files, check several conditions, fetch data from different sources), " +
+			"prefer calling ALL the tools in a SINGLE response with multiple parallel tool_use blocks " +
+			"rather than across sequential turns. This amortizes prompt-cache cost and reduces latency.\n" +
+			"Example — INEFFICIENT (3 turns):\n" +
+			"  turn 1: file_read A\n" +
+			"  turn 2: file_read B\n" +
+			"  turn 3: file_read C\n" +
+			"Example — EFFICIENT (1 turn, 3 parallel tool_use blocks in one response):\n" +
+			"  turn 1: file_read A + file_read B + file_read C\n" +
+			"Only sequence when later calls genuinely depend on earlier results.")
+	}
+
+	// 3. Available Skills (stable once session starts) — compact bullet form:
+	// name + truncated description. Full docs loaded on demand via use_skill.
 	if len(opts.Skills) > 0 {
-		sb.WriteString("\n\n## Available Skills\n\n")
-		sb.WriteString("You can activate a skill by calling the `use_skill` tool with the skill name.\n")
-		sb.WriteString("Only activate a skill when the user's request matches the skill's purpose.\n\n")
-		sb.WriteString("| Skill | Description |\n")
-		sb.WriteString("|-------|-------------|\n")
+		sb.WriteString("\n\n## Available Skills\n")
+		sb.WriteString("Call `use_skill` with the skill name to load full docs. Short list:\n")
 		for _, s := range opts.Skills {
-			sb.WriteString(fmt.Sprintf("| %s | %s |\n", s.Name, s.Description))
+			desc := s.Description
+			if len(desc) > 80 {
+				desc = desc[:77] + "..."
+			}
+			fmt.Fprintf(&sb, "- %s: %s\n", s.Name, desc)
 		}
 	}
 
-	// 3b. Deferred Tools (only in deferred mode)
+	// 3b. Deferred Tools (only in deferred mode) — name + truncated description.
+	// Model calls tool_search to load full schemas on demand.
 	if len(opts.DeferredTools) > 0 {
-		sb.WriteString("\n\n## Deferred Tools\n\n")
-		sb.WriteString("The following tools are available via tool_search. When you need one,\n")
-		sb.WriteString("call tool_search to load its schema, then IMMEDIATELY call the loaded\n")
-		sb.WriteString("tool in your next response. NEVER stop to describe what you loaded or\n")
-		sb.WriteString("ask the user what to do after loading — the user's request is already\n")
-		sb.WriteString("stated above. Treat tool_search as a transparent preparation step,\n")
-		sb.WriteString("not as an action to report on.\n\n")
+		sb.WriteString("\n\n## Deferred Tools\n")
+		sb.WriteString("Load via `tool_search` when needed, then immediately call the loaded tool.\n")
 		for _, dt := range opts.DeferredTools {
-			sb.WriteString(fmt.Sprintf("- %s: %s\n", dt.Name, dt.Description))
+			desc := dt.Description
+			if len(desc) > 60 {
+				desc = desc[:57] + "..."
+			}
+			fmt.Fprintf(&sb, "- %s: %s\n", dt.Name, desc)
 		}
 	}
 
@@ -190,6 +219,16 @@ func buildStableContext(opts PromptOptions) string {
 		}
 		sb.WriteString("## Session Facts\n")
 		sb.WriteString(sticky)
+	}
+
+	// Guarantee a non-empty stable prefix so the gateway attaches a third
+	// cache_control breakpoint (on the user message stable block). When this
+	// is empty the gateway's Anthropic provider falls through its
+	// empty-text-block guard and skips the breakpoint entirely, leaving the
+	// user message uncached. The literal text is stable across all sessions
+	// (no time, no IDs) so the extra bytes go into a shareable cached prefix.
+	if sb.Len() == 0 {
+		sb.WriteString("## Session\nActive agent context.")
 	}
 
 	return sb.String()
@@ -261,29 +300,38 @@ func truncate(s string, maxChars int) string {
 
 // macOSAutomationGuidance returns workflow guidance for macOS automation tools,
 // or empty string if not on darwin or no relevant tools are registered.
+// Each bullet is conditional on the actual tool presence to avoid emitting
+// guidance for tools the session won't use.
 func macOSAutomationGuidance(toolNames []string) string {
 	if runtime.GOOS != "darwin" {
 		return ""
 	}
-	hasMacTools := false
-	for _, name := range toolNames {
-		if name == "accessibility" || name == "computer" || name == "wait_for" {
-			hasMacTools = true
-			break
+	has := func(name string) bool {
+		for _, n := range toolNames {
+			if n == name {
+				return true
+			}
 		}
+		return false
 	}
-	if !hasMacTools {
+	var bullets strings.Builder
+	if has("accessibility") {
+		bullets.WriteString("- Prefer `accessibility` (AX API) over `computer` for UI interactions — faster, no screenshot needed.\n")
+		bullets.WriteString("- After annotate or read_tree, click elements by ref (e.g. ref=\"e14\"). Only use coordinate clicks as a last resort.\n")
+		bullets.WriteString("- Always include the app parameter. Use the exact name as shown in the Dock.\n")
+		bullets.WriteString("- Ensure the target app is frontmost before typing. Use accessibility click on the target field first.\n")
+	}
+	if has("computer") && has("accessibility") {
+		bullets.WriteString("- Fall back to `computer` only when AX fails or the target is a canvas/web element.\n")
+	}
+	if has("browser") {
+		bullets.WriteString("- For interacting with web page elements, use `browser` (DOM-level access). Use accessibility only for native macOS UI.\n")
+	}
+	if has("wait_for") {
+		bullets.WriteString("- Use `wait_for` to poll for UI state instead of bash sleep.\n")
+	}
+	if bullets.Len() == 0 {
 		return ""
 	}
-	return `## macOS Automation
-
-When controlling macOS applications:
-
-1. **Orient before acting**: Use accessibility annotate to see what's on screen before clicking. It returns a labeled screenshot with numbered elements.
-2. **Use refs, not coordinates**: After annotate or read_tree, click elements by ref (e.g. ref="e14"). Only use coordinate clicks as a last resort.
-3. **Specify app name**: Always include the app parameter. Use the exact name as shown in the Dock (e.g. "Finder", "Safari", "Google Chrome", "Notes").
-4. **Wait, don't sleep**: After launching apps or navigating, use wait_for instead of bash sleep. Example: wait_for with condition="titleContains" value="Google".
-5. **Browser tool for web content**: For interacting with web page elements, use the browser tool (DOM-level access). Use accessibility only for native macOS UI.
-6. **Focus before typing**: Ensure the target app is frontmost before using computer type/hotkey. Use accessibility click on the target field first.
-7. **CJK/emoji text**: computer type handles Chinese, Japanese, Korean, and emoji automatically via clipboard paste.`
+	return "## macOS Automation\n" + bullets.String()
 }

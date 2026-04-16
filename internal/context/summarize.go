@@ -53,7 +53,7 @@ func buildTranscript(messages []client.Message) string {
 // GenerateSummary calls the LLM (small tier) to summarize a conversation.
 // It strips the system message from the input to avoid wasting tokens.
 // Serializes both plain text and block content (tool_use, tool_result).
-func GenerateSummary(ctx context.Context, c Completer, messages []client.Message) (string, error) {
+func GenerateSummary(ctx context.Context, c Completer, messages []client.Message) (string, client.Usage, error) {
 	req := client.CompletionRequest{
 		Messages: []client.Message{
 			{Role: "system", Content: client.NewTextContent(summarizePrompt)},
@@ -66,10 +66,10 @@ func GenerateSummary(ctx context.Context, c Completer, messages []client.Message
 
 	resp, err := c.Complete(ctx, req)
 	if err != nil {
-		return "", fmt.Errorf("summarization failed: %w", err)
+		return "", client.Usage{}, fmt.Errorf("summarization failed: %w", err)
 	}
 
-	return extractSummary(resp.OutputText), nil
+	return extractSummary(resp.OutputText), resp.Usage, nil
 }
 
 const userSummarizePrompt = `You are a conversation summarizer. Read the following conversation and produce a clear, well-structured Markdown summary for a human reader.

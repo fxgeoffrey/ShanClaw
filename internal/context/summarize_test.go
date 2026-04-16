@@ -13,10 +13,14 @@ type mockCompleter struct {
 	response *client.CompletionResponse
 	err      error
 	lastReq  *client.CompletionRequest
+	usage    client.Usage
 }
 
 func (m *mockCompleter) Complete(ctx context.Context, req client.CompletionRequest) (*client.CompletionResponse, error) {
 	m.lastReq = &req
+	if m.response != nil && m.usage != (client.Usage{}) {
+		m.response.Usage = m.usage
+	}
 	return m.response, m.err
 }
 
@@ -36,7 +40,7 @@ func TestGenerateSummary(t *testing.T) {
 			{Role: "assistant", Content: client.NewTextContent("Found a nil pointer. Fixing now.")},
 		}
 
-		summary, err := GenerateSummary(context.Background(), mock, messages)
+		summary, _, err := GenerateSummary(context.Background(), mock, messages)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -64,7 +68,7 @@ func TestGenerateSummary(t *testing.T) {
 			{Role: "user", Content: client.NewTextContent("hello")},
 		}
 
-		_, err := GenerateSummary(context.Background(), mock, messages)
+		_, _, err := GenerateSummary(context.Background(), mock, messages)
 		if err == nil {
 			t.Error("expected error when LLM fails")
 		}
@@ -83,7 +87,7 @@ func TestGenerateSummary(t *testing.T) {
 			{Role: "assistant", Content: client.NewTextContent("done")},
 		}
 
-		_, err := GenerateSummary(context.Background(), mock, messages)
+		_, _, err := GenerateSummary(context.Background(), mock, messages)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -106,7 +110,7 @@ func TestGenerateSummary(t *testing.T) {
 		messages := []client.Message{
 			{Role: "user", Content: client.NewTextContent("test")},
 		}
-		summary, err := GenerateSummary(context.Background(), mock, messages)
+		summary, _, err := GenerateSummary(context.Background(), mock, messages)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -141,7 +145,7 @@ func TestGenerateSummary(t *testing.T) {
 			{Role: "user", Content: client.NewBlockContent(resultBlocks)},
 		}
 
-		_, err := GenerateSummary(context.Background(), mock, messages)
+		_, _, err := GenerateSummary(context.Background(), mock, messages)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -220,5 +224,22 @@ func TestExtractSummary(t *testing.T) {
 				t.Errorf("should not contain %q, got: %q", tt.excludes, got)
 			}
 		})
+	}
+}
+
+func TestGenerateSummary_ReturnsUsage(t *testing.T) {
+	mock := &mockCompleter{
+		response: &client.CompletionResponse{
+			OutputText: "<analysis>thinking</analysis>\n<summary>test summary</summary>",
+		},
+		usage: client.Usage{InputTokens: 500, OutputTokens: 100, TotalTokens: 600, CostUSD: 0.002},
+	}
+	messages := []client.Message{{Role: "user", Content: client.NewTextContent("hello")}}
+	_, usage, err := GenerateSummary(context.Background(), mock, messages)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if usage.InputTokens != 500 || usage.OutputTokens != 100 || usage.CostUSD != 0.002 {
+		t.Errorf("usage not propagated: got %+v", usage)
 	}
 }

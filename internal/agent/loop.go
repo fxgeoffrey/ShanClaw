@@ -1455,7 +1455,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 					}
 
 					restoreLLM := a.tracker.EnterTransient(PhaseAwaitingLLM)
-					summary, sumErr := ctxwin.GenerateSummary(ctx, a.client, messages)
+					summary, _, sumErr := ctxwin.GenerateSummary(ctx, a.client, messages)
 					restoreLLM()
 					if sumErr != nil {
 						summaryFailures++
@@ -1614,7 +1614,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				softMessages := cloneMessages(messages)
 				compressOldToolResults(ctx, softMessages, compressAfter, maxResultChars, a.client)
 				restoreLLM := a.tracker.EnterTransient(PhaseAwaitingLLM)
-				summary, sumErr := ctxwin.GenerateSummary(ctx, a.client, reactiveSummaryInput(softMessages, nextSummary))
+				summary, _, sumErr := ctxwin.GenerateSummary(ctx, a.client, reactiveSummaryInput(softMessages, nextSummary))
 				restoreLLM()
 				if sumErr != nil {
 					if nextSummary != "" {
@@ -1633,7 +1633,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 					compressOldToolResults(ctx, emergencyMessages, 1, 100, nil)
 
 					restoreLLM := a.tracker.EnterTransient(PhaseAwaitingLLM)
-					summary, sumErr = ctxwin.GenerateSummary(ctx, a.client, reactiveSummaryInput(emergencyMessages, nextSummary))
+					summary, _, sumErr = ctxwin.GenerateSummary(ctx, a.client, reactiveSummaryInput(emergencyMessages, nextSummary))
 					restoreLLM()
 					if sumErr != nil {
 						if nextSummary != "" {

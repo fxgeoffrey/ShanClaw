@@ -53,7 +53,7 @@ func (m *Model) runCompact(customInstructions string) func() compactDoneMsg {
 			}
 			msgsForSummary = append([]client.Message{hint}, messages...)
 		}
-		summary, err := ctxwin.GenerateSummary(ctx, m.gateway, msgsForSummary)
+		summary, _, err := ctxwin.GenerateSummary(ctx, m.gateway, msgsForSummary)
 		if err != nil {
 			return compactDoneMsg{err: fmt.Errorf("summarization failed: %w", err)}
 		}

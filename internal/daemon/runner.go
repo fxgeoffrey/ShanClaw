@@ -326,6 +326,33 @@ func outputFormatForSource(source string) string {
 	return "markdown"
 }
 
+// cacheSourceFromDaemonSource maps the daemon-level source (slack/webhook/
+// cron/mcp/tui/...) to the cache_source string Shannon uses for prompt-cache
+// TTL routing. Channel messages + interactive use → long bucket (1h). Fire-and-
+// forget paths → short bucket (5m). See docs/cache-strategy.md.
+//
+// Unknown / unclassified sources deliberately fall through to "unknown" →
+// Shannon routes unknown to 5m (fail cheap, not fail expensive).
+func cacheSourceFromDaemonSource(source string) string {
+	s := strings.ToLower(strings.TrimSpace(source))
+	switch s {
+	case "slack", "line", "feishu", "lark", "telegram":
+		// Human-conversation channels: idle gaps > 5m are common, 1h pays off.
+		return s
+	case "tui":
+		return "tui"
+	case "cache_bench":
+		// Synthetic benchmark traffic — treat as long-bucket so bench measures
+		// reflect the production channel-message configuration.
+		return "cache_bench"
+	case "webhook", "cron", "schedule", "mcp":
+		// One-shot paths — each invocation starts fresh, no resume.
+		return s
+	default:
+		return "unknown"
+	}
+}
+
 func routeTitle(source, channel, sender string) string {
 	if source == "" {
 		return ""
@@ -847,6 +874,7 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 	loop.SetContextWindow(runCfg.Agent.ContextWindow)
 	loop.SetEnableStreaming(false)
 	loop.SetDeltaProvider(agent.NewTemporalDelta())
+	loop.SetCacheSource(cacheSourceFromDaemonSource(req.Source))
 	if agentOverride != nil {
 		scopedMCPCtx := tools.ResolveMCPContext(runCfg, agentOverride)
 		agentDir := filepath.Join(deps.ShannonDir, "agents", agentName)

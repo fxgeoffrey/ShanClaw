@@ -8,6 +8,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/Kocoro-lab/ShanClaw/internal/agent"
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
 	ctxwin "github.com/Kocoro-lab/ShanClaw/internal/context"
 	"github.com/Kocoro-lab/ShanClaw/internal/session"
@@ -36,16 +37,17 @@ func (m *Model) runCompact(customInstructions string) func() compactDoneMsg {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
+		var usage agent.UsageAccumulator
 
 		// Step 1: persist learnings to MEMORY.md
 		memoryDir := m.shannonDir + "/memory"
 		if m.agentOverride != nil {
 			memoryDir = fmt.Sprintf("%s/agents/%s", m.shannonDir, m.agentOverride.Name)
 		}
-		// Usage intentionally discarded: /compact runs outside the agent loop
-		// and has no UsageAccumulator to emit to. The cost is small (small-tier
-		// LLM) and user-triggered, so the omission is acceptable.
-		_, _ = ctxwin.PersistLearnings(ctx, m.gateway, messages, memoryDir)
+		plUsage, _ := ctxwin.PersistLearnings(ctx, m.gateway, messages, memoryDir)
+		if plUsage.InputTokens > 0 || plUsage.OutputTokens > 0 {
+			usage.Add(agent.LLMUsageDelta(plUsage, ""))
+		}
 
 		// Step 2: generate summary
 		msgsForSummary := messages
@@ -56,7 +58,10 @@ func (m *Model) runCompact(customInstructions string) func() compactDoneMsg {
 			}
 			msgsForSummary = append([]client.Message{hint}, messages...)
 		}
-		summary, _, err := ctxwin.GenerateSummary(ctx, m.gateway, msgsForSummary)
+		summary, sumUsage, err := ctxwin.GenerateSummary(ctx, m.gateway, msgsForSummary)
+		if sumUsage.InputTokens > 0 || sumUsage.OutputTokens > 0 {
+			usage.Add(agent.LLMUsageDelta(sumUsage, ""))
+		}
 		if err != nil {
 			return compactDoneMsg{err: fmt.Errorf("summarization failed: %w", err)}
 		}
@@ -88,6 +93,14 @@ func (m *Model) runCompact(customInstructions string) func() compactDoneMsg {
 		// Update session
 		sess.Messages = shaped
 		sess.MessageMeta = newMeta
+		acc := usage.Snapshot()
+		if llm := acc.LLM; llm.LLMCalls > 0 || llm.TotalTokens > 0 || llm.CostUSD > 0 {
+			m.sessions.AddUsage(sess.ID, session.UsageFromAccumulated(
+				llm.LLMCalls, llm.InputTokens, llm.OutputTokens, llm.TotalTokens,
+				llm.CostUSD, llm.CacheReadTokens, llm.CacheCreationTokens, llm.CacheCreation5mTokens, llm.CacheCreation1hTokens, llm.Model,
+				acc.ToolCalls, acc.ToolCostUSD,
+			))
+		}
 		m.sessions.Save()
 
 		afterTokens := ctxwin.EstimateTokens(shaped)

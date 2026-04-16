@@ -2342,10 +2342,11 @@ func TestAgentLoop_CompactionTriggersOnHighTokenUsage(t *testing.T) {
 		t.Errorf("expected 'Refactoring complete.', got %q", result)
 	}
 
-	// Usage tracks main-loop LLM calls only (not the summary call).
+	// Usage counts primary LLM calls only (helper-model calls like
+	// compaction summary are emitted to the handler separately).
 	// 2 calls: tool response + post-compaction response
 	if usage.LLMCalls != 2 {
-		t.Errorf("expected 2 main-loop LLM calls in usage, got %d", usage.LLMCalls)
+		t.Errorf("expected 2 LLM calls in usage, got %d", usage.LLMCalls)
 	}
 }
 

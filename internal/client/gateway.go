@@ -541,6 +541,18 @@ type Usage struct {
 	CacheCreation1hTokens int     `json:"cache_creation_1h_tokens,omitempty"`
 }
 
+// Normalized fills backward-compatible derived fields for callers that need a
+// stable usage shape across legacy and split cache-token schemas.
+func (u Usage) Normalized() Usage {
+	if u.TotalTokens == 0 && (u.InputTokens > 0 || u.OutputTokens > 0) {
+		u.TotalTokens = u.InputTokens + u.OutputTokens
+	}
+	if u.CacheCreationTokens == 0 && (u.CacheCreation5mTokens > 0 || u.CacheCreation1hTokens > 0) {
+		u.CacheCreationTokens = u.CacheCreation5mTokens + u.CacheCreation1hTokens
+	}
+	return u
+}
+
 type CompletionResponse struct {
 	Provider     string         `json:"provider"`
 	Model        string         `json:"model"`
@@ -570,7 +582,6 @@ func (r *CompletionResponse) AllToolCalls() []FunctionCall {
 func (r *CompletionResponse) HasToolCalls() bool {
 	return len(r.ToolCalls) > 0 || r.FunctionCall != nil
 }
-
 
 // --- Task/workflow types (used by /research, /swarm) ---
 
@@ -910,7 +921,7 @@ type ToolExecuteResponse struct {
 // Expanded fields (Input/OutputTokens, Provider, Model, Units) are reserved
 // for future gateway schema upgrades; today only Tokens+CostUSD are populated.
 type ToolUsage struct {
-	Tokens    int     `json:"tokens,omitempty"`     // gateway's current flat token count
+	Tokens    int     `json:"tokens,omitempty"` // gateway's current flat token count
 	CostUSD   float64 `json:"cost_usd,omitempty"`
 	CostModel string  `json:"cost_model,omitempty"` // synthetic model tag (e.g. "shannon_web_search", "grok-3")
 

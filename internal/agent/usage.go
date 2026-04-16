@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"sync"
+
+	"github.com/Kocoro-lab/ShanClaw/internal/client"
 )
 
 // usageEmitKey is a context value used by the agent loop to expose a per-run
@@ -75,6 +77,24 @@ type UsageAccumulator struct {
 	toolCalls   int
 	toolTokens  int
 	toolCostUSD float64
+}
+
+// LLMUsageDelta converts a provider usage payload into the normalized LLM-side
+// TurnUsage delta used by handlers, session persistence, and cloud_delegate.
+func LLMUsageDelta(u client.Usage, model string) TurnUsage {
+	u = u.Normalized()
+	return TurnUsage{
+		InputTokens:           u.InputTokens,
+		OutputTokens:          u.OutputTokens,
+		TotalTokens:           u.TotalTokens,
+		CostUSD:               u.CostUSD,
+		LLMCalls:              1,
+		Model:                 model,
+		CacheReadTokens:       u.CacheReadTokens,
+		CacheCreationTokens:   u.CacheCreationTokens,
+		CacheCreation5mTokens: u.CacheCreation5mTokens,
+		CacheCreation1hTokens: u.CacheCreation1hTokens,
+	}
 }
 
 // Add merges an incoming TurnUsage delta into the running total, routing

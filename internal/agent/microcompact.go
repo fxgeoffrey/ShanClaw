@@ -72,7 +72,6 @@ func microCompactResult(ctx context.Context, c ctxwin.Completer, toolName, conte
 	if err != nil || resp.OutputText == "" {
 		return "", false, client.Usage{}
 	}
-
 	summary := strings.TrimSpace(resp.OutputText)
 	if summary == "" {
 		return "", false, client.Usage{}

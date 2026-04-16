@@ -396,10 +396,10 @@ func (t *CloudDelegateTool) accumulateUsage(data string, usage *agent.TurnUsage)
 	// Shannon Cloud sends usage info in "metadata" field of LLM_OUTPUT events
 	var meta struct {
 		Metadata *struct {
-			InputTokens         int     `json:"input_tokens"`
-			OutputTokens        int     `json:"output_tokens"`
-			TokensUsed          int     `json:"tokens_used"`
-			CostUSD             float64 `json:"cost_usd"`
+			InputTokens           int     `json:"input_tokens"`
+			OutputTokens          int     `json:"output_tokens"`
+			TokensUsed            int     `json:"tokens_used"`
+			CostUSD               float64 `json:"cost_usd"`
 			CacheReadTokens       int     `json:"cache_read_tokens"`
 			CacheCreationTokens   int     `json:"cache_creation_tokens"`
 			CacheCreation5mTokens int     `json:"cache_creation_5m_tokens"`
@@ -410,15 +410,16 @@ func (t *CloudDelegateTool) accumulateUsage(data string, usage *agent.TurnUsage)
 	if err := json.Unmarshal([]byte(data), &meta); err != nil || meta.Metadata == nil {
 		return
 	}
-	usage.InputTokens += meta.Metadata.InputTokens
-	usage.OutputTokens += meta.Metadata.OutputTokens
-	usage.TotalTokens += meta.Metadata.InputTokens + meta.Metadata.OutputTokens
-	usage.CostUSD += meta.Metadata.CostUSD
-	usage.CacheReadTokens += meta.Metadata.CacheReadTokens
-	usage.CacheCreationTokens += meta.Metadata.CacheCreationTokens
-	usage.CacheCreation5mTokens += meta.Metadata.CacheCreation5mTokens
-	usage.CacheCreation1hTokens += meta.Metadata.CacheCreation1hTokens
-	usage.LLMCalls++
+	usage.Add(client.Usage{
+		InputTokens:           meta.Metadata.InputTokens,
+		OutputTokens:          meta.Metadata.OutputTokens,
+		TotalTokens:           meta.Metadata.TokensUsed,
+		CostUSD:               meta.Metadata.CostUSD,
+		CacheReadTokens:       meta.Metadata.CacheReadTokens,
+		CacheCreationTokens:   meta.Metadata.CacheCreationTokens,
+		CacheCreation5mTokens: meta.Metadata.CacheCreation5mTokens,
+		CacheCreation1hTokens: meta.Metadata.CacheCreation1hTokens,
+	})
 	if meta.Metadata.ModelUsed != "" {
 		usage.Model = meta.Metadata.ModelUsed
 	}

@@ -231,12 +231,12 @@ Anti-pattern: After several x_search or web_search calls return sparse results o
 Correct: cloud_delegate uses the same search backends (xAI Grok, SERP) as x_search and web_search. Escalating does NOT unlock new data. If a single-platform search yields a small stable pool, that IS the answer — return the accumulated list with a note on scope, do not delegate.`
 
 type TurnUsage struct {
-	InputTokens         int
-	OutputTokens        int
-	TotalTokens         int
-	CostUSD             float64
-	LLMCalls            int
-	Model               string // actual model from gateway response
+	InputTokens           int
+	OutputTokens          int
+	TotalTokens           int
+	CostUSD               float64
+	LLMCalls              int
+	Model                 string // actual model from gateway response
 	CacheReadTokens       int
 	CacheCreationTokens   int
 	CacheCreation5mTokens int
@@ -249,18 +249,19 @@ type TurnUsage struct {
 // Add accumulates usage from a single LLM response into the turn totals
 // and updates cache telemetry state.
 func (u *TurnUsage) Add(r client.Usage) {
-	u.InputTokens += r.InputTokens
-	u.OutputTokens += r.OutputTokens
-	u.TotalTokens += r.TotalTokens
-	u.CostUSD += r.CostUSD
-	u.CacheReadTokens += r.CacheReadTokens
-	u.CacheCreationTokens += r.CacheCreationTokens
-	u.CacheCreation5mTokens += r.CacheCreation5mTokens
-	u.CacheCreation1hTokens += r.CacheCreation1hTokens
-	u.LLMCalls++
+	delta := LLMUsageDelta(r, "")
+	u.InputTokens += delta.InputTokens
+	u.OutputTokens += delta.OutputTokens
+	u.TotalTokens += delta.TotalTokens
+	u.CostUSD += delta.CostUSD
+	u.CacheReadTokens += delta.CacheReadTokens
+	u.CacheCreationTokens += delta.CacheCreationTokens
+	u.CacheCreation5mTokens += delta.CacheCreation5mTokens
+	u.CacheCreation1hTokens += delta.CacheCreation1hTokens
+	u.LLMCalls += delta.LLMCalls
 
 	// Cache telemetry: track capability and miss streaks
-	if r.CacheCreationTokens > 0 || r.CacheReadTokens > 0 {
+	if delta.CacheCreationTokens > 0 || delta.CacheReadTokens > 0 {
 		u.cacheCapable = true
 	}
 	if !u.cacheCapable {
@@ -272,14 +273,27 @@ func (u *TurnUsage) Add(r client.Usage) {
 		return
 	}
 
-	if r.CacheReadTokens > 0 {
+	if delta.CacheReadTokens > 0 {
 		u.cacheMissStreak = 0
 	} else {
 		u.cacheMissStreak++
 		if u.cacheMissStreak >= 3 {
-			fmt.Fprintf(os.Stderr, "[agent] cache miss streak: %d consecutive turns with 0 cache reads (input_tokens=%d)\n", u.cacheMissStreak, r.InputTokens)
+			fmt.Fprintf(os.Stderr, "[agent] cache miss streak: %d consecutive turns with 0 cache reads (input_tokens=%d)\n", u.cacheMissStreak, delta.InputTokens)
 		}
 	}
+}
+
+func (a *AgentLoop) reportLLMUsage(u client.Usage, model string) {
+	if a.handler == nil {
+		return
+	}
+	delta := LLMUsageDelta(u, model)
+	if delta.TotalTokens == 0 && delta.CostUSD == 0 &&
+		delta.CacheReadTokens == 0 && delta.CacheCreationTokens == 0 &&
+		delta.CacheCreation5mTokens == 0 && delta.CacheCreation1hTokens == 0 {
+		return
+	}
+	a.handler.OnUsage(delta)
 }
 
 type EventHandler interface {
@@ -871,6 +885,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		persona = a.agentBasePrompt
 	}
 	basePrompt := persona + coreOperationalRules + contrastExamplesCore
+	usage := &TurnUsage{}
 
 	// Memory consolidation: merge auto-*.md detail files when accumulated.
 	// Runs at most once per 7 days, only when ≥12 detail files exist.
@@ -1136,7 +1151,6 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	// stampMessage records the creation time for the message at the current end
 	// of the messages slice. Call immediately after appending any message.
 	stampMessage := func() { msgTimestamps[len(messages)-1] = time.Now() }
-	usage := &TurnUsage{}
 
 	// Read tracker: enforces read-before-edit for file_edit/file_write
 	readTracker := NewReadTracker()
@@ -1266,20 +1280,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			return "", err
 		}
 		usage.Add(finalResp.Usage)
-		if a.handler != nil && (finalResp.Usage.InputTokens > 0 || finalResp.Usage.OutputTokens > 0) {
-			a.handler.OnUsage(TurnUsage{
-				InputTokens:           finalResp.Usage.InputTokens,
-				OutputTokens:          finalResp.Usage.OutputTokens,
-				TotalTokens:           finalResp.Usage.TotalTokens,
-				CostUSD:               finalResp.Usage.CostUSD,
-				CacheReadTokens:       finalResp.Usage.CacheReadTokens,
-				CacheCreationTokens:   finalResp.Usage.CacheCreationTokens,
-				CacheCreation5mTokens: finalResp.Usage.CacheCreation5mTokens,
-				CacheCreation1hTokens: finalResp.Usage.CacheCreation1hTokens,
-				LLMCalls:              1,
-				Model:                 finalResp.Model,
-			})
-		}
+		a.reportLLMUsage(finalResp.Usage, finalResp.Model)
 
 		text := strings.TrimSpace(finalResp.OutputText)
 		if text == "" {
@@ -1765,40 +1766,28 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			}
 		}
 
-		usage.Add(resp.Usage)
+		normalizedUsage := resp.Usage.Normalized()
+		usage.Add(normalizedUsage)
 		// Emit incremental usage delta to handler for accumulation/persistence.
 		// Handler sums these into session totals. Model is carried so the last-seen
 		// model wins at the session level (handler decides its own precedence).
-		if a.handler != nil && (resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0) {
-			a.handler.OnUsage(TurnUsage{
-				InputTokens:           resp.Usage.InputTokens,
-				OutputTokens:          resp.Usage.OutputTokens,
-				TotalTokens:           resp.Usage.TotalTokens,
-				CostUSD:               resp.Usage.CostUSD,
-				CacheReadTokens:       resp.Usage.CacheReadTokens,
-				CacheCreationTokens:   resp.Usage.CacheCreationTokens,
-				CacheCreation5mTokens: resp.Usage.CacheCreation5mTokens,
-				CacheCreation1hTokens: resp.Usage.CacheCreation1hTokens,
-				LLMCalls:              1,
-				Model:                 resp.Model,
-			})
-		}
+		a.reportLLMUsage(normalizedUsage, resp.Model)
 		// Log cache metrics for debugging prompt cache effectiveness
-		if resp.Usage.CacheReadTokens > 0 || resp.Usage.CacheCreationTokens > 0 {
+		if normalizedUsage.CacheReadTokens > 0 || normalizedUsage.CacheCreationTokens > 0 {
 			// Cache hit ratio: cache_read / total_prompt_tokens.
 			// Anthropic: input_tokens excludes cached tokens; they're additive.
 			// Total prompt = input + cache_read + cache_creation.
 			ratio := float64(0)
-			totalPrompt := resp.Usage.InputTokens + resp.Usage.CacheReadTokens + resp.Usage.CacheCreationTokens
+			totalPrompt := normalizedUsage.InputTokens + normalizedUsage.CacheReadTokens + normalizedUsage.CacheCreationTokens
 			if totalPrompt > 0 {
-				ratio = float64(resp.Usage.CacheReadTokens) / float64(totalPrompt) * 100
+				ratio = float64(normalizedUsage.CacheReadTokens) / float64(totalPrompt) * 100
 			}
 			fmt.Fprintf(os.Stderr, "[agent] cache: read=%d creation=%d input=%d ratio=%.1f%%\n",
-				resp.Usage.CacheReadTokens, resp.Usage.CacheCreationTokens,
-				resp.Usage.InputTokens, ratio)
+				normalizedUsage.CacheReadTokens, normalizedUsage.CacheCreationTokens,
+				normalizedUsage.InputTokens, ratio)
 		}
-		lastInputTokens = resp.Usage.InputTokens
-		lastOutputTokens = resp.Usage.OutputTokens
+		lastInputTokens = normalizedUsage.InputTokens
+		lastOutputTokens = normalizedUsage.OutputTokens
 		if resp.Model != "" {
 			usage.Model = resp.Model
 		}
@@ -3481,19 +3470,7 @@ func extractPathArg(argsJSON string) string {
 // persist-learnings, memory consolidation) to the handler so they are
 // counted in session billing alongside normal agent-loop turns.
 func (a *AgentLoop) emitInternalUsage(u client.Usage) {
-	if a.handler != nil && (u.InputTokens > 0 || u.OutputTokens > 0) {
-		a.handler.OnUsage(TurnUsage{
-			InputTokens:           u.InputTokens,
-			OutputTokens:          u.OutputTokens,
-			TotalTokens:           u.TotalTokens,
-			CostUSD:               u.CostUSD,
-			CacheReadTokens:       u.CacheReadTokens,
-			CacheCreationTokens:   u.CacheCreationTokens,
-			CacheCreation5mTokens: u.CacheCreation5mTokens,
-			CacheCreation1hTokens: u.CacheCreation1hTokens,
-			LLMCalls:              1,
-		})
-	}
+	a.reportLLMUsage(u, "")
 }
 
 // ctxWithUsageEmit returns ctx with the handler's OnUsage attached as an

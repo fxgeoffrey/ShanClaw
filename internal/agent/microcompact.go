@@ -54,15 +54,9 @@ Result:
 // microCompactResult uses the small LLM tier to produce a 1-2 sentence semantic
 // summary of a tool result. Returns ("", false) if summarization fails or is
 // skipped, signaling the caller to fall back to mechanical truncation.
-func microCompactResult(ctx context.Context, c ctxwin.Completer, toolName, content string) (string, bool) {
-	return microCompactResultWithUsage(ctx, c, toolName, content, nil)
-}
-
-// microCompactResultWithUsage is microCompactResult plus an optional usage
-// callback for callers that need helper-model accounting.
-func microCompactResultWithUsage(ctx context.Context, c ctxwin.Completer, toolName, content string, report ctxwin.UsageReporter) (string, bool) {
+func microCompactResult(ctx context.Context, c ctxwin.Completer, toolName, content string) (string, bool, client.Usage) {
 	if c == nil {
-		return "", false
+		return "", false, client.Usage{}
 	}
 
 	prompt := fmt.Sprintf(microCompactPrompt, toolName, content)
@@ -76,18 +70,14 @@ func microCompactResultWithUsage(ctx context.Context, c ctxwin.Completer, toolNa
 		MaxTokens:   200,
 	})
 	if err != nil || resp.OutputText == "" {
-		return "", false
+		return "", false, client.Usage{}
 	}
-	if report != nil {
-		report(resp.Usage, resp.Model)
-	}
-
 	summary := strings.TrimSpace(resp.OutputText)
 	if summary == "" {
-		return "", false
+		return "", false, client.Usage{}
 	}
 
-	return microCompactMarker + summary, true
+	return microCompactMarker + summary, true, resp.Usage
 }
 
 // isMicroCompacted returns true if the content was already summarized by micro-compact.

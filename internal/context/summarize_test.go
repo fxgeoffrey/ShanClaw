@@ -13,10 +13,14 @@ type mockCompleter struct {
 	response *client.CompletionResponse
 	err      error
 	lastReq  *client.CompletionRequest
+	usage    client.Usage
 }
 
 func (m *mockCompleter) Complete(ctx context.Context, req client.CompletionRequest) (*client.CompletionResponse, error) {
 	m.lastReq = &req
+	if m.response != nil {
+		m.response.Usage = m.usage
+	}
 	return m.response, m.err
 }
 
@@ -36,7 +40,7 @@ func TestGenerateSummary(t *testing.T) {
 			{Role: "assistant", Content: client.NewTextContent("Found a nil pointer. Fixing now.")},
 		}
 
-		summary, err := GenerateSummary(context.Background(), mock, messages)
+		summary, _, err := GenerateSummary(context.Background(), mock, messages)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -64,7 +68,7 @@ func TestGenerateSummary(t *testing.T) {
 			{Role: "user", Content: client.NewTextContent("hello")},
 		}
 
-		_, err := GenerateSummary(context.Background(), mock, messages)
+		_, _, err := GenerateSummary(context.Background(), mock, messages)
 		if err == nil {
 			t.Error("expected error when LLM fails")
 		}
@@ -83,7 +87,7 @@ func TestGenerateSummary(t *testing.T) {
 			{Role: "assistant", Content: client.NewTextContent("done")},
 		}
 
-		_, err := GenerateSummary(context.Background(), mock, messages)
+		_, _, err := GenerateSummary(context.Background(), mock, messages)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -106,7 +110,7 @@ func TestGenerateSummary(t *testing.T) {
 		messages := []client.Message{
 			{Role: "user", Content: client.NewTextContent("test")},
 		}
-		summary, err := GenerateSummary(context.Background(), mock, messages)
+		summary, _, err := GenerateSummary(context.Background(), mock, messages)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -141,7 +145,7 @@ func TestGenerateSummary(t *testing.T) {
 			{Role: "user", Content: client.NewBlockContent(resultBlocks)},
 		}
 
-		_, err := GenerateSummary(context.Background(), mock, messages)
+		_, _, err := GenerateSummary(context.Background(), mock, messages)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -157,27 +161,22 @@ func TestGenerateSummary(t *testing.T) {
 	})
 }
 
-func TestGenerateSummaryWithUsageReportsUsage(t *testing.T) {
+func TestGenerateSummaryReturnsUsage(t *testing.T) {
 	mock := &mockCompleter{
 		response: &client.CompletionResponse{
 			OutputText: "Summary of conversation.",
 			Model:      "claude-small",
-			Usage: client.Usage{
-				InputTokens:           120,
-				OutputTokens:          40,
-				CacheCreation5mTokens: 30,
-				CacheCreation1hTokens: 70,
-			},
+		},
+		usage: client.Usage{
+			InputTokens:           120,
+			OutputTokens:          40,
+			CacheCreation5mTokens: 30,
+			CacheCreation1hTokens: 70,
 		},
 	}
 
-	var reported client.Usage
-	var model string
-	summary, err := GenerateSummaryWithUsage(context.Background(), mock, []client.Message{
+	summary, u, err := GenerateSummary(context.Background(), mock, []client.Message{
 		{Role: "user", Content: client.NewTextContent("hello")},
-	}, func(u client.Usage, m string) {
-		reported = u
-		model = m
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -185,11 +184,8 @@ func TestGenerateSummaryWithUsageReportsUsage(t *testing.T) {
 	if summary != "Summary of conversation." {
 		t.Fatalf("unexpected summary: %q", summary)
 	}
-	if model != "claude-small" {
-		t.Fatalf("expected model claude-small, got %q", model)
-	}
-	if reported.CacheCreation5mTokens != 30 || reported.CacheCreation1hTokens != 70 {
-		t.Fatalf("expected split cache creation 30/70, got %d/%d", reported.CacheCreation5mTokens, reported.CacheCreation1hTokens)
+	if u.CacheCreation5mTokens != 30 || u.CacheCreation1hTokens != 70 {
+		t.Fatalf("expected split cache creation 30/70, got %d/%d", u.CacheCreation5mTokens, u.CacheCreation1hTokens)
 	}
 }
 
@@ -256,5 +252,22 @@ func TestExtractSummary(t *testing.T) {
 				t.Errorf("should not contain %q, got: %q", tt.excludes, got)
 			}
 		})
+	}
+}
+
+func TestGenerateSummary_ReturnsUsage(t *testing.T) {
+	mock := &mockCompleter{
+		response: &client.CompletionResponse{
+			OutputText: "<analysis>thinking</analysis>\n<summary>test summary</summary>",
+		},
+		usage: client.Usage{InputTokens: 500, OutputTokens: 100, TotalTokens: 600, CostUSD: 0.002},
+	}
+	messages := []client.Message{{Role: "user", Content: client.NewTextContent("hello")}}
+	_, usage, err := GenerateSummary(context.Background(), mock, messages)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if usage.InputTokens != 500 || usage.OutputTokens != 100 || usage.CostUSD != 0.002 {
+		t.Errorf("usage not propagated: got %+v", usage)
 	}
 }

@@ -27,7 +27,7 @@ func TestPersistLearnings(t *testing.T) {
 			},
 		}
 
-		err := PersistLearnings(context.Background(), mock, messages, dir)
+		_, err := PersistLearnings(context.Background(), mock, messages, dir)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -57,7 +57,7 @@ func TestPersistLearnings(t *testing.T) {
 			response: &client.CompletionResponse{OutputText: "NONE"},
 		}
 
-		err := PersistLearnings(context.Background(), mock, messages, dir)
+		_, err := PersistLearnings(context.Background(), mock, messages, dir)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -73,7 +73,7 @@ func TestPersistLearnings(t *testing.T) {
 			response: &client.CompletionResponse{OutputText: "- something"},
 		}
 
-		err := PersistLearnings(context.Background(), mock, messages, "")
+		_, err := PersistLearnings(context.Background(), mock, messages, "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -91,7 +91,7 @@ func TestPersistLearnings(t *testing.T) {
 			response: &client.CompletionResponse{OutputText: "- New fact only"},
 		}
 
-		err := PersistLearnings(context.Background(), mock, messages, dir)
+		_, err := PersistLearnings(context.Background(), mock, messages, dir)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -119,7 +119,7 @@ func TestPersistLearnings(t *testing.T) {
 			},
 		}
 
-		err := PersistLearnings(context.Background(), mock, messages, dir)
+		_, err := PersistLearnings(context.Background(), mock, messages, dir)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -152,48 +152,40 @@ func TestPersistLearnings(t *testing.T) {
 		dir := t.TempDir()
 		mock := &mockCompleter{err: context.DeadlineExceeded}
 
-		err := PersistLearnings(context.Background(), mock, messages, dir)
+		_, err := PersistLearnings(context.Background(), mock, messages, dir)
 		if err == nil {
 			t.Error("expected error when LLM fails")
 		}
 	})
 }
 
-func TestPersistLearningsWithUsageReportsUsage(t *testing.T) {
+func TestPersistLearningsReturnsUsage(t *testing.T) {
 	dir := t.TempDir()
 	mock := &mockCompleter{
 		response: &client.CompletionResponse{
 			OutputText: "- Durable fact",
 			Model:      "claude-small",
-			Usage: client.Usage{
-				InputTokens:           80,
-				OutputTokens:          20,
-				CacheCreation5mTokens: 10,
-				CacheCreation1hTokens: 15,
-			},
+		},
+		usage: client.Usage{
+			InputTokens:           80,
+			OutputTokens:          20,
+			CacheCreation5mTokens: 10,
+			CacheCreation1hTokens: 15,
 		},
 	}
 
-	var reported client.Usage
-	var model string
-	err := PersistLearningsWithUsage(context.Background(), mock, []client.Message{
+	u, err := PersistLearnings(context.Background(), mock, []client.Message{
 		{Role: "user", Content: client.NewTextContent("remember this")},
-	}, dir, func(u client.Usage, m string) {
-		reported = u
-		model = m
-	})
+	}, dir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if model != "claude-small" {
-		t.Fatalf("expected model claude-small, got %q", model)
-	}
-	if reported.CacheCreation5mTokens != 10 || reported.CacheCreation1hTokens != 15 {
-		t.Fatalf("expected split cache creation 10/15, got %d/%d", reported.CacheCreation5mTokens, reported.CacheCreation1hTokens)
+	if u.CacheCreation5mTokens != 10 || u.CacheCreation1hTokens != 15 {
+		t.Fatalf("expected split cache creation 10/15, got %d/%d", u.CacheCreation5mTokens, u.CacheCreation1hTokens)
 	}
 }
 
-func TestConsolidateMemoryWithUsageReportsUsage(t *testing.T) {
+func TestConsolidateMemoryReturnsUsage(t *testing.T) {
 	dir := t.TempDir()
 	for i := 0; i < consolidateThreshold; i++ {
 		name := fmt.Sprintf("auto-2026-01-%02d.md", i+1)
@@ -206,29 +198,21 @@ func TestConsolidateMemoryWithUsageReportsUsage(t *testing.T) {
 		response: &client.CompletionResponse{
 			OutputText: "- Consolidated fact",
 			Model:      "claude-small",
-			Usage: client.Usage{
-				InputTokens:           90,
-				OutputTokens:          25,
-				CacheCreation5mTokens: 12,
-				CacheCreation1hTokens: 18,
-			},
+		},
+		usage: client.Usage{
+			InputTokens:           90,
+			OutputTokens:          25,
+			CacheCreation5mTokens: 12,
+			CacheCreation1hTokens: 18,
 		},
 	}
 
-	var reported client.Usage
-	var model string
-	err := ConsolidateMemoryWithUsage(context.Background(), mock, dir, func(u client.Usage, m string) {
-		reported = u
-		model = m
-	})
+	u, err := ConsolidateMemory(context.Background(), mock, dir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if model != "claude-small" {
-		t.Fatalf("expected model claude-small, got %q", model)
-	}
-	if reported.CacheCreation5mTokens != 12 || reported.CacheCreation1hTokens != 18 {
-		t.Fatalf("expected split cache creation 12/18, got %d/%d", reported.CacheCreation5mTokens, reported.CacheCreation1hTokens)
+	if u.CacheCreation5mTokens != 12 || u.CacheCreation1hTokens != 18 {
+		t.Fatalf("expected split cache creation 12/18, got %d/%d", u.CacheCreation5mTokens, u.CacheCreation1hTokens)
 	}
 }
 
@@ -340,7 +324,7 @@ func TestConsolidateMemory_SkipsWhenFewFiles(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "auto-2026-03-01-aaaaaa.md"), []byte("- fact a\n"), 0644)
 	os.WriteFile(filepath.Join(dir, "auto-2026-03-02-bbbbbb.md"), []byte("- fact b\n"), 0644)
 
-	err := ConsolidateMemory(context.Background(), nil, dir)
+	_, err := ConsolidateMemory(context.Background(), nil, dir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -362,7 +346,7 @@ func TestConsolidateMemory_SkipsWhenRecent(t *testing.T) {
 	// Touch marker as recent
 	os.WriteFile(filepath.Join(dir, ".memory_gc"), []byte(""), 0644)
 
-	err := ConsolidateMemory(context.Background(), nil, dir)
+	_, err := ConsolidateMemory(context.Background(), nil, dir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -401,7 +385,7 @@ func TestConsolidateMemory_Consolidates(t *testing.T) {
 		},
 	}
 
-	err := ConsolidateMemory(context.Background(), mock, dir)
+	_, err := ConsolidateMemory(context.Background(), mock, dir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -464,7 +448,7 @@ func TestConsolidateMemory_LLMReturnsNONE(t *testing.T) {
 		response: &client.CompletionResponse{OutputText: "NONE"},
 	}
 
-	err := ConsolidateMemory(context.Background(), mock, dir)
+	_, err := ConsolidateMemory(context.Background(), mock, dir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -503,7 +487,7 @@ func TestConsolidateMemory_UnreadableFileConsumed(t *testing.T) {
 		response: &client.CompletionResponse{OutputText: "- consolidated fact"},
 	}
 
-	err := ConsolidateMemory(context.Background(), mock, dir)
+	_, err := ConsolidateMemory(context.Background(), mock, dir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -545,7 +529,7 @@ func TestConsolidateMemory_MarkerWriteFailure(t *testing.T) {
 		response: &client.CompletionResponse{OutputText: "- consolidated"},
 	}
 
-	err := ConsolidateMemory(context.Background(), mock, dir)
+	_, err := ConsolidateMemory(context.Background(), mock, dir)
 	if err == nil {
 		t.Fatal("expected error when marker write fails")
 	}
@@ -608,5 +592,26 @@ func TestSplitMemory_OnlyAutoContent(t *testing.T) {
 	}
 	if !strings.Contains(auto, "auto fact 1") {
 		t.Error("auto content should contain auto fact 1")
+	}
+}
+
+func TestPersistLearnings_ReturnsUsage(t *testing.T) {
+	dir := t.TempDir()
+	mock := &mockCompleter{
+		response: &client.CompletionResponse{
+			OutputText: "## Learned\n- test fact",
+		},
+		usage: client.Usage{InputTokens: 300, OutputTokens: 50, CostUSD: 0.001},
+	}
+	messages := []client.Message{
+		{Role: "user", Content: client.NewTextContent("hello")},
+		{Role: "assistant", Content: client.NewTextContent("world")},
+	}
+	usage, err := PersistLearnings(context.Background(), mock, messages, dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if usage.InputTokens != 300 || usage.CostUSD != 0.001 {
+		t.Errorf("usage not propagated: got %+v", usage)
 	}
 }

@@ -339,8 +339,9 @@ func cacheSourceFromDaemonSource(source string) string {
 	case "slack", "line", "feishu", "lark", "telegram":
 		// Human-conversation channels: idle gaps > 5m are common, 1h pays off.
 		return s
-	case "tui":
-		return "tui"
+	case "tui", "shanclaw":
+		// Interactive sessions: TUI and ShanClaw Desktop both have idle gaps >> 5m.
+		return s
 	case "cache_bench":
 		// Synthetic benchmark traffic — treat as long-bucket so bench measures
 		// reflect the production channel-message configuration.

@@ -34,7 +34,7 @@ func TestPersistLearningsIntegration(t *testing.T) {
 	t.Run("extracts and writes learnings", func(t *testing.T) {
 		dir := t.TempDir()
 
-		err := ctxwin.PersistLearnings(context.Background(), gw, messages, dir)
+		_, err := ctxwin.PersistLearnings(context.Background(), gw, messages, dir)
 		if err != nil {
 			t.Fatalf("PersistLearnings failed: %v", err)
 		}
@@ -60,7 +60,7 @@ func TestPersistLearningsIntegration(t *testing.T) {
 		existing := "# Memory\n\n- User prefers Go over Python for backend\n- Deployment uses ArgoCD with Helm\n"
 		os.WriteFile(filepath.Join(dir, "MEMORY.md"), []byte(existing), 0644)
 
-		err := ctxwin.PersistLearnings(context.Background(), gw, messages, dir)
+		_, err := ctxwin.PersistLearnings(context.Background(), gw, messages, dir)
 		if err != nil {
 			t.Fatalf("PersistLearnings failed: %v", err)
 		}
@@ -86,7 +86,7 @@ func TestPersistLearningsIntegration(t *testing.T) {
 		}
 		os.WriteFile(filepath.Join(dir, "MEMORY.md"), []byte(strings.Join(lines, "\n")), 0644)
 
-		err := ctxwin.PersistLearnings(context.Background(), gw, messages, dir)
+		_, err := ctxwin.PersistLearnings(context.Background(), gw, messages, dir)
 		if err != nil {
 			t.Fatalf("PersistLearnings failed: %v", err)
 		}

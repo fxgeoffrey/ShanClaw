@@ -886,15 +886,13 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	}
 	basePrompt := persona + coreOperationalRules + contrastExamplesCore
 	usage := &TurnUsage{}
-	reportHelperUsage := func(u client.Usage, model string) {
-		usage.Add(u)
-		a.reportLLMUsage(u, model)
-	}
 
 	// Memory consolidation: merge auto-*.md detail files when accumulated.
 	// Runs at most once per 7 days, only when ≥12 detail files exist.
 	if a.memoryDir != "" {
-		if gcErr := ctxwin.ConsolidateMemoryWithUsage(ctx, a.client, a.memoryDir, reportHelperUsage); gcErr != nil {
+		gcUsage, gcErr := ctxwin.ConsolidateMemory(ctx, a.client, a.memoryDir)
+		a.emitInternalUsage(gcUsage)
+		if gcErr != nil {
 			fmt.Fprintf(os.Stderr, "[context] memory consolidation failed: %v\n", gcErr)
 		}
 	}
@@ -1413,7 +1411,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		filterOldImages(messages, maxRecentImages)
 
 		// Compress old tool results to save context (keep recent turns verbose)
-		compressOldToolResults(ctx, messages, compressAfter, maxResultChars, a.client)
+		compressOldToolResults(a.ctxWithUsageEmit(ctx), messages, compressAfter, maxResultChars, a.client)
 
 		// Progress checkpoint at ~60% of effective limit
 		if !checkpointDone && totalToolCalls > 0 {
@@ -1456,8 +1454,9 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 					// before messages are discarded by compaction.
 					if a.memoryDir != "" {
 						restoreLLM := a.tracker.EnterTransient(PhaseAwaitingLLM)
-						pErr := ctxwin.PersistLearningsWithUsage(ctx, a.client, messages, a.memoryDir, reportHelperUsage)
+						pUsage, pErr := ctxwin.PersistLearnings(ctx, a.client, messages, a.memoryDir)
 						restoreLLM()
+						a.emitInternalUsage(pUsage)
 						if pErr != nil {
 							fmt.Fprintf(os.Stderr, "[context] persist learnings failed: %v\n", pErr)
 						} else {
@@ -1466,8 +1465,9 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 					}
 
 					restoreLLM := a.tracker.EnterTransient(PhaseAwaitingLLM)
-					summary, sumErr := ctxwin.GenerateSummaryWithUsage(ctx, a.client, messages, reportHelperUsage)
+					summary, sumUsage, sumErr := ctxwin.GenerateSummary(ctx, a.client, messages)
 					restoreLLM()
+					a.emitInternalUsage(sumUsage)
 					if sumErr != nil {
 						summaryFailures++
 						fmt.Fprintf(os.Stderr, "[context] compaction summary failed (%d/%d): %v\n", summaryFailures, maxSummaryFailures, sumErr)
@@ -1612,8 +1612,9 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				// Write-before-compact: persist durable learnings before discarding history.
 				if a.memoryDir != "" {
 					restoreLLM := a.tracker.EnterTransient(PhaseAwaitingLLM)
-					pErr := ctxwin.PersistLearningsWithUsage(ctx, a.client, messages, a.memoryDir, reportHelperUsage)
+					pUsage, pErr := ctxwin.PersistLearnings(ctx, a.client, messages, a.memoryDir)
 					restoreLLM()
+					a.emitInternalUsage(pUsage)
 					if pErr != nil {
 						fmt.Fprintf(os.Stderr, "[context] reactive persist learnings failed: %v\n", pErr)
 					}
@@ -1623,10 +1624,11 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				nextSummary := strings.TrimSpace(compactionSummary)
 
 				softMessages := cloneMessages(messages)
-				compressOldToolResultsWithUsage(ctx, softMessages, compressAfter, maxResultChars, a.client, reportHelperUsage)
+				compressOldToolResults(a.ctxWithUsageEmit(ctx), softMessages, compressAfter, maxResultChars, a.client)
 				restoreLLM := a.tracker.EnterTransient(PhaseAwaitingLLM)
-				summary, sumErr := ctxwin.GenerateSummaryWithUsage(ctx, a.client, reactiveSummaryInput(softMessages, nextSummary), reportHelperUsage)
+				summary, sumUsage, sumErr := ctxwin.GenerateSummary(ctx, a.client, reactiveSummaryInput(softMessages, nextSummary))
 				restoreLLM()
+				a.emitInternalUsage(sumUsage)
 				if sumErr != nil {
 					if nextSummary != "" {
 						fmt.Fprintf(os.Stderr, "[context] reactive summary failed, reusing prior summary: %v\n", sumErr)
@@ -1644,8 +1646,9 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 					compressOldToolResults(ctx, emergencyMessages, 1, 100, nil)
 
 					restoreLLM := a.tracker.EnterTransient(PhaseAwaitingLLM)
-					summary, sumErr = ctxwin.GenerateSummaryWithUsage(ctx, a.client, reactiveSummaryInput(emergencyMessages, nextSummary), reportHelperUsage)
+					summary, sumUsage, sumErr = ctxwin.GenerateSummary(ctx, a.client, reactiveSummaryInput(emergencyMessages, nextSummary))
 					restoreLLM()
+					a.emitInternalUsage(sumUsage)
 					if sumErr != nil {
 						if nextSummary != "" {
 							fmt.Fprintf(os.Stderr, "[context] emergency reactive summary failed, keeping prior summary: %v\n", sumErr)
@@ -2154,7 +2157,12 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 								}
 							}
 						}
-						toolSchemas = rebuildSchemas(effTools, baseSchemas, loadedDeferred)
+						// Only rebuild on the legacy path. The tool-ref path already
+						// sent the full schema array with DeferLoading flags up front;
+						// rebuildSchemas would strip those flags.
+						if !a.toolRefSupported {
+							toolSchemas = rebuildSchemas(effTools, baseSchemas, loadedDeferred)
+						}
 						if len(names) > 0 {
 							toolSearchFired = true
 						}
@@ -3118,10 +3126,6 @@ func isTier2FloorTool(name string) bool {
 }
 
 func compressOldToolResults(ctx context.Context, messages []client.Message, keepRecent int, maxChars int, completer ctxwin.Completer) {
-	compressOldToolResultsWithUsage(ctx, messages, keepRecent, maxChars, completer, nil)
-}
-
-func compressOldToolResultsWithUsage(ctx context.Context, messages []client.Message, keepRecent int, maxChars int, completer ctxwin.Completer, report ctxwin.UsageReporter) {
 	const tier1Threshold = 20
 
 	// Pre-scan: build tool_use_id → name+args map for tier-1 metadata.
@@ -3179,7 +3183,7 @@ func compressOldToolResultsWithUsage(ctx context.Context, messages []client.Mess
 			}
 		} else if distFromEnd >= keepRecent {
 			// Tier 2: LLM summary for large results, else head+tail truncation.
-			messages[idx].Content = compressTier2(ctx, msg, maxChars, completer, toolCallMap, &mcCount, report)
+			messages[idx].Content = compressTier2(ctx, msg, maxChars, completer, toolCallMap, &mcCount)
 		}
 	}
 }
@@ -3224,9 +3228,9 @@ func hasTier2FloorTool(msg client.Message, toolCallMap map[string]toolCallInfo) 
 // For results > microCompactMinChars that haven't been summarized yet and the
 // per-pass cap hasn't been hit, it tries LLM summarization. Otherwise falls
 // back to mechanical head+tail truncation.
-func compressTier2(ctx context.Context, msg client.Message, maxChars int, completer ctxwin.Completer, toolCallMap map[string]toolCallInfo, mcCount *int, report ctxwin.UsageReporter) client.MessageContent {
+func compressTier2(ctx context.Context, msg client.Message, maxChars int, completer ctxwin.Completer, toolCallMap map[string]toolCallInfo, mcCount *int) client.MessageContent {
 	if msg.Role == "user" && msg.Content.HasBlocks() {
-		return compressTier2Blocks(ctx, msg.Content, maxChars, completer, toolCallMap, mcCount, report)
+		return compressTier2Blocks(ctx, msg.Content, maxChars, completer, toolCallMap, mcCount)
 	}
 	// XML text format
 	text := msg.Content.Text()
@@ -3238,7 +3242,7 @@ func compressTier2(ctx context.Context, msg client.Message, maxChars int, comple
 }
 
 // compressTier2Blocks handles native tool_result blocks for Tier 2.
-func compressTier2Blocks(ctx context.Context, mc client.MessageContent, maxChars int, completer ctxwin.Completer, toolCallMap map[string]toolCallInfo, mcCount *int, report ctxwin.UsageReporter) client.MessageContent {
+func compressTier2Blocks(ctx context.Context, mc client.MessageContent, maxChars int, completer ctxwin.Completer, toolCallMap map[string]toolCallInfo, mcCount *int) client.MessageContent {
 	blocks := mc.Blocks()
 	var newBlocks []client.ContentBlock
 	for _, b := range blocks {
@@ -3257,7 +3261,18 @@ func compressTier2Blocks(ctx context.Context, mc client.MessageContent, maxChars
 		}
 		if completer != nil && charLen > microCompactMinChars && !isMicroCompacted(content) && *mcCount < microCompactMaxPerPass && !isMicroCompactSkipTool(toolName) {
 			*mcCount++ // count attempts, not just successes — caps latency
-			if summary, ok := microCompactResultWithUsage(ctx, completer, toolName, content, report); ok {
+			if summary, ok, mcUsage := microCompactResult(ctx, completer, toolName, content); ok {
+				EmitUsage(ctx, TurnUsage{
+					InputTokens:           mcUsage.InputTokens,
+					OutputTokens:          mcUsage.OutputTokens,
+					TotalTokens:           mcUsage.TotalTokens,
+					CostUSD:               mcUsage.CostUSD,
+					CacheReadTokens:       mcUsage.CacheReadTokens,
+					CacheCreationTokens:   mcUsage.CacheCreationTokens,
+					CacheCreation5mTokens: mcUsage.CacheCreation5mTokens,
+					CacheCreation1hTokens: mcUsage.CacheCreation1hTokens,
+					LLMCalls:              1,
+				})
 				b.ToolContent = summary
 				newBlocks = append(newBlocks, b)
 				continue
@@ -3449,4 +3464,33 @@ func extractPathArg(argsJSON string) string {
 		return ""
 	}
 	return args.Path
+}
+
+// emitInternalUsage forwards usage from internal LLM calls (compaction,
+// persist-learnings, memory consolidation) to the handler so they are
+// counted in session billing alongside normal agent-loop turns.
+func (a *AgentLoop) emitInternalUsage(u client.Usage) {
+	if a.handler != nil && (u.InputTokens > 0 || u.OutputTokens > 0) {
+		a.handler.OnUsage(TurnUsage{
+			InputTokens:           u.InputTokens,
+			OutputTokens:          u.OutputTokens,
+			TotalTokens:           u.TotalTokens,
+			CostUSD:               u.CostUSD,
+			CacheReadTokens:       u.CacheReadTokens,
+			CacheCreationTokens:   u.CacheCreationTokens,
+			CacheCreation5mTokens: u.CacheCreation5mTokens,
+			CacheCreation1hTokens: u.CacheCreation1hTokens,
+			LLMCalls:              1,
+		})
+	}
+}
+
+// ctxWithUsageEmit returns ctx with the handler's OnUsage attached as an
+// emitter so standalone functions (e.g. compressTier2Blocks → microCompactResult)
+// can report usage via EmitUsage(ctx, ...) without direct access to the AgentLoop.
+func (a *AgentLoop) ctxWithUsageEmit(ctx context.Context) context.Context {
+	if a.handler == nil {
+		return ctx
+	}
+	return WithUsageEmit(ctx, a.handler.OnUsage)
 }

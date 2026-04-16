@@ -36,10 +36,6 @@ type Completer interface {
 	Complete(ctx context.Context, req client.CompletionRequest) (*client.CompletionResponse, error)
 }
 
-// UsageReporter receives the usage payload from successful helper-model calls.
-// Callers decide how to aggregate or persist it.
-type UsageReporter func(client.Usage, string)
-
 // buildTranscript 将消息序列化为文本 transcript，跳过 system 消息。
 func buildTranscript(messages []client.Message) string {
 	var sb strings.Builder
@@ -57,13 +53,7 @@ func buildTranscript(messages []client.Message) string {
 // GenerateSummary calls the LLM (small tier) to summarize a conversation.
 // It strips the system message from the input to avoid wasting tokens.
 // Serializes both plain text and block content (tool_use, tool_result).
-func GenerateSummary(ctx context.Context, c Completer, messages []client.Message) (string, error) {
-	return GenerateSummaryWithUsage(ctx, c, messages, nil)
-}
-
-// GenerateSummaryWithUsage is GenerateSummary plus an optional usage callback
-// for callers that need to account for helper-model work.
-func GenerateSummaryWithUsage(ctx context.Context, c Completer, messages []client.Message, report UsageReporter) (string, error) {
+func GenerateSummary(ctx context.Context, c Completer, messages []client.Message) (string, client.Usage, error) {
 	req := client.CompletionRequest{
 		Messages: []client.Message{
 			{Role: "system", Content: client.NewTextContent(summarizePrompt)},
@@ -76,13 +66,10 @@ func GenerateSummaryWithUsage(ctx context.Context, c Completer, messages []clien
 
 	resp, err := c.Complete(ctx, req)
 	if err != nil {
-		return "", fmt.Errorf("summarization failed: %w", err)
-	}
-	if report != nil {
-		report(resp.Usage, resp.Model)
+		return "", client.Usage{}, fmt.Errorf("summarization failed: %w", err)
 	}
 
-	return extractSummary(resp.OutputText), nil
+	return extractSummary(resp.OutputText), resp.Usage, nil
 }
 
 const userSummarizePrompt = `You are a conversation summarizer. Read the following conversation and produce a clear, well-structured Markdown summary for a human reader.

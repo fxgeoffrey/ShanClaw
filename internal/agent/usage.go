@@ -98,6 +98,8 @@ func (a *UsageAccumulator) Add(u TurnUsage) {
 	a.llm.CostUSD += u.CostUSD
 	a.llm.CacheReadTokens += u.CacheReadTokens
 	a.llm.CacheCreationTokens += u.CacheCreationTokens
+	a.llm.CacheCreation5mTokens += u.CacheCreation5mTokens
+	a.llm.CacheCreation1hTokens += u.CacheCreation1hTokens
 	a.llm.LLMCalls += u.LLMCalls
 	if u.Model != "" {
 		a.llm.Model = u.Model

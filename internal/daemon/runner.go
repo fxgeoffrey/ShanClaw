@@ -339,8 +339,9 @@ func cacheSourceFromDaemonSource(source string) string {
 	case "slack", "line", "feishu", "lark", "telegram":
 		// Human-conversation channels: idle gaps > 5m are common, 1h pays off.
 		return s
-	case "tui":
-		return "tui"
+	case "tui", "shanclaw":
+		// Interactive sessions: TUI and ShanClaw Desktop both have idle gaps >> 5m.
+		return s
 	case "cache_bench":
 		// Synthetic benchmark traffic — treat as long-bucket so bench measures
 		// reflect the production channel-message configuration.
@@ -1365,7 +1366,8 @@ func applyTurnUsage(sess *session.Session, up usageProvider, b turnBaseline) {
 	if hasTurnUsage {
 		total.Add(session.UsageFromAccumulated(
 			llm.LLMCalls, llm.InputTokens, llm.OutputTokens, llm.TotalTokens,
-			llm.CostUSD, llm.CacheReadTokens, llm.CacheCreationTokens, llm.Model,
+			llm.CostUSD, llm.CacheReadTokens, llm.CacheCreationTokens,
+			llm.CacheCreation5mTokens, llm.CacheCreation1hTokens, llm.Model,
 			acc.ToolCalls, acc.ToolCostUSD,
 		))
 	}

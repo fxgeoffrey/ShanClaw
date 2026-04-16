@@ -15,18 +15,19 @@ import (
 type mockCompleter struct {
 	output string
 	calls  int
+	usage  client.Usage
 }
 
 func (m *mockCompleter) Complete(ctx context.Context, req client.CompletionRequest) (*client.CompletionResponse, error) {
 	m.calls++
-	return &client.CompletionResponse{OutputText: m.output}, nil
+	return &client.CompletionResponse{OutputText: m.output, Usage: m.usage}, nil
 }
 
 func TestMicroCompact_LargeResultGetsSummarized(t *testing.T) {
 	mc := &mockCompleter{output: "PostgreSQL unreachable on localhost:5432"}
 	content := strings.Repeat("log line\n", 300) + "connection refused on localhost:5432"
 
-	summary, ok := microCompactResult(context.Background(), mc, "bash", content)
+	summary, ok, _ := microCompactResult(context.Background(), mc, "bash", content)
 	if !ok {
 		t.Fatal("expected micro-compact to succeed")
 	}
@@ -39,7 +40,7 @@ func TestMicroCompact_LargeResultGetsSummarized(t *testing.T) {
 }
 
 func TestMicroCompact_NilCompleterReturnsFalse(t *testing.T) {
-	_, ok := microCompactResult(context.Background(), nil, "bash", "content")
+	_, ok, _ := microCompactResult(context.Background(), nil, "bash", "content")
 	if ok {
 		t.Error("expected false with nil completer")
 	}
@@ -462,5 +463,20 @@ func TestMicroCompact_SkipsBrowserNavigate(t *testing.T) {
 
 	if mc.calls != 0 {
 		t.Errorf("expected 0 LLM calls for browser_navigate, got %d", mc.calls)
+	}
+}
+
+func TestMicroCompact_ReturnsUsage(t *testing.T) {
+	mc := &mockCompleter{
+		output: "PostgreSQL unreachable on localhost:5432",
+		usage:  client.Usage{InputTokens: 200, OutputTokens: 30, CostUSD: 0.0005},
+	}
+	content := strings.Repeat("log line\n", 300) + "connection refused"
+	_, ok, usage := microCompactResult(context.Background(), mc, "bash", content)
+	if !ok {
+		t.Fatal("expected micro-compact to succeed")
+	}
+	if usage.InputTokens != 200 || usage.CostUSD != 0.0005 {
+		t.Errorf("usage not propagated: got %+v", usage)
 	}
 }

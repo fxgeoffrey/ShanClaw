@@ -1409,7 +1409,8 @@ func (m *Model) runAgentLoop(query string, history []client.Message) tea.Cmd {
 				if llm.LLMCalls > 0 || acc.ToolCalls > 0 || llm.InputTokens > 0 {
 					m.sessions.AddUsage(sess.ID, session.UsageFromAccumulated(
 						llm.LLMCalls, llm.InputTokens, llm.OutputTokens, llm.TotalTokens,
-						llm.CostUSD, llm.CacheReadTokens, llm.CacheCreationTokens, llm.Model,
+						llm.CostUSD, llm.CacheReadTokens, llm.CacheCreationTokens,
+						llm.CacheCreation5mTokens, llm.CacheCreation1hTokens, llm.Model,
 						acc.ToolCalls, acc.ToolCostUSD,
 					))
 				}

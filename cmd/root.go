@@ -314,7 +314,7 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 	)
 	sessMgr.AddUsage(sess.ID, session.UsageFromAccumulated(
 		llm.LLMCalls, llm.InputTokens, llm.OutputTokens, llm.TotalTokens, llm.CostUSD,
-		llm.CacheReadTokens, llm.CacheCreationTokens, llm.Model,
+		llm.CacheReadTokens, llm.CacheCreationTokens, llm.CacheCreation5mTokens, llm.CacheCreation1hTokens, llm.Model,
 		totalUsage.ToolCalls, totalUsage.ToolCostUSD,
 	))
 	if saveErr := sessMgr.Save(); saveErr != nil {

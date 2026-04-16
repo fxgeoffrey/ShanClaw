@@ -400,9 +400,11 @@ func (t *CloudDelegateTool) accumulateUsage(data string, usage *agent.TurnUsage)
 			OutputTokens        int     `json:"output_tokens"`
 			TokensUsed          int     `json:"tokens_used"`
 			CostUSD             float64 `json:"cost_usd"`
-			CacheReadTokens     int     `json:"cache_read_tokens"`
-			CacheCreationTokens int     `json:"cache_creation_tokens"`
-			ModelUsed           string  `json:"model_used"`
+			CacheReadTokens       int     `json:"cache_read_tokens"`
+			CacheCreationTokens   int     `json:"cache_creation_tokens"`
+			CacheCreation5mTokens int     `json:"cache_creation_5m_tokens"`
+			CacheCreation1hTokens int     `json:"cache_creation_1h_tokens"`
+			ModelUsed             string  `json:"model_used"`
 		} `json:"metadata"`
 	}
 	if err := json.Unmarshal([]byte(data), &meta); err != nil || meta.Metadata == nil {
@@ -414,6 +416,8 @@ func (t *CloudDelegateTool) accumulateUsage(data string, usage *agent.TurnUsage)
 	usage.CostUSD += meta.Metadata.CostUSD
 	usage.CacheReadTokens += meta.Metadata.CacheReadTokens
 	usage.CacheCreationTokens += meta.Metadata.CacheCreationTokens
+	usage.CacheCreation5mTokens += meta.Metadata.CacheCreation5mTokens
+	usage.CacheCreation1hTokens += meta.Metadata.CacheCreation1hTokens
 	usage.LLMCalls++
 	if meta.Metadata.ModelUsed != "" {
 		usage.Model = meta.Metadata.ModelUsed

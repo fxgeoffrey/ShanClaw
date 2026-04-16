@@ -42,7 +42,10 @@ func (m *Model) runCompact(customInstructions string) func() compactDoneMsg {
 		if m.agentOverride != nil {
 			memoryDir = fmt.Sprintf("%s/agents/%s", m.shannonDir, m.agentOverride.Name)
 		}
-		_ = ctxwin.PersistLearnings(ctx, m.gateway, messages, memoryDir)
+		// Usage intentionally discarded: /compact runs outside the agent loop
+		// and has no UsageAccumulator to emit to. The cost is small (small-tier
+		// LLM) and user-triggered, so the omission is acceptable.
+		_, _ = ctxwin.PersistLearnings(ctx, m.gateway, messages, memoryDir)
 
 		// Step 2: generate summary
 		msgsForSummary := messages
@@ -53,7 +56,7 @@ func (m *Model) runCompact(customInstructions string) func() compactDoneMsg {
 			}
 			msgsForSummary = append([]client.Message{hint}, messages...)
 		}
-		summary, err := ctxwin.GenerateSummary(ctx, m.gateway, msgsForSummary)
+		summary, _, err := ctxwin.GenerateSummary(ctx, m.gateway, msgsForSummary)
 		if err != nil {
 			return compactDoneMsg{err: fmt.Errorf("summarization failed: %w", err)}
 		}

@@ -3252,7 +3252,7 @@ func compressTier2Blocks(ctx context.Context, mc client.MessageContent, maxChars
 		}
 		if completer != nil && charLen > microCompactMinChars && !isMicroCompacted(content) && *mcCount < microCompactMaxPerPass && !isMicroCompactSkipTool(toolName) {
 			*mcCount++ // count attempts, not just successes — caps latency
-			if summary, ok := microCompactResult(ctx, completer, toolName, content); ok {
+			if summary, ok, _ := microCompactResult(ctx, completer, toolName, content); ok {
 				b.ToolContent = summary
 				newBlocks = append(newBlocks, b)
 				continue

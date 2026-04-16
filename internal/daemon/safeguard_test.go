@@ -221,3 +221,102 @@ func TestValidateMCPCommands_AllSafeCommands(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateMCPCommands_ShellBlocked(t *testing.T) {
+	shells := []string{"sh", "bash", "zsh", "fish", "/bin/sh", "/bin/bash", "/usr/bin/zsh"}
+	for _, cmd := range shells {
+		servers := map[string]interface{}{
+			"s": map[string]interface{}{"command": cmd},
+		}
+		if err := validateMCPCommands(servers, true); err == nil {
+			t.Errorf("expected error for shell %q even with confirm, got nil", cmd)
+		}
+	}
+}
+
+func TestValidateMCPCommands_EvalFlagBlocked(t *testing.T) {
+	cases := []struct {
+		cmd  string
+		args []interface{}
+	}{
+		{"python", []interface{}{"-c", "print('hi')"}},
+		{"node", []interface{}{"--eval", "console.log('hi')"}},
+		{"python3", []interface{}{"-e", "print('hi')"}},
+	}
+	for _, c := range cases {
+		servers := map[string]interface{}{
+			"s": map[string]interface{}{"command": c.cmd, "args": c.args},
+		}
+		if err := validateMCPCommands(servers, true); err == nil {
+			t.Errorf("expected error for %q with eval args %v even with confirm, got nil", c.cmd, c.args)
+		}
+	}
+}
+
+func TestValidateMCPCommands_SafeCommandWithNormalArgs(t *testing.T) {
+	servers := map[string]interface{}{
+		"s": map[string]interface{}{
+			"command": "python",
+			"args":    []interface{}{"-m", "my_mcp_server", "--port", "3000"},
+		},
+	}
+	if err := validateMCPCommands(servers, false); err != nil {
+		t.Errorf("expected nil for python -m (no eval flag), got: %v", err)
+	}
+}
+
+func TestCheckProtectedFields_AliasNormalized(t *testing.T) {
+	// Verify that after normalizePatchKeys, aliases are caught
+	patch := map[string]interface{}{
+		"apiKey": "sk-test",
+	}
+	normalizePatchKeys(patch)
+	reason, isProtected := checkProtectedFields(patch)
+	if !isProtected {
+		t.Fatal("expected isProtected=true for aliased apiKey after normalization")
+	}
+	if reason != "changes authentication credentials" {
+		t.Errorf("unexpected reason: %q", reason)
+	}
+}
+
+func TestValidateMCPCommands_WrapperBlocked(t *testing.T) {
+	wrappers := []string{"env", "nohup", "sudo", "/usr/bin/env", "/usr/bin/sudo"}
+	for _, cmd := range wrappers {
+		servers := map[string]interface{}{
+			"s": map[string]interface{}{"command": cmd, "args": []interface{}{"node", "server.js"}},
+		}
+		if err := validateMCPCommands(servers, true); err == nil {
+			t.Errorf("expected error for wrapper %q even with confirm, got nil", cmd)
+		}
+	}
+}
+
+func TestValidateMCPCommands_ShellInArgsBlocked(t *testing.T) {
+	servers := map[string]interface{}{
+		"s": map[string]interface{}{
+			"command": "python",
+			"args":    []interface{}{"bash", "-lc", "echo hi"},
+		},
+	}
+	if err := validateMCPCommands(servers, true); err == nil {
+		t.Error("expected error for shell in args, got nil")
+	}
+}
+
+func TestCheckProtectedFields_MCPServersAliasNormalized(t *testing.T) {
+	patch := map[string]interface{}{
+		"mcpServers": map[string]interface{}{
+			"test": map[string]interface{}{
+				"command": "node",
+			},
+		},
+	}
+	normalizePatchKeys(patch)
+	if _, ok := patch["mcp_servers"]; !ok {
+		t.Fatal("expected mcp_servers key after normalization")
+	}
+	if _, ok := patch["mcpServers"]; ok {
+		t.Fatal("expected mcpServers alias to be removed after normalization")
+	}
+}

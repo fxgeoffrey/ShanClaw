@@ -17,7 +17,7 @@ Global settings control how Shannon behaves across all agents — which AI model
 - Path: /config
 - Body: `{"agent": {"model": "claude-opus-4-5"}}`
 - Response: `{"status": "updated"}`
-- Notes: PATCH merges deeply — you only need to include the fields you want to change. Protected fields require `X-Confirm: true` header.
+- Notes: PATCH merges deeply — you only need to include the fields you want to change. Protected fields (`endpoint`, `api_key`, `daemon.auto_approve`, `permissions.denied_commands`) return HTTP 409 and cannot be changed through this API.
 
 ### Reload config from disk
 - Method: POST

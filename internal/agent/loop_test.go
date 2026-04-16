@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -87,6 +88,26 @@ func TestAgentLoop_SimpleTextResponse(t *testing.T) {
 		t.Errorf("expected 1 LLM call in usage, got %d", usage.LLMCalls)
 	}
 }
+
+// mockSimpleTool is a basic tool for filter/schema tests.
+type mockSimpleTool struct {
+	name   string
+	result ToolResult
+}
+
+func (m *mockSimpleTool) Info() ToolInfo {
+	return ToolInfo{
+		Name:        m.name,
+		Description: "mock " + m.name,
+		Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
+	}
+}
+
+func (m *mockSimpleTool) Run(ctx context.Context, args string) (ToolResult, error) {
+	return m.result, nil
+}
+
+func (m *mockSimpleTool) RequiresApproval() bool { return false }
 
 // mockApprovalTool requires approval but implements SafeChecker.
 type mockApprovalTool struct {
@@ -3002,5 +3023,109 @@ func TestAgentLoop_ReanchorAfterLLMRetryIncludesAttachmentHint(t *testing.T) {
 	}
 	if !foundReanchor {
 		t.Fatal("expected retry request to include a reanchor message")
+	}
+}
+
+// TestAgentLoop_SkillToolFilter verifies that when use_skill returns a
+// SkillToolFilter, subsequent LLM calls only receive the allowed tools
+// plus use_skill itself (no other tools leak through).
+func TestAgentLoop_SkillToolFilter(t *testing.T) {
+	var mu sync.Mutex
+	var toolsSentPerCall [][]string // tool names sent in each LLM request
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req client.CompletionRequest
+		json.Unmarshal(body, &req)
+
+		mu.Lock()
+		var names []string
+		for _, t := range req.Tools {
+			names = append(names, t.Function.Name)
+		}
+		callNum := len(toolsSentPerCall)
+		toolsSentPerCall = append(toolsSentPerCall, names)
+		mu.Unlock()
+
+		switch callNum {
+		case 0:
+			// LLM calls use_skill to activate a restrictive skill
+			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
+				toolCall("use_skill", `{"skill_name": "test-skill"}`), 10, 5))
+		case 1:
+			// After filter: LLM calls http (the allowed tool)
+			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
+				toolCall("http", `{"url": "http://localhost"}`), 10, 5))
+		case 2:
+			// Final text response
+			json.NewEncoder(w).Encode(nativeResponse("done", "end_turn", nil, 10, 5))
+		default:
+			json.NewEncoder(w).Encode(nativeResponse("unexpected", "end_turn", nil, 10, 5))
+		}
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+
+	// Register use_skill mock that returns a SkillToolFilter
+	reg.Register(&mockSimpleTool{
+		name: "use_skill",
+		result: ToolResult{
+			Content:         "You are a config assistant.",
+			SkillToolFilter: []string{"http", "file_read"},
+		},
+	})
+	// Register the tools that should be filtered
+	reg.Register(&mockSimpleTool{name: "http", result: ToolResult{Content: "ok"}})
+	reg.Register(&mockSimpleTool{name: "file_read", result: ToolResult{Content: "file content"}})
+	reg.Register(&mockSimpleTool{name: "bash", result: ToolResult{Content: "should be filtered"}})
+	reg.Register(&mockSimpleTool{name: "file_write", result: ToolResult{Content: "should be filtered"}})
+
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+	result, _, err := loop.Run(context.Background(), "set up my agent", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "done" {
+		t.Errorf("expected 'done', got %q", result)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(toolsSentPerCall) < 3 {
+		t.Fatalf("expected at least 3 LLM calls, got %d", len(toolsSentPerCall))
+	}
+
+	// Call 0: all tools should be present (before skill activation)
+	call0Tools := make(map[string]bool)
+	for _, n := range toolsSentPerCall[0] {
+		call0Tools[n] = true
+	}
+	for _, expected := range []string{"use_skill", "http", "file_read", "bash", "file_write"} {
+		if !call0Tools[expected] {
+			t.Errorf("call 0: expected tool %q to be present before filter", expected)
+		}
+	}
+
+	// Call 1+: only allowed tools (http, file_read, use_skill) should be present
+	for callIdx := 1; callIdx < len(toolsSentPerCall); callIdx++ {
+		tools := make(map[string]bool)
+		for _, n := range toolsSentPerCall[callIdx] {
+			tools[n] = true
+		}
+		// bash and file_write must NOT be present
+		for _, blocked := range []string{"bash", "file_write"} {
+			if tools[blocked] {
+				t.Errorf("call %d: tool %q should be filtered out after skill activation, but was present", callIdx, blocked)
+			}
+		}
+		// http, file_read, use_skill MUST be present
+		for _, allowed := range []string{"http", "file_read", "use_skill"} {
+			if !tools[allowed] {
+				t.Errorf("call %d: expected tool %q to be present after skill activation", callIdx, allowed)
+			}
+		}
 	}
 }

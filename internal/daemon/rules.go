@@ -123,7 +123,7 @@ func (s *Server) handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "daemon deps not configured")
 		return
 	}
-	if r.URL.Query().Get("confirm") != "true" {
+	if requireConfirm(r.URL.Query().Get("confirm")) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error":   "confirmation_required",
 			"message": "This will permanently delete the rule. Add ?confirm=true to proceed.",

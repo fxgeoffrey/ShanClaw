@@ -2866,15 +2866,18 @@ func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check protected fields
+	// Normalize aliases FIRST so security checks see canonical keys.
+	// e.g. "apiKey" → "api_key", "mcpServers" → "mcp_servers".
+	normalizePatchKeys(patch)
+
+	// Check protected fields — hard block, no bypass header.
+	// These fields must be edited directly in ~/.shannon/config.yaml.
 	if reason, isProtected := checkProtectedFields(patch); isProtected {
-		if r.Header.Get("X-Confirm") == "" {
-			writeJSON(w, http.StatusConflict, map[string]string{
-				"error":   "protected_field",
-				"message": reason + " — add X-Confirm header to proceed",
-			})
-			return
-		}
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error":   "protected_field",
+			"message": reason + " — edit ~/.shannon/config.yaml directly",
+		})
+		return
 	}
 
 	// Validate MCP server commands

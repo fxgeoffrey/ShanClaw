@@ -978,6 +978,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	if !deferredMode {
 		effTools = a.tools
 		toolSchemas = effTools.SortedSchemas()
+		baseSchemas = toolSchemas // needed by applySkillFilter's rebuild path
 		toolNames = liveToolNames(toolSchemas)
 	}
 
@@ -1198,7 +1199,29 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		// Denied-call blocking: track tool+args denied by the user this turn
 		// to prevent re-prompting for the same call.
 		deniedCalls = make(map[string]bool)
+
+		// Skill tool filter: when a skill declares allowed-tools, this map
+		// persists across iterations so rebuildSchemas and subsequent use_skill
+		// calls rebuild from the full set, not the already-filtered set.
+		activeSkillFilter map[string]bool
 	)
+
+	// applySkillFilter narrows toolSchemas to only the tools in activeSkillFilter.
+	// Always rebuilds from the current full toolSchemas (post-rebuildSchemas) so
+	// that deferred tool loading doesn't erase the restriction, and a second
+	// use_skill with different allowed-tools replaces rather than intersects.
+	applySkillFilter := func(schemas []client.Tool) []client.Tool {
+		if activeSkillFilter == nil {
+			return schemas
+		}
+		filtered := make([]client.Tool, 0, len(activeSkillFilter))
+		for _, s := range schemas {
+			if activeSkillFilter[s.Function.Name] {
+				filtered = append(filtered, s)
+			}
+		}
+		return filtered
+	}
 
 	setRunStatus := func(code runstatus.Code, partial bool) {
 		a.lastRunStatus = RunStatus{
@@ -2173,6 +2196,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 						// rebuildSchemas would strip those flags.
 						if !a.toolRefSupported {
 							toolSchemas = rebuildSchemas(effTools, baseSchemas, loadedDeferred)
+							toolSchemas = applySkillFilter(toolSchemas)
 						}
 						if len(names) > 0 {
 							toolSearchFired = true
@@ -2347,24 +2371,27 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			// context so the final LLM call has complete information.
 		}
 
-		// Skill tool filter: when use_skill returns a SkillToolFilter,
-		// restrict toolSchemas for subsequent iterations so the LLM only
-		// sees the skill's allowed tools (plus use_skill itself).
+		// Skill tool filter: when use_skill is called, update the filter.
+		// - Skill with allowed-tools: restrict to those tools + use_skill.
+		// - Skill without allowed-tools: clear any prior restriction.
+		// Always rebuild from baseSchemas so deferred loading can't erase
+		// the restriction, and a second use_skill replaces (not intersects).
 		for _, ac := range approved {
 			er := execResults[ac.index]
-			if ac.fc.Name == "use_skill" && !er.result.IsError && len(er.result.SkillToolFilter) > 0 {
-				allowed := make(map[string]bool, len(er.result.SkillToolFilter)+1)
-				for _, name := range er.result.SkillToolFilter {
-					allowed[name] = true
-				}
-				allowed["use_skill"] = true
-				filtered := make([]client.Tool, 0, len(allowed))
-				for _, s := range toolSchemas {
-					if allowed[s.Function.Name] {
-						filtered = append(filtered, s)
+			if ac.fc.Name == "use_skill" && !er.result.IsError {
+				if len(er.result.SkillToolFilter) > 0 {
+					activeSkillFilter = make(map[string]bool, len(er.result.SkillToolFilter)+1)
+					for _, name := range er.result.SkillToolFilter {
+						activeSkillFilter[name] = true
 					}
+					activeSkillFilter["use_skill"] = true
+				} else {
+					// Unrestricted skill: clear any prior filter.
+					activeSkillFilter = nil
 				}
-				toolSchemas = filtered
+				// Rebuild from full set (baseSchemas + loaded deferred), then filter.
+				fullSchemas := rebuildSchemas(effTools, baseSchemas, loadedDeferred)
+				toolSchemas = applySkillFilter(fullSchemas)
 				break
 			}
 		}

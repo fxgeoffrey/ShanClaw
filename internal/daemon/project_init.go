@@ -37,7 +37,13 @@ func (s *Server) handleProjectInit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	shannonClean := filepath.Clean(s.deps.ShannonDir)
+	if resolved, err := filepath.EvalSymlinks(s.deps.ShannonDir); err == nil {
+		shannonClean = resolved
+	}
 	cwdClean := filepath.Clean(req.CWD)
+	if resolved, err := filepath.EvalSymlinks(req.CWD); err == nil {
+		cwdClean = resolved
+	}
 	if cwdClean == shannonClean || strings.HasPrefix(cwdClean, shannonClean+string(filepath.Separator)) {
 		writeError(w, http.StatusBadRequest, "cannot initialize project inside the global shannon directory")
 		return

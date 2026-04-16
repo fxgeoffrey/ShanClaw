@@ -68,7 +68,7 @@ MCP servers are configured through the config API — there is no separate MCP e
 
 ## Safety Notes
 
-- **Stdio command safety**: Shannon only allows safe commands for stdio servers: `node`, `npx`, `python`, `python3`, `uv`, `uvx`, `deno`, and absolute paths to executables. Shell metacharacters (`;`, `|`, `&`, `` ` ``) are blocked. Commands outside the safe list require `X-Confirm: true` header.
+- **Stdio command safety**: Shannon only allows safe commands for stdio servers: `node`, `npx`, `python`, `python3`, `uv`, `uvx`, `deno`, `bun`, `go`, `docker`, `pip`, `pipx`, and absolute paths to executables. Shell metacharacters (`;`, `|`, `&`, `` ` ``) are always blocked. Commands outside the safe list require `X-Confirm: true` header. **Always blocked regardless of confirmation**: shells (`sh`, `bash`, `zsh`, etc.), wrapper commands (`env`, `nohup`, `sudo`), eval flags (`-c`, `-e`, `--eval`) in args, and shell names in args.
 - **Token security**: Tokens and API keys in `env` are stored in `~/.shannon/config.yaml`. Ensure this file is not committed to version control.
 - **Process lifecycle**: Stdio MCP servers are started when Shannon daemon starts and restarted on reload. If the server crashes, Shannon attempts reconnection automatically.
 - **HTTP MCP servers**: These connect to remote endpoints — make sure you trust the server operator, as agents will send conversation context to it.

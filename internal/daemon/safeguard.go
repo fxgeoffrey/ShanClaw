@@ -55,11 +55,29 @@ var safeCommands = map[string]bool{
 	"docker": true, "pip": true, "pipx": true,
 }
 
+// interpreterEvalFlags lists flags that cause interpreters to evaluate
+// inline code from the next argument, enabling arbitrary code execution.
+var interpreterEvalFlags = map[string]bool{
+	"-c": true, "-e": true, "--eval": true, "--exec": true,
+}
+
+// shellBases identifies shells that can execute arbitrary commands via args.
+var shellBases = map[string]bool{
+	"sh": true, "bash": true, "zsh": true, "fish": true, "dash": true, "csh": true, "tcsh": true,
+}
+
+// wrapperCommands are programs that delegate execution to an arbitrary child
+// command, making them equivalent to running that child directly.
+var wrapperCommands = map[string]bool{
+	"env": true, "nohup": true, "sudo": true, "su": true, "xargs": true,
+}
+
 // shellMetachars matches characters that indicate shell injection.
 var shellMetachars = regexp.MustCompile(`[;|&><$()\x60]`) // backtick = \x60
 
 // validateMCPCommands checks that MCP server commands are safe.
-// confirmed=true relaxes the unknown-command check but NOT the metachar check.
+// confirmed=true relaxes the unknown-command check but NOT the metachar check
+// or the interpreter eval-flag check.
 func validateMCPCommands(servers map[string]interface{}, confirmed bool) error {
 	for name, srvRaw := range servers {
 		srvMap, ok := srvRaw.(map[string]interface{})
@@ -79,17 +97,41 @@ func validateMCPCommands(servers map[string]interface{}, confirmed bool) error {
 			continue
 		}
 
-		// Always block shell metacharacters
+		// Always block shell metacharacters in command
 		if shellMetachars.MatchString(cmd) {
 			return fmt.Errorf("mcp_servers.%s: command %q contains shell metacharacters", name, cmd)
 		}
 
-		// Allow absolute paths and known-safe commands
-		if filepath.IsAbs(cmd) {
-			continue
-		}
+		// Resolve base name for both relative and absolute paths
 		base := filepath.Base(cmd)
-		if safeCommands[base] {
+
+		// Always block shells — they execute arbitrary commands via args
+		if shellBases[base] {
+			return fmt.Errorf("mcp_servers.%s: shell %q cannot be used as MCP command — use the actual server binary", name, cmd)
+		}
+
+		// Block wrapper commands (env, nohup, sudo) that delegate to arbitrary children
+		if wrapperCommands[base] {
+			return fmt.Errorf("mcp_servers.%s: wrapper command %q cannot be used as MCP command — use the actual server binary", name, cmd)
+		}
+
+		// Check args for shells and interpreter eval flags
+		if args := extractArgs(srvMap); len(args) > 0 {
+			for _, arg := range args {
+				// Block shell names appearing anywhere in args (e.g. python bash -c ...)
+				argBase := filepath.Base(arg)
+				if shellBases[argBase] {
+					return fmt.Errorf("mcp_servers.%s: shell %q in args is not allowed", name, arg)
+				}
+				// Block eval flags (e.g. python -c "...")
+				if interpreterEvalFlags[arg] {
+					return fmt.Errorf("mcp_servers.%s: eval flag %q with command %q enables arbitrary code execution — use a script file instead", name, arg, cmd)
+				}
+			}
+		}
+
+		// Allow known-safe commands and absolute paths
+		if filepath.IsAbs(cmd) || safeCommands[base] {
 			continue
 		}
 
@@ -99,4 +141,26 @@ func validateMCPCommands(servers map[string]interface{}, confirmed bool) error {
 		}
 	}
 	return nil
+}
+
+// extractArgs reads the "args" field from an MCP server config map.
+func extractArgs(srvMap map[string]interface{}) []string {
+	argsRaw, ok := srvMap["args"]
+	if !ok {
+		return nil
+	}
+	switch v := argsRaw.(type) {
+	case []interface{}:
+		out := make([]string, 0, len(v))
+		for _, a := range v {
+			if s, ok := a.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	case []string:
+		return v
+	default:
+		return nil
+	}
 }

@@ -22,6 +22,7 @@ import (
 
 	"github.com/Kocoro-lab/ShanClaw/internal/agent"
 	"github.com/Kocoro-lab/ShanClaw/internal/agents"
+	"github.com/Kocoro-lab/ShanClaw/internal/audit"
 	"github.com/Kocoro-lab/ShanClaw/internal/config"
 	ctxwin "github.com/Kocoro-lab/ShanClaw/internal/context"
 	"github.com/Kocoro-lab/ShanClaw/internal/mcp"
@@ -66,6 +67,20 @@ func (s *Server) requireDeps(w http.ResponseWriter) bool {
 		return false
 	}
 	return true
+}
+
+// auditHTTPOp logs an HTTP API write operation to the audit log.
+func (s *Server) auditHTTPOp(method, path, summary string) {
+	if s.deps == nil || s.deps.Auditor == nil {
+		return
+	}
+	s.deps.Auditor.Log(audit.AuditEntry{
+		Timestamp:    time.Now(),
+		ToolName:     "http_api",
+		InputSummary: method + " " + path + ": " + summary,
+		Decision:     "approved",
+		Approved:     true,
+	})
 }
 
 // resolveRegistryURL returns the configured marketplace registry URL, falling
@@ -213,6 +228,11 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("POST /config/reload", s.handleConfigReload)
 	mux.HandleFunc("GET /instructions", s.handleGetInstructions)
 	mux.HandleFunc("PUT /instructions", s.handlePutInstructions)
+	mux.HandleFunc("GET /rules", s.handleListRules)
+	mux.HandleFunc("GET /rules/{name}", s.handleGetRule)
+	mux.HandleFunc("PUT /rules/{name}", s.handlePutRule)
+	mux.HandleFunc("DELETE /rules/{name}", s.handleDeleteRule)
+	mux.HandleFunc("POST /project/init", s.handleProjectInit)
 	mux.HandleFunc("GET /sessions", s.handleSessions)
 	mux.HandleFunc("GET /sessions/{id}", s.handleGetSession)
 	mux.HandleFunc("DELETE /sessions/{id}", s.handleDeleteSession)
@@ -1696,6 +1716,7 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.auditHTTPOp("POST", "/agents", "created agent "+req.Name)
 	writeJSON(w, http.StatusCreated, a.ToAPI())
 }
 
@@ -1827,6 +1848,13 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
+	if requireConfirm(r.URL.Query().Get("confirm")) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error":   "confirmation_required",
+			"message": "This will permanently delete the agent definition. Add ?confirm=true to proceed.",
+		})
+		return
+	}
 	name := r.PathValue("name")
 	if err := agents.ValidateAgentName(name); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -1871,6 +1899,7 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	if entries, err := os.ReadDir(agentDir); err == nil && len(entries) == 0 {
 		os.Remove(agentDir)
 	}
+	s.auditHTTPOp("DELETE", "/agents/"+name, "deleted agent")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -2443,10 +2472,18 @@ func (s *Server) handlePutGlobalSkill(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.auditHTTPOp("PUT", "/skills/"+name, "wrote global skill")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
 func (s *Server) handleDeleteGlobalSkill(w http.ResponseWriter, r *http.Request) {
+	if requireConfirm(r.URL.Query().Get("confirm")) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error":   "confirmation_required",
+			"message": "This will permanently delete the skill. Add ?confirm=true to proceed.",
+		})
+		return
+	}
 	name := r.PathValue("name")
 	if err := skills.ValidateSkillName(name); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -2466,6 +2503,7 @@ func (s *Server) handleDeleteGlobalSkill(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.auditHTTPOp("DELETE", "/skills/"+name, "deleted skill")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -2758,6 +2796,13 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteSchedule(w http.ResponseWriter, r *http.Request) {
+	if requireConfirm(r.URL.Query().Get("confirm")) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error":   "confirmation_required",
+			"message": "This will permanently delete the schedule. Add ?confirm=true to proceed.",
+		})
+		return
+	}
 	if s.deps == nil || s.deps.ScheduleManager == nil {
 		writeError(w, http.StatusInternalServerError, "daemon deps not configured")
 		return
@@ -2771,6 +2816,7 @@ func (s *Server) handleDeleteSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.auditHTTPOp("DELETE", "/schedules/"+id, "deleted schedule")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -2819,10 +2865,35 @@ func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &patch) {
 		return
 	}
+
+	// Check protected fields
+	if reason, isProtected := checkProtectedFields(patch); isProtected {
+		if r.Header.Get("X-Confirm") == "" {
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error":   "protected_field",
+				"message": reason + " — add X-Confirm header to proceed",
+			})
+			return
+		}
+	}
+
+	// Validate MCP server commands
+	if servers, ok := patch["mcp_servers"].(map[string]interface{}); ok {
+		confirmed := r.Header.Get("X-Confirm") != ""
+		if err := validateMCPCommands(servers, confirmed); err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error":   "mcp_command_validation",
+				"message": err.Error(),
+			})
+			return
+		}
+	}
+
 	if err := s.patchGlobalConfig(patch); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.auditHTTPOp("PATCH", "/config", "updated config")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 

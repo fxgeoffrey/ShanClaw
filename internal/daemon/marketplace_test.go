@@ -421,7 +421,7 @@ func TestHandleLocalSkillCollisionStaysLocal(t *testing.T) {
 		t.Fatalf("install status = %d, body = %s", rr.Code, rr.Body.String())
 	}
 
-	req = httptest.NewRequest("DELETE", "/skills/ontology", nil)
+	req = httptest.NewRequest("DELETE", "/skills/ontology?confirm=true", nil)
 	req.SetPathValue("name", "ontology")
 	rr = httptest.NewRecorder()
 	s.handleDeleteGlobalSkill(rr, req)

@@ -57,9 +57,11 @@ type UsageSummary struct {
 	OutputTokens        int     `json:"output_tokens,omitempty"`
 	TotalTokens         int     `json:"total_tokens,omitempty"`
 	CostUSD             float64 `json:"cost_usd,omitempty"`
-	CacheReadTokens     int     `json:"cache_read_tokens,omitempty"`
-	CacheCreationTokens int     `json:"cache_creation_tokens,omitempty"`
-	Model               string  `json:"model,omitempty"` // last-seen model
+	CacheReadTokens       int     `json:"cache_read_tokens,omitempty"`
+	CacheCreationTokens   int     `json:"cache_creation_tokens,omitempty"`
+	CacheCreation5mTokens int     `json:"cache_creation_5m_tokens,omitempty"`
+	CacheCreation1hTokens int     `json:"cache_creation_1h_tokens,omitempty"`
+	Model                 string  `json:"model,omitempty"` // last-seen model
 	// Gateway tool costs (populated once Shannon Cloud returns usage per tool call).
 	ToolCalls   int     `json:"tool_calls,omitempty"`
 	ToolCostUSD float64 `json:"tool_cost_usd,omitempty"`
@@ -68,16 +70,18 @@ type UsageSummary struct {
 // UsageFromTurn converts LLM-only numeric values into a UsageSummary.
 // Left in place for callers that only have LLM data; new code should prefer
 // UsageFromAccumulated which carries both LLM and gateway-tool costs.
-func UsageFromTurn(llmCalls, inputTokens, outputTokens, totalTokens int, costUSD float64, cacheRead, cacheCreation int, model string) UsageSummary {
+func UsageFromTurn(llmCalls, inputTokens, outputTokens, totalTokens int, costUSD float64, cacheRead, cacheCreation, cacheCreation5m, cacheCreation1h int, model string) UsageSummary {
 	return UsageSummary{
-		LLMCalls:            llmCalls,
-		InputTokens:         inputTokens,
-		OutputTokens:        outputTokens,
-		TotalTokens:         totalTokens,
-		CostUSD:             costUSD,
-		CacheReadTokens:     cacheRead,
-		CacheCreationTokens: cacheCreation,
-		Model:               model,
+		LLMCalls:              llmCalls,
+		InputTokens:           inputTokens,
+		OutputTokens:          outputTokens,
+		TotalTokens:           totalTokens,
+		CostUSD:               costUSD,
+		CacheReadTokens:       cacheRead,
+		CacheCreationTokens:   cacheCreation,
+		CacheCreation5mTokens: cacheCreation5m,
+		CacheCreation1hTokens: cacheCreation1h,
+		Model:                 model,
 	}
 }
 
@@ -86,20 +90,22 @@ func UsageFromTurn(llmCalls, inputTokens, outputTokens, totalTokens int, costUSD
 // touched billed tools (x_search, web_search).
 func UsageFromAccumulated(
 	llmCalls, inputTokens, outputTokens, totalTokens int, costUSD float64,
-	cacheRead, cacheCreation int, model string,
+	cacheRead, cacheCreation, cacheCreation5m, cacheCreation1h int, model string,
 	toolCalls int, toolCostUSD float64,
 ) UsageSummary {
 	return UsageSummary{
-		LLMCalls:            llmCalls,
-		InputTokens:         inputTokens,
-		OutputTokens:        outputTokens,
-		TotalTokens:         totalTokens,
-		CostUSD:             costUSD,
-		CacheReadTokens:     cacheRead,
-		CacheCreationTokens: cacheCreation,
-		Model:               model,
-		ToolCalls:           toolCalls,
-		ToolCostUSD:         toolCostUSD,
+		LLMCalls:              llmCalls,
+		InputTokens:           inputTokens,
+		OutputTokens:          outputTokens,
+		TotalTokens:           totalTokens,
+		CostUSD:               costUSD,
+		CacheReadTokens:       cacheRead,
+		CacheCreationTokens:   cacheCreation,
+		CacheCreation5mTokens: cacheCreation5m,
+		CacheCreation1hTokens: cacheCreation1h,
+		Model:                 model,
+		ToolCalls:             toolCalls,
+		ToolCostUSD:           toolCostUSD,
 	}
 }
 
@@ -112,6 +118,8 @@ func (u *UsageSummary) Add(o UsageSummary) {
 	u.CostUSD += o.CostUSD
 	u.CacheReadTokens += o.CacheReadTokens
 	u.CacheCreationTokens += o.CacheCreationTokens
+	u.CacheCreation5mTokens += o.CacheCreation5mTokens
+	u.CacheCreation1hTokens += o.CacheCreation1hTokens
 	u.ToolCalls += o.ToolCalls
 	u.ToolCostUSD += o.ToolCostUSD
 	if o.Model != "" {

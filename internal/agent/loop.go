@@ -237,8 +237,10 @@ type TurnUsage struct {
 	CostUSD             float64
 	LLMCalls            int
 	Model               string // actual model from gateway response
-	CacheReadTokens     int
-	CacheCreationTokens int
+	CacheReadTokens       int
+	CacheCreationTokens   int
+	CacheCreation5mTokens int
+	CacheCreation1hTokens int
 	// Cache telemetry state (session-scoped, not reset between turns)
 	cacheCapable    bool // true once any response has cache tokens > 0
 	cacheMissStreak int  // consecutive non-first turns with 0 cache reads
@@ -253,6 +255,8 @@ func (u *TurnUsage) Add(r client.Usage) {
 	u.CostUSD += r.CostUSD
 	u.CacheReadTokens += r.CacheReadTokens
 	u.CacheCreationTokens += r.CacheCreationTokens
+	u.CacheCreation5mTokens += r.CacheCreation5mTokens
+	u.CacheCreation1hTokens += r.CacheCreation1hTokens
 	u.LLMCalls++
 
 	// Cache telemetry: track capability and miss streaks
@@ -3468,13 +3472,15 @@ func extractPathArg(argsJSON string) string {
 func (a *AgentLoop) emitInternalUsage(u client.Usage) {
 	if a.handler != nil && (u.InputTokens > 0 || u.OutputTokens > 0) {
 		a.handler.OnUsage(TurnUsage{
-			InputTokens:         u.InputTokens,
-			OutputTokens:        u.OutputTokens,
-			TotalTokens:         u.TotalTokens,
-			CostUSD:             u.CostUSD,
-			CacheReadTokens:     u.CacheReadTokens,
-			CacheCreationTokens: u.CacheCreationTokens,
-			LLMCalls:            1,
+			InputTokens:           u.InputTokens,
+			OutputTokens:          u.OutputTokens,
+			TotalTokens:           u.TotalTokens,
+			CostUSD:               u.CostUSD,
+			CacheReadTokens:       u.CacheReadTokens,
+			CacheCreationTokens:   u.CacheCreationTokens,
+			CacheCreation5mTokens: u.CacheCreation5mTokens,
+			CacheCreation1hTokens: u.CacheCreation1hTokens,
+			LLMCalls:              1,
 		})
 	}
 }

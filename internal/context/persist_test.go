@@ -159,6 +159,79 @@ func TestPersistLearnings(t *testing.T) {
 	})
 }
 
+func TestPersistLearningsWithUsageReportsUsage(t *testing.T) {
+	dir := t.TempDir()
+	mock := &mockCompleter{
+		response: &client.CompletionResponse{
+			OutputText: "- Durable fact",
+			Model:      "claude-small",
+			Usage: client.Usage{
+				InputTokens:           80,
+				OutputTokens:          20,
+				CacheCreation5mTokens: 10,
+				CacheCreation1hTokens: 15,
+			},
+		},
+	}
+
+	var reported client.Usage
+	var model string
+	err := PersistLearningsWithUsage(context.Background(), mock, []client.Message{
+		{Role: "user", Content: client.NewTextContent("remember this")},
+	}, dir, func(u client.Usage, m string) {
+		reported = u
+		model = m
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if model != "claude-small" {
+		t.Fatalf("expected model claude-small, got %q", model)
+	}
+	if reported.CacheCreation5mTokens != 10 || reported.CacheCreation1hTokens != 15 {
+		t.Fatalf("expected split cache creation 10/15, got %d/%d", reported.CacheCreation5mTokens, reported.CacheCreation1hTokens)
+	}
+}
+
+func TestConsolidateMemoryWithUsageReportsUsage(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < consolidateThreshold; i++ {
+		name := fmt.Sprintf("auto-2026-01-%02d.md", i+1)
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("- fact"), 0644); err != nil {
+			t.Fatalf("write auto file: %v", err)
+		}
+	}
+
+	mock := &mockCompleter{
+		response: &client.CompletionResponse{
+			OutputText: "- Consolidated fact",
+			Model:      "claude-small",
+			Usage: client.Usage{
+				InputTokens:           90,
+				OutputTokens:          25,
+				CacheCreation5mTokens: 12,
+				CacheCreation1hTokens: 18,
+			},
+		},
+	}
+
+	var reported client.Usage
+	var model string
+	err := ConsolidateMemoryWithUsage(context.Background(), mock, dir, func(u client.Usage, m string) {
+		reported = u
+		model = m
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if model != "claude-small" {
+		t.Fatalf("expected model claude-small, got %q", model)
+	}
+	if reported.CacheCreation5mTokens != 12 || reported.CacheCreation1hTokens != 18 {
+		t.Fatalf("expected split cache creation 12/18, got %d/%d", reported.CacheCreation5mTokens, reported.CacheCreation1hTokens)
+	}
+}
+
 func TestBoundedAppend(t *testing.T) {
 	t.Run("appends content directly when under limit", func(t *testing.T) {
 		dir := t.TempDir()

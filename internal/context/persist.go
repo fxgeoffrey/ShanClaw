@@ -68,6 +68,12 @@ Format rules:
 // ~/.shannon/agents/<name>/).
 // Returns nil if nothing worth persisting, or if memoryDir is empty.
 func PersistLearnings(ctx context.Context, c Completer, messages []client.Message, memoryDir string) error {
+	return PersistLearningsWithUsage(ctx, c, messages, memoryDir, nil)
+}
+
+// PersistLearningsWithUsage is PersistLearnings plus an optional usage callback
+// for callers that need helper-model accounting.
+func PersistLearningsWithUsage(ctx context.Context, c Completer, messages []client.Message, memoryDir string, report UsageReporter) error {
 	if memoryDir == "" {
 		return nil
 	}
@@ -113,6 +119,9 @@ func PersistLearnings(ctx context.Context, c Completer, messages []client.Messag
 	resp, err := c.Complete(ctx, req)
 	if err != nil {
 		return fmt.Errorf("persist learnings failed: %w", err)
+	}
+	if report != nil {
+		report(resp.Usage, resp.Model)
 	}
 
 	result := strings.TrimSpace(resp.OutputText)
@@ -224,6 +233,12 @@ func countLines(content []byte) int {
 // Runs only when ≥12 auto-*.md files exist and last GC was ≥7 days ago.
 // Safe for concurrent use (flock on MEMORY.md.lock).
 func ConsolidateMemory(ctx context.Context, c Completer, memoryDir string) error {
+	return ConsolidateMemoryWithUsage(ctx, c, memoryDir, nil)
+}
+
+// ConsolidateMemoryWithUsage is ConsolidateMemory plus an optional usage
+// callback for callers that need helper-model accounting.
+func ConsolidateMemoryWithUsage(ctx context.Context, c Completer, memoryDir string, report UsageReporter) error {
 	if memoryDir == "" {
 		return nil
 	}
@@ -301,6 +316,9 @@ func ConsolidateMemory(ctx context.Context, c Completer, memoryDir string) error
 	resp, err := c.Complete(ctx, req)
 	if err != nil {
 		return fmt.Errorf("consolidate: LLM call failed: %w", err)
+	}
+	if report != nil {
+		report(resp.Usage, resp.Model)
 	}
 
 	consolidated := strings.TrimSpace(resp.OutputText)

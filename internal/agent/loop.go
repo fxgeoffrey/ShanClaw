@@ -231,14 +231,16 @@ Anti-pattern: After several x_search or web_search calls return sparse results o
 Correct: cloud_delegate uses the same search backends (xAI Grok, SERP) as x_search and web_search. Escalating does NOT unlock new data. If a single-platform search yields a small stable pool, that IS the answer — return the accumulated list with a note on scope, do not delegate.`
 
 type TurnUsage struct {
-	InputTokens         int
-	OutputTokens        int
-	TotalTokens         int
-	CostUSD             float64
-	LLMCalls            int
-	Model               string // actual model from gateway response
-	CacheReadTokens     int
-	CacheCreationTokens int
+	InputTokens           int
+	OutputTokens          int
+	TotalTokens           int
+	CostUSD               float64
+	LLMCalls              int
+	Model                 string // actual model from gateway response
+	CacheReadTokens       int
+	CacheCreationTokens   int
+	CacheCreation5mTokens int
+	CacheCreation1hTokens int
 	// Cache telemetry state (session-scoped, not reset between turns)
 	cacheCapable    bool // true once any response has cache tokens > 0
 	cacheMissStreak int  // consecutive non-first turns with 0 cache reads
@@ -247,16 +249,19 @@ type TurnUsage struct {
 // Add accumulates usage from a single LLM response into the turn totals
 // and updates cache telemetry state.
 func (u *TurnUsage) Add(r client.Usage) {
-	u.InputTokens += r.InputTokens
-	u.OutputTokens += r.OutputTokens
-	u.TotalTokens += r.TotalTokens
-	u.CostUSD += r.CostUSD
-	u.CacheReadTokens += r.CacheReadTokens
-	u.CacheCreationTokens += r.CacheCreationTokens
-	u.LLMCalls++
+	delta := LLMUsageDelta(r, "")
+	u.InputTokens += delta.InputTokens
+	u.OutputTokens += delta.OutputTokens
+	u.TotalTokens += delta.TotalTokens
+	u.CostUSD += delta.CostUSD
+	u.CacheReadTokens += delta.CacheReadTokens
+	u.CacheCreationTokens += delta.CacheCreationTokens
+	u.CacheCreation5mTokens += delta.CacheCreation5mTokens
+	u.CacheCreation1hTokens += delta.CacheCreation1hTokens
+	u.LLMCalls += delta.LLMCalls
 
 	// Cache telemetry: track capability and miss streaks
-	if r.CacheCreationTokens > 0 || r.CacheReadTokens > 0 {
+	if delta.CacheCreationTokens > 0 || delta.CacheReadTokens > 0 {
 		u.cacheCapable = true
 	}
 	if !u.cacheCapable {
@@ -268,14 +273,27 @@ func (u *TurnUsage) Add(r client.Usage) {
 		return
 	}
 
-	if r.CacheReadTokens > 0 {
+	if delta.CacheReadTokens > 0 {
 		u.cacheMissStreak = 0
 	} else {
 		u.cacheMissStreak++
 		if u.cacheMissStreak >= 3 {
-			fmt.Fprintf(os.Stderr, "[agent] cache miss streak: %d consecutive turns with 0 cache reads (input_tokens=%d)\n", u.cacheMissStreak, r.InputTokens)
+			fmt.Fprintf(os.Stderr, "[agent] cache miss streak: %d consecutive turns with 0 cache reads (input_tokens=%d)\n", u.cacheMissStreak, delta.InputTokens)
 		}
 	}
+}
+
+func (a *AgentLoop) reportLLMUsage(u client.Usage, model string) {
+	if a.handler == nil {
+		return
+	}
+	delta := LLMUsageDelta(u, model)
+	if delta.TotalTokens == 0 && delta.CostUSD == 0 &&
+		delta.CacheReadTokens == 0 && delta.CacheCreationTokens == 0 &&
+		delta.CacheCreation5mTokens == 0 && delta.CacheCreation1hTokens == 0 {
+		return
+	}
+	a.handler.OnUsage(delta)
 }
 
 type EventHandler interface {
@@ -867,11 +885,16 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		persona = a.agentBasePrompt
 	}
 	basePrompt := persona + coreOperationalRules + contrastExamplesCore
+	usage := &TurnUsage{}
+	reportHelperUsage := func(u client.Usage, model string) {
+		usage.Add(u)
+		a.reportLLMUsage(u, model)
+	}
 
 	// Memory consolidation: merge auto-*.md detail files when accumulated.
 	// Runs at most once per 7 days, only when ≥12 detail files exist.
 	if a.memoryDir != "" {
-		if gcErr := ctxwin.ConsolidateMemory(ctx, a.client, a.memoryDir); gcErr != nil {
+		if gcErr := ctxwin.ConsolidateMemoryWithUsage(ctx, a.client, a.memoryDir, reportHelperUsage); gcErr != nil {
 			fmt.Fprintf(os.Stderr, "[context] memory consolidation failed: %v\n", gcErr)
 		}
 	}
@@ -1130,7 +1153,6 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	// stampMessage records the creation time for the message at the current end
 	// of the messages slice. Call immediately after appending any message.
 	stampMessage := func() { msgTimestamps[len(messages)-1] = time.Now() }
-	usage := &TurnUsage{}
 
 	// Read tracker: enforces read-before-edit for file_edit/file_write
 	readTracker := NewReadTracker()
@@ -1260,18 +1282,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			return "", err
 		}
 		usage.Add(finalResp.Usage)
-		if a.handler != nil && (finalResp.Usage.InputTokens > 0 || finalResp.Usage.OutputTokens > 0) {
-			a.handler.OnUsage(TurnUsage{
-				InputTokens:         finalResp.Usage.InputTokens,
-				OutputTokens:        finalResp.Usage.OutputTokens,
-				TotalTokens:         finalResp.Usage.TotalTokens,
-				CostUSD:             finalResp.Usage.CostUSD,
-				CacheReadTokens:     finalResp.Usage.CacheReadTokens,
-				CacheCreationTokens: finalResp.Usage.CacheCreationTokens,
-				LLMCalls:            1,
-				Model:               finalResp.Model,
-			})
-		}
+		a.reportLLMUsage(finalResp.Usage, finalResp.Model)
 
 		text := strings.TrimSpace(finalResp.OutputText)
 		if text == "" {
@@ -1445,7 +1456,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 					// before messages are discarded by compaction.
 					if a.memoryDir != "" {
 						restoreLLM := a.tracker.EnterTransient(PhaseAwaitingLLM)
-						pErr := ctxwin.PersistLearnings(ctx, a.client, messages, a.memoryDir)
+						pErr := ctxwin.PersistLearningsWithUsage(ctx, a.client, messages, a.memoryDir, reportHelperUsage)
 						restoreLLM()
 						if pErr != nil {
 							fmt.Fprintf(os.Stderr, "[context] persist learnings failed: %v\n", pErr)
@@ -1455,7 +1466,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 					}
 
 					restoreLLM := a.tracker.EnterTransient(PhaseAwaitingLLM)
-					summary, sumErr := ctxwin.GenerateSummary(ctx, a.client, messages)
+					summary, sumErr := ctxwin.GenerateSummaryWithUsage(ctx, a.client, messages, reportHelperUsage)
 					restoreLLM()
 					if sumErr != nil {
 						summaryFailures++
@@ -1601,7 +1612,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				// Write-before-compact: persist durable learnings before discarding history.
 				if a.memoryDir != "" {
 					restoreLLM := a.tracker.EnterTransient(PhaseAwaitingLLM)
-					pErr := ctxwin.PersistLearnings(ctx, a.client, messages, a.memoryDir)
+					pErr := ctxwin.PersistLearningsWithUsage(ctx, a.client, messages, a.memoryDir, reportHelperUsage)
 					restoreLLM()
 					if pErr != nil {
 						fmt.Fprintf(os.Stderr, "[context] reactive persist learnings failed: %v\n", pErr)
@@ -1612,9 +1623,9 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				nextSummary := strings.TrimSpace(compactionSummary)
 
 				softMessages := cloneMessages(messages)
-				compressOldToolResults(ctx, softMessages, compressAfter, maxResultChars, a.client)
+				compressOldToolResultsWithUsage(ctx, softMessages, compressAfter, maxResultChars, a.client, reportHelperUsage)
 				restoreLLM := a.tracker.EnterTransient(PhaseAwaitingLLM)
-				summary, sumErr := ctxwin.GenerateSummary(ctx, a.client, reactiveSummaryInput(softMessages, nextSummary))
+				summary, sumErr := ctxwin.GenerateSummaryWithUsage(ctx, a.client, reactiveSummaryInput(softMessages, nextSummary), reportHelperUsage)
 				restoreLLM()
 				if sumErr != nil {
 					if nextSummary != "" {
@@ -1633,7 +1644,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 					compressOldToolResults(ctx, emergencyMessages, 1, 100, nil)
 
 					restoreLLM := a.tracker.EnterTransient(PhaseAwaitingLLM)
-					summary, sumErr = ctxwin.GenerateSummary(ctx, a.client, reactiveSummaryInput(emergencyMessages, nextSummary))
+					summary, sumErr = ctxwin.GenerateSummaryWithUsage(ctx, a.client, reactiveSummaryInput(emergencyMessages, nextSummary), reportHelperUsage)
 					restoreLLM()
 					if sumErr != nil {
 						if nextSummary != "" {
@@ -1752,38 +1763,28 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			}
 		}
 
-		usage.Add(resp.Usage)
+		normalizedUsage := resp.Usage.Normalized()
+		usage.Add(normalizedUsage)
 		// Emit incremental usage delta to handler for accumulation/persistence.
 		// Handler sums these into session totals. Model is carried so the last-seen
 		// model wins at the session level (handler decides its own precedence).
-		if a.handler != nil && (resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0) {
-			a.handler.OnUsage(TurnUsage{
-				InputTokens:         resp.Usage.InputTokens,
-				OutputTokens:        resp.Usage.OutputTokens,
-				TotalTokens:         resp.Usage.TotalTokens,
-				CostUSD:             resp.Usage.CostUSD,
-				CacheReadTokens:     resp.Usage.CacheReadTokens,
-				CacheCreationTokens: resp.Usage.CacheCreationTokens,
-				LLMCalls:            1,
-				Model:               resp.Model,
-			})
-		}
+		a.reportLLMUsage(normalizedUsage, resp.Model)
 		// Log cache metrics for debugging prompt cache effectiveness
-		if resp.Usage.CacheReadTokens > 0 || resp.Usage.CacheCreationTokens > 0 {
+		if normalizedUsage.CacheReadTokens > 0 || normalizedUsage.CacheCreationTokens > 0 {
 			// Cache hit ratio: cache_read / total_prompt_tokens.
 			// Anthropic: input_tokens excludes cached tokens; they're additive.
 			// Total prompt = input + cache_read + cache_creation.
 			ratio := float64(0)
-			totalPrompt := resp.Usage.InputTokens + resp.Usage.CacheReadTokens + resp.Usage.CacheCreationTokens
+			totalPrompt := normalizedUsage.InputTokens + normalizedUsage.CacheReadTokens + normalizedUsage.CacheCreationTokens
 			if totalPrompt > 0 {
-				ratio = float64(resp.Usage.CacheReadTokens) / float64(totalPrompt) * 100
+				ratio = float64(normalizedUsage.CacheReadTokens) / float64(totalPrompt) * 100
 			}
 			fmt.Fprintf(os.Stderr, "[agent] cache: read=%d creation=%d input=%d ratio=%.1f%%\n",
-				resp.Usage.CacheReadTokens, resp.Usage.CacheCreationTokens,
-				resp.Usage.InputTokens, ratio)
+				normalizedUsage.CacheReadTokens, normalizedUsage.CacheCreationTokens,
+				normalizedUsage.InputTokens, ratio)
 		}
-		lastInputTokens = resp.Usage.InputTokens
-		lastOutputTokens = resp.Usage.OutputTokens
+		lastInputTokens = normalizedUsage.InputTokens
+		lastOutputTokens = normalizedUsage.OutputTokens
 		if resp.Model != "" {
 			usage.Model = resp.Model
 		}
@@ -3117,6 +3118,10 @@ func isTier2FloorTool(name string) bool {
 }
 
 func compressOldToolResults(ctx context.Context, messages []client.Message, keepRecent int, maxChars int, completer ctxwin.Completer) {
+	compressOldToolResultsWithUsage(ctx, messages, keepRecent, maxChars, completer, nil)
+}
+
+func compressOldToolResultsWithUsage(ctx context.Context, messages []client.Message, keepRecent int, maxChars int, completer ctxwin.Completer, report ctxwin.UsageReporter) {
 	const tier1Threshold = 20
 
 	// Pre-scan: build tool_use_id → name+args map for tier-1 metadata.
@@ -3174,7 +3179,7 @@ func compressOldToolResults(ctx context.Context, messages []client.Message, keep
 			}
 		} else if distFromEnd >= keepRecent {
 			// Tier 2: LLM summary for large results, else head+tail truncation.
-			messages[idx].Content = compressTier2(ctx, msg, maxChars, completer, toolCallMap, &mcCount)
+			messages[idx].Content = compressTier2(ctx, msg, maxChars, completer, toolCallMap, &mcCount, report)
 		}
 	}
 }
@@ -3219,9 +3224,9 @@ func hasTier2FloorTool(msg client.Message, toolCallMap map[string]toolCallInfo) 
 // For results > microCompactMinChars that haven't been summarized yet and the
 // per-pass cap hasn't been hit, it tries LLM summarization. Otherwise falls
 // back to mechanical head+tail truncation.
-func compressTier2(ctx context.Context, msg client.Message, maxChars int, completer ctxwin.Completer, toolCallMap map[string]toolCallInfo, mcCount *int) client.MessageContent {
+func compressTier2(ctx context.Context, msg client.Message, maxChars int, completer ctxwin.Completer, toolCallMap map[string]toolCallInfo, mcCount *int, report ctxwin.UsageReporter) client.MessageContent {
 	if msg.Role == "user" && msg.Content.HasBlocks() {
-		return compressTier2Blocks(ctx, msg.Content, maxChars, completer, toolCallMap, mcCount)
+		return compressTier2Blocks(ctx, msg.Content, maxChars, completer, toolCallMap, mcCount, report)
 	}
 	// XML text format
 	text := msg.Content.Text()
@@ -3233,7 +3238,7 @@ func compressTier2(ctx context.Context, msg client.Message, maxChars int, comple
 }
 
 // compressTier2Blocks handles native tool_result blocks for Tier 2.
-func compressTier2Blocks(ctx context.Context, mc client.MessageContent, maxChars int, completer ctxwin.Completer, toolCallMap map[string]toolCallInfo, mcCount *int) client.MessageContent {
+func compressTier2Blocks(ctx context.Context, mc client.MessageContent, maxChars int, completer ctxwin.Completer, toolCallMap map[string]toolCallInfo, mcCount *int, report ctxwin.UsageReporter) client.MessageContent {
 	blocks := mc.Blocks()
 	var newBlocks []client.ContentBlock
 	for _, b := range blocks {
@@ -3252,7 +3257,7 @@ func compressTier2Blocks(ctx context.Context, mc client.MessageContent, maxChars
 		}
 		if completer != nil && charLen > microCompactMinChars && !isMicroCompacted(content) && *mcCount < microCompactMaxPerPass && !isMicroCompactSkipTool(toolName) {
 			*mcCount++ // count attempts, not just successes — caps latency
-			if summary, ok := microCompactResult(ctx, completer, toolName, content); ok {
+			if summary, ok := microCompactResultWithUsage(ctx, completer, toolName, content, report); ok {
 				b.ToolContent = summary
 				newBlocks = append(newBlocks, b)
 				continue

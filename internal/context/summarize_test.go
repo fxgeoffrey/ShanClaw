@@ -157,6 +157,42 @@ func TestGenerateSummary(t *testing.T) {
 	})
 }
 
+func TestGenerateSummaryWithUsageReportsUsage(t *testing.T) {
+	mock := &mockCompleter{
+		response: &client.CompletionResponse{
+			OutputText: "Summary of conversation.",
+			Model:      "claude-small",
+			Usage: client.Usage{
+				InputTokens:           120,
+				OutputTokens:          40,
+				CacheCreation5mTokens: 30,
+				CacheCreation1hTokens: 70,
+			},
+		},
+	}
+
+	var reported client.Usage
+	var model string
+	summary, err := GenerateSummaryWithUsage(context.Background(), mock, []client.Message{
+		{Role: "user", Content: client.NewTextContent("hello")},
+	}, func(u client.Usage, m string) {
+		reported = u
+		model = m
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if summary != "Summary of conversation." {
+		t.Fatalf("unexpected summary: %q", summary)
+	}
+	if model != "claude-small" {
+		t.Fatalf("expected model claude-small, got %q", model)
+	}
+	if reported.CacheCreation5mTokens != 30 || reported.CacheCreation1hTokens != 70 {
+		t.Fatalf("expected split cache creation 30/70, got %d/%d", reported.CacheCreation5mTokens, reported.CacheCreation1hTokens)
+	}
+}
+
 func TestExtractSummary(t *testing.T) {
 	tests := []struct {
 		name     string

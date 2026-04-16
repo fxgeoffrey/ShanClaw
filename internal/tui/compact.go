@@ -8,6 +8,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/Kocoro-lab/ShanClaw/internal/agent"
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
 	ctxwin "github.com/Kocoro-lab/ShanClaw/internal/context"
 	"github.com/Kocoro-lab/ShanClaw/internal/session"
@@ -36,13 +37,17 @@ func (m *Model) runCompact(customInstructions string) func() compactDoneMsg {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
+		var usage agent.UsageAccumulator
+		reportUsage := func(u client.Usage, model string) {
+			usage.Add(agent.LLMUsageDelta(u, model))
+		}
 
 		// Step 1: persist learnings to MEMORY.md
 		memoryDir := m.shannonDir + "/memory"
 		if m.agentOverride != nil {
 			memoryDir = fmt.Sprintf("%s/agents/%s", m.shannonDir, m.agentOverride.Name)
 		}
-		_ = ctxwin.PersistLearnings(ctx, m.gateway, messages, memoryDir)
+		_ = ctxwin.PersistLearningsWithUsage(ctx, m.gateway, messages, memoryDir, reportUsage)
 
 		// Step 2: generate summary
 		msgsForSummary := messages
@@ -53,7 +58,7 @@ func (m *Model) runCompact(customInstructions string) func() compactDoneMsg {
 			}
 			msgsForSummary = append([]client.Message{hint}, messages...)
 		}
-		summary, err := ctxwin.GenerateSummary(ctx, m.gateway, msgsForSummary)
+		summary, err := ctxwin.GenerateSummaryWithUsage(ctx, m.gateway, msgsForSummary, reportUsage)
 		if err != nil {
 			return compactDoneMsg{err: fmt.Errorf("summarization failed: %w", err)}
 		}
@@ -85,6 +90,14 @@ func (m *Model) runCompact(customInstructions string) func() compactDoneMsg {
 		// Update session
 		sess.Messages = shaped
 		sess.MessageMeta = newMeta
+		acc := usage.Snapshot()
+		if llm := acc.LLM; llm.LLMCalls > 0 || llm.TotalTokens > 0 || llm.CostUSD > 0 {
+			m.sessions.AddUsage(sess.ID, session.UsageFromAccumulated(
+				llm.LLMCalls, llm.InputTokens, llm.OutputTokens, llm.TotalTokens,
+				llm.CostUSD, llm.CacheReadTokens, llm.CacheCreationTokens, llm.CacheCreation5mTokens, llm.CacheCreation1hTokens, llm.Model,
+				acc.ToolCalls, acc.ToolCostUSD,
+			))
+		}
 		m.sessions.Save()
 
 		afterTokens := ctxwin.EstimateTokens(shaped)

@@ -55,6 +55,12 @@ Result:
 // summary of a tool result. Returns ("", false) if summarization fails or is
 // skipped, signaling the caller to fall back to mechanical truncation.
 func microCompactResult(ctx context.Context, c ctxwin.Completer, toolName, content string) (string, bool) {
+	return microCompactResultWithUsage(ctx, c, toolName, content, nil)
+}
+
+// microCompactResultWithUsage is microCompactResult plus an optional usage
+// callback for callers that need helper-model accounting.
+func microCompactResultWithUsage(ctx context.Context, c ctxwin.Completer, toolName, content string, report ctxwin.UsageReporter) (string, bool) {
 	if c == nil {
 		return "", false
 	}
@@ -71,6 +77,9 @@ func microCompactResult(ctx context.Context, c ctxwin.Completer, toolName, conte
 	})
 	if err != nil || resp.OutputText == "" {
 		return "", false
+	}
+	if report != nil {
+		report(resp.Usage, resp.Model)
 	}
 
 	summary := strings.TrimSpace(resp.OutputText)

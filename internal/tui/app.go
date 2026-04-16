@@ -183,10 +183,10 @@ type Model struct {
 	markdownCacheMu sync.RWMutex
 	markdownCache   map[string]string
 	// Input history
-	inputHistory []string // past submitted inputs (oldest first)
-	historyIdx   int      // -1 = current input, 0..len-1 = history position (from end)
-	historySaved string   // current input saved when entering history
-	lastEscTime  time.Time // for double-escape detection
+	inputHistory        []string        // past submitted inputs (oldest first)
+	historyIdx          int             // -1 = current input, 0..len-1 = history position (from end)
+	historySaved        string          // current input saved when entering history
+	lastEscTime         time.Time       // for double-escape detection
 	sessionAllowed      map[string]bool // tools always-allowed for this session
 	pendingApprovalTool string          // tool name awaiting approval
 	rerenderPending     bool            // true while rerenderOutput sequence is in flight
@@ -1409,7 +1409,7 @@ func (m *Model) runAgentLoop(query string, history []client.Message) tea.Cmd {
 				if llm.LLMCalls > 0 || acc.ToolCalls > 0 || llm.InputTokens > 0 {
 					m.sessions.AddUsage(sess.ID, session.UsageFromAccumulated(
 						llm.LLMCalls, llm.InputTokens, llm.OutputTokens, llm.TotalTokens,
-						llm.CostUSD, llm.CacheReadTokens, llm.CacheCreationTokens, llm.Model,
+						llm.CostUSD, llm.CacheReadTokens, llm.CacheCreationTokens, llm.CacheCreation5mTokens, llm.CacheCreation1hTokens, llm.Model,
 						acc.ToolCalls, acc.ToolCostUSD,
 					))
 				}

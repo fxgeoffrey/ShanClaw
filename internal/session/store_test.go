@@ -139,6 +139,48 @@ func TestStore_SaveLoadWithImageContent(t *testing.T) {
 	}
 }
 
+func TestStore_SaveLoadWithUsageSummary(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+	defer store.Close()
+
+	sess := &Session{
+		ID:    "usage-test",
+		Title: "Usage test",
+		CWD:   "/tmp",
+		Usage: &UsageSummary{
+			LLMCalls:              3,
+			InputTokens:           150,
+			OutputTokens:          45,
+			TotalTokens:           195,
+			CostUSD:               0.67,
+			CacheReadTokens:       80,
+			CacheCreationTokens:   300,
+			CacheCreation5mTokens: 100,
+			CacheCreation1hTokens: 200,
+			Model:                 "claude-test",
+		},
+	}
+
+	if err := store.Save(sess); err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+
+	loaded, err := store.Load("usage-test")
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	if loaded.Usage == nil {
+		t.Fatal("expected usage summary to be loaded")
+	}
+	if loaded.Usage.CacheCreationTokens != 300 {
+		t.Fatalf("expected legacy cache creation total 300, got %d", loaded.Usage.CacheCreationTokens)
+	}
+	if loaded.Usage.CacheCreation5mTokens != 100 || loaded.Usage.CacheCreation1hTokens != 200 {
+		t.Fatalf("expected split cache creation 100/200, got %d/%d", loaded.Usage.CacheCreation5mTokens, loaded.Usage.CacheCreation1hTokens)
+	}
+}
+
 func TestStore_SearchIntegration(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir) // auto-creates index + rebuilds (nothing to rebuild)

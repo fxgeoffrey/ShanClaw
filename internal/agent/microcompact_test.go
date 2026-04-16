@@ -38,6 +38,34 @@ func TestMicroCompact_LargeResultGetsSummarized(t *testing.T) {
 	}
 }
 
+func TestMicroCompact_WithUsageReportsUsage(t *testing.T) {
+	mc := &mockCompleter{output: "Summarized result"}
+	called := false
+	var reported client.Usage
+	var model string
+
+	summary, ok := microCompactResultWithUsage(context.Background(), mc, "bash", strings.Repeat("log\n", 600), func(u client.Usage, m string) {
+		called = true
+		reported = u
+		model = m
+	})
+	if !ok {
+		t.Fatal("expected micro-compact to succeed")
+	}
+	if summary == "" {
+		t.Fatal("expected non-empty summary")
+	}
+	if !called {
+		t.Fatal("expected usage callback to be invoked")
+	}
+	if model != "" {
+		t.Fatalf("expected empty model from mock completer, got %q", model)
+	}
+	if reported != (client.Usage{}) {
+		t.Fatalf("expected zero-value usage from mock completer response, got %+v", reported)
+	}
+}
+
 func TestMicroCompact_NilCompleterReturnsFalse(t *testing.T) {
 	_, ok := microCompactResult(context.Background(), nil, "bash", "content")
 	if ok {

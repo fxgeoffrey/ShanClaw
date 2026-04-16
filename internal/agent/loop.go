@@ -2164,7 +2164,12 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 								}
 							}
 						}
-						toolSchemas = rebuildSchemas(effTools, baseSchemas, loadedDeferred)
+						// Only rebuild on the legacy path. The tool-ref path already
+						// sent the full schema array with DeferLoading flags up front;
+						// rebuildSchemas would strip those flags.
+						if !a.toolRefSupported {
+							toolSchemas = rebuildSchemas(effTools, baseSchemas, loadedDeferred)
+						}
 						if len(names) > 0 {
 							toolSearchFired = true
 						}

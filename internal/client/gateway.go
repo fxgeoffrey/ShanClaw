@@ -28,6 +28,8 @@ func cacheDebugLogPath() string {
 	return filepath.Join(home, ".shannon", "logs", "cache-debug.log")
 }
 
+const cacheDebugMaxBytes = 10 * 1024 * 1024 // 10 MB
+
 func appendCacheDebug(entry map[string]any) {
 	path := cacheDebugLogPath()
 	if path == "" {
@@ -38,12 +40,35 @@ func appendCacheDebug(entry map[string]any) {
 		return
 	}
 	data, _ := json.Marshal(entry)
+	// Simple single-file rotation: if the log exceeds the cap, truncate it
+	// to the most recent half. Best-effort — never block the request path.
+	if info, err := os.Stat(path); err == nil && info.Size() > cacheDebugMaxBytes {
+		_ = rotateCacheDebugLog(path, info.Size())
+	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
 		return
 	}
 	defer f.Close()
 	_, _ = f.Write(append(data, '\n'))
+}
+
+// rotateCacheDebugLog keeps the last half of the log file. Best-effort, no
+// error propagation — a failed rotation just means the file stays large until
+// the next append retries.
+func rotateCacheDebugLog(path string, size int64) error {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	// Keep the second half (most recent entries). Find the first newline
+	// after the midpoint so we don't split a JSON line.
+	mid := len(content) / 2
+	idx := bytes.IndexByte(content[mid:], '\n')
+	if idx < 0 {
+		return nil // single giant line — don't touch
+	}
+	return os.WriteFile(path, content[mid+idx+1:], 0644)
 }
 
 // logCacheDebug appends a "dir":"req" JSON line containing content hashes

@@ -182,6 +182,10 @@ Scalars override, lists merge+dedup, structs merge field-by-field. MCP server en
 - Audit log: `~/.shannon/logs/audit.log`
 - Schedule logs: `~/.shannon/logs/schedule-<id>.log`
 
+### Prompt Cache
+
+Source-routed TTL: channels/TUI get 1h, one-shot/subagent paths get 5m (fail-cheap default). `cache_source` tags every LLM call and propagates on the wire. `normalizeToolInput` canonicalizes nested JSON for byte stability. See `docs/cache-strategy.md` for breakpoint layout, source table, env-var overrides, and maintenance playbook.
+
 ### Context Management
 
 - **Proactive compaction**: persist learnings, then generate a two-phase summary, then shape history when nearing the context window.

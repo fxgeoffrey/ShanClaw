@@ -184,6 +184,12 @@ Scalars override, lists merge+dedup, structs field-level merge. MCP server env v
 ### Build Tags
 `internal/schedule/launchd_darwin.go` uses `//go:build darwin`. `launchd_stub.go` provides no-op stubs for non-darwin. Tests that touch launchctl go in `_darwin_test.go`.
 
+### Prompt Cache
+See `docs/cache-strategy.md` for the authoritative design (4-breakpoint allocation, source→TTL routing, byte stability, session_id propagation, env-var overrides). One-line invariants:
+- `cache_source` tags every LLM call; `_ttl_block(request)` routes 1h for channel/TUI, 5m for one-shot/subagent (fail cheap).
+- `SHANNON_FORCE_TTL=off|5m|1h` overrides for operator debug / A-B.
+- `normalizeToolInput` in `gateway.go` canonicalizes nested JSON key ordering so cross-turn `system_h` / tool_use-input stays byte-stable.
+
 ### Context Management
 - **Proactive compaction**: `PersistLearnings` → `GenerateSummary` (two-phase: `<analysis>` scratchpad → `<summary>`) → `ShapeHistory` at 85% context window.
 - **Reactive compaction**: On context-length error, emergency compress + single retry. `reactiveCompacted` flag prevents loops.

@@ -1268,14 +1268,16 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		usage.Add(finalResp.Usage)
 		if a.handler != nil && (finalResp.Usage.InputTokens > 0 || finalResp.Usage.OutputTokens > 0) {
 			a.handler.OnUsage(TurnUsage{
-				InputTokens:         finalResp.Usage.InputTokens,
-				OutputTokens:        finalResp.Usage.OutputTokens,
-				TotalTokens:         finalResp.Usage.TotalTokens,
-				CostUSD:             finalResp.Usage.CostUSD,
-				CacheReadTokens:     finalResp.Usage.CacheReadTokens,
-				CacheCreationTokens: finalResp.Usage.CacheCreationTokens,
-				LLMCalls:            1,
-				Model:               finalResp.Model,
+				InputTokens:           finalResp.Usage.InputTokens,
+				OutputTokens:          finalResp.Usage.OutputTokens,
+				TotalTokens:           finalResp.Usage.TotalTokens,
+				CostUSD:               finalResp.Usage.CostUSD,
+				CacheReadTokens:       finalResp.Usage.CacheReadTokens,
+				CacheCreationTokens:   finalResp.Usage.CacheCreationTokens,
+				CacheCreation5mTokens: finalResp.Usage.CacheCreation5mTokens,
+				CacheCreation1hTokens: finalResp.Usage.CacheCreation1hTokens,
+				LLMCalls:              1,
+				Model:                 finalResp.Model,
 			})
 		}
 
@@ -1769,14 +1771,16 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		// model wins at the session level (handler decides its own precedence).
 		if a.handler != nil && (resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0) {
 			a.handler.OnUsage(TurnUsage{
-				InputTokens:         resp.Usage.InputTokens,
-				OutputTokens:        resp.Usage.OutputTokens,
-				TotalTokens:         resp.Usage.TotalTokens,
-				CostUSD:             resp.Usage.CostUSD,
-				CacheReadTokens:     resp.Usage.CacheReadTokens,
-				CacheCreationTokens: resp.Usage.CacheCreationTokens,
-				LLMCalls:            1,
-				Model:               resp.Model,
+				InputTokens:           resp.Usage.InputTokens,
+				OutputTokens:          resp.Usage.OutputTokens,
+				TotalTokens:           resp.Usage.TotalTokens,
+				CostUSD:               resp.Usage.CostUSD,
+				CacheReadTokens:       resp.Usage.CacheReadTokens,
+				CacheCreationTokens:   resp.Usage.CacheCreationTokens,
+				CacheCreation5mTokens: resp.Usage.CacheCreation5mTokens,
+				CacheCreation1hTokens: resp.Usage.CacheCreation1hTokens,
+				LLMCalls:              1,
+				Model:                 resp.Model,
 			})
 		}
 		// Log cache metrics for debugging prompt cache effectiveness
@@ -3270,13 +3274,15 @@ func compressTier2Blocks(ctx context.Context, mc client.MessageContent, maxChars
 			*mcCount++ // count attempts, not just successes — caps latency
 			if summary, ok, mcUsage := microCompactResult(ctx, completer, toolName, content); ok {
 				EmitUsage(ctx, TurnUsage{
-					InputTokens:         mcUsage.InputTokens,
-					OutputTokens:        mcUsage.OutputTokens,
-					TotalTokens:         mcUsage.TotalTokens,
-					CostUSD:             mcUsage.CostUSD,
-					CacheReadTokens:     mcUsage.CacheReadTokens,
-					CacheCreationTokens: mcUsage.CacheCreationTokens,
-					LLMCalls:            1,
+					InputTokens:           mcUsage.InputTokens,
+					OutputTokens:          mcUsage.OutputTokens,
+					TotalTokens:           mcUsage.TotalTokens,
+					CostUSD:               mcUsage.CostUSD,
+					CacheReadTokens:       mcUsage.CacheReadTokens,
+					CacheCreationTokens:   mcUsage.CacheCreationTokens,
+					CacheCreation5mTokens: mcUsage.CacheCreation5mTokens,
+					CacheCreation1hTokens: mcUsage.CacheCreation1hTokens,
+					LLMCalls:              1,
 				})
 				b.ToolContent = summary
 				newBlocks = append(newBlocks, b)

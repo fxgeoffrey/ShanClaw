@@ -54,7 +54,7 @@ const (
 
 // defaultPersona is the identity line for the default (non-overridden) agent.
 // Named agents replace this with their AGENT.md content.
-const defaultPersona = `You are Shannon, an AI assistant running in a CLI terminal on the user's macOS computer. You have both local tools (file ops, shell, GUI control) and remote server tools (web search, research, analytics, multi-agent workflows).`
+const defaultPersona = `You are Shannon, an AI assistant running on the Kocoro platform on the user's macOS computer. You have both local tools (file ops, shell, GUI control) and remote server tools (web search, research, analytics, multi-agent workflows). For platform setup and configuration (creating agents, installing skills, managing settings, connecting external services), use the kocoro skill.`
 
 // coreOperationalRules contains behavioral constraints that apply to ALL agents
 // (default and named). These are non-negotiable and must never be dropped.
@@ -993,6 +993,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	if !deferredMode {
 		effTools = a.tools
 		toolSchemas = effTools.SortedSchemas()
+		baseSchemas = toolSchemas // needed by applySkillFilter's rebuild path
 		toolNames = liveToolNames(toolSchemas)
 	}
 
@@ -1212,7 +1213,29 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		// Denied-call blocking: track tool+args denied by the user this turn
 		// to prevent re-prompting for the same call.
 		deniedCalls = make(map[string]bool)
+
+		// Skill tool filter: when a skill declares allowed-tools, this map
+		// persists across iterations so rebuildSchemas and subsequent use_skill
+		// calls rebuild from the full set, not the already-filtered set.
+		activeSkillFilter map[string]bool
 	)
+
+	// applySkillFilter narrows toolSchemas to only the tools in activeSkillFilter.
+	// Always rebuilds from the current full toolSchemas (post-rebuildSchemas) so
+	// that deferred tool loading doesn't erase the restriction, and a second
+	// use_skill with different allowed-tools replaces rather than intersects.
+	applySkillFilter := func(schemas []client.Tool) []client.Tool {
+		if activeSkillFilter == nil {
+			return schemas
+		}
+		filtered := make([]client.Tool, 0, len(activeSkillFilter))
+		for _, s := range schemas {
+			if activeSkillFilter[s.Function.Name] {
+				filtered = append(filtered, s)
+			}
+		}
+		return filtered
+	}
 
 	setRunStatus := func(code runstatus.Code, partial bool) {
 		a.lastRunStatus = RunStatus{
@@ -2162,6 +2185,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 						// rebuildSchemas would strip those flags.
 						if !a.toolRefSupported {
 							toolSchemas = rebuildSchemas(effTools, baseSchemas, loadedDeferred)
+							toolSchemas = applySkillFilter(toolSchemas)
 						}
 						if len(names) > 0 {
 							toolSearchFired = true
@@ -2334,6 +2358,31 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			}
 			// No break on ForceStop — continue processing remaining results into
 			// context so the final LLM call has complete information.
+		}
+
+		// Skill tool filter: when use_skill is called, update the filter.
+		// - Skill with allowed-tools: restrict to those tools + use_skill.
+		// - Skill without allowed-tools: clear any prior restriction.
+		// Always rebuild from baseSchemas so deferred loading can't erase
+		// the restriction, and a second use_skill replaces (not intersects).
+		for _, ac := range approved {
+			er := execResults[ac.index]
+			if ac.fc.Name == "use_skill" && !er.result.IsError {
+				if len(er.result.SkillToolFilter) > 0 {
+					activeSkillFilter = make(map[string]bool, len(er.result.SkillToolFilter)+1)
+					for _, name := range er.result.SkillToolFilter {
+						activeSkillFilter[name] = true
+					}
+					activeSkillFilter["use_skill"] = true
+				} else {
+					// Unrestricted skill: clear any prior filter.
+					activeSkillFilter = nil
+				}
+				// Rebuild from full set (baseSchemas + loaded deferred), then filter.
+				fullSchemas := rebuildSchemas(effTools, baseSchemas, loadedDeferred)
+				toolSchemas = applySkillFilter(fullSchemas)
+				break
+			}
 		}
 
 		// Append tool result messages to context

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"path/filepath"
 	"time"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/agent"
@@ -13,6 +12,7 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/config"
 	"github.com/Kocoro-lab/ShanClaw/internal/mcp"
 	"github.com/Kocoro-lab/ShanClaw/internal/schedule"
+	"path/filepath"
 	"github.com/Kocoro-lab/ShanClaw/internal/session"
 	"github.com/Kocoro-lab/ShanClaw/internal/skills"
 )
@@ -62,7 +62,9 @@ func RegisterLocalTools(cfg *config.Config) (*agent.ToolRegistry, *[]*skills.Ski
 	reg.Register(&ComputerTool{client: axClient})
 	reg.Register(&WaitTool{client: axClient})
 
-	// Schedule tools
+	// Schedule tools (direct access for TUI/one-shot where daemon API is unavailable).
+	// In daemon mode, kocoro skill routes schedule operations through the HTTP API
+	// for audit logging and confirm gates; these tools serve as fallback.
 	if shanDir := config.ShannonDir(); shanDir != "" {
 		schMgr := schedule.NewManager(filepath.Join(shanDir, "schedules.json"))
 		for _, tool := range NewScheduleTools(schMgr) {

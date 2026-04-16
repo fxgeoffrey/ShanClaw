@@ -70,6 +70,9 @@ var rootCmd = &cobra.Command{
 		if err := agents.EnsureBuiltins(filepath.Join(config.ShannonDir(), "agents"), Version); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to sync builtin agents: %v\n", err)
 		}
+		if err := skills.EnsureBuiltinSkills(config.ShannonDir()); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to sync builtin skills: %v\n", err)
+		}
 
 		var agentOverride *agents.Agent
 		if agentName != "" {

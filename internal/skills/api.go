@@ -120,6 +120,27 @@ func IsDownloadable(name string) bool {
 	return false
 }
 
+// builtinSkills are skills that are auto-installed on startup.
+// Unlike other bundled skills (which require manual installation),
+// these are always available without user action.
+var builtinSkills = []string{"kocoro"}
+
+// EnsureBuiltinSkills auto-installs builtin skills from the embedded binary
+// to the global skills directory. Idempotent — skips if already installed.
+// Called at daemon/TUI startup alongside agents.EnsureBuiltins.
+func EnsureBuiltinSkills(shannonDir string) error {
+	for _, name := range builtinSkills {
+		destDir := filepath.Join(shannonDir, "skills", name)
+		if _, err := os.Stat(filepath.Join(destDir, "SKILL.md")); err == nil {
+			continue // already installed
+		}
+		if err := installFromBundled(shannonDir, name, destDir); err != nil {
+			return fmt.Errorf("install builtin skill %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
 // InstallSkill installs a downloadable skill to the global skills directory
 // (~/.shannon/skills/<name>/). First checks if the skill is available in the
 // embedded bundled directory (fast, no network). Falls back to fetching from

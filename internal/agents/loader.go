@@ -346,7 +346,8 @@ func loadAgentCommands(dir string) map[string]string {
 }
 
 // LoadGlobalSkills loads skills from the global skills directory (~/.shannon/skills/).
-// Only installed (global) skills are returned — bundled skills must be explicitly installed first.
+// Only installed (global) skills are returned — bundled skills must be explicitly
+// installed first (except those auto-installed by EnsureBuiltinSkills).
 func LoadGlobalSkills(shannonDir string) ([]*skills.Skill, error) {
 	globalSkillsDir := filepath.Join(shannonDir, "skills")
 	return skills.LoadSkills(

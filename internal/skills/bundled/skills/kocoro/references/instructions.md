@@ -1,0 +1,72 @@
+# Instructions and Rules
+
+## What is this?
+
+Instructions and rules shape how agents behave — their tone, language, formatting preferences, and what they should or shouldn't do. There are five levels that combine together: global instructions, global rules, project instructions, project rules, and local instructions. Lower levels can add to or override higher ones, letting you have general behavior globally and specific behavior per project.
+
+**Instructions** are free-form guidance (like a style guide or persona description). **Rules** are named, discrete policies that can be individually managed (like "always respond in Japanese" or "never suggest deleting files").
+
+## API Endpoints
+
+### Get global instructions
+- Method: GET
+- Path: /instructions
+- Response: `{"content": "# Global Instructions\n\nYou are..."}`
+
+### Update global instructions
+- Method: PUT
+- Path: /instructions
+- Body: `{"content": "# Global Instructions\n\nAlways respond concisely..."}`
+- Response: `{"status": "updated"}`
+- Notes: Replaces the entire global instructions file. Include all content you want to keep.
+
+### List all rules
+- Method: GET
+- Path: /rules
+- Response: `{"rules": [{"name": "respond-in-japanese", "content": "Always respond in Japanese regardless of input language."}]}`
+
+### Get a rule
+- Method: GET
+- Path: /rules/{name}
+- Response: `{"name": "...", "content": "..."}`
+
+### Create or update a rule
+- Method: PUT
+- Path: /rules/{name}
+- Body: `{"content": "Always format code examples with language tags."}`
+- Response: `{"status": "updated", "name": "..."}`
+- Notes: Creates the rule if it doesn't exist, updates it if it does.
+
+### Delete a rule
+- Method: DELETE
+- Path: /rules/{name}?confirm=true
+- Response: `{"status": "deleted"}`
+- Notes: `?confirm=true` required to prevent accidental deletion.
+
+## Common Scenarios
+
+### "Make agents respond in Japanese"
+1. PUT /rules/respond-in-japanese with `{"content": "Always respond in Japanese, regardless of the language the user writes in."}`
+2. All agents immediately use this rule in new conversations.
+
+### "Add a code style rule"
+1. PUT /rules/code-style with `{"content": "When writing code examples: use 2-space indentation, include type annotations in TypeScript, add brief comments for non-obvious logic."}`
+
+### "List current rules to see what's active"
+1. GET /rules → review the list
+
+### "Temporarily disable a rule without deleting it"
+Rules cannot be toggled — to disable, either:
+- DELETE /rules/{name}?confirm=true (removes it permanently from that level)
+- Or move logic to a named rule that you can selectively delete later
+
+### "Add a project-specific instruction"
+Instructions are per-project when set in `.shannon/instructions.md`. To add project-level instructions via the daemon API, use the project-level endpoint if available — or edit `.shannon/instructions.md` directly in the project and call POST /config/reload.
+
+## Safety Notes
+
+- **Changes take effect immediately**: The next conversation the agent has will follow the new instructions. Currently in-progress conversations may not pick up the change until the next turn.
+- **PUT replaces entirely**: PUT /instructions replaces the whole file. Always GET first to see current content before updating.
+- **Instruction conflicts**: If global and project instructions conflict, project instructions take precedence. Rules from all levels are concatenated, not replaced.
+- **Rule naming**: Use descriptive, kebab-case names (e.g., `respond-in-japanese`, `no-file-deletion`). Consider numeric prefixes for ordering if evaluation order matters (e.g., `01-language`, `02-tone`).
+- **Avoid vague rules**: Specific rules are more reliably followed. "Be professional" is vague; "Do not use slang or emojis in responses" is specific.

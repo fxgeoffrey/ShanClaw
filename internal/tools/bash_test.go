@@ -11,6 +11,7 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/config"
 	"github.com/Kocoro-lab/ShanClaw/internal/cwdctx"
 	"github.com/Kocoro-lab/ShanClaw/internal/permissions"
+	"github.com/Kocoro-lab/ShanClaw/internal/skills"
 )
 
 func TestBash_Run(t *testing.T) {
@@ -133,7 +134,7 @@ func TestCloneWithRuntimeConfig_UpdatesBashSettingsWithoutMutatingSource(t *test
 		Tools: config.ToolsConfig{
 			BashMaxOutput: 30000,
 		},
-	})
+	}, nil)
 	defer cleanup()
 
 	cloned := CloneWithRuntimeConfig(reg, &config.Config{
@@ -228,6 +229,106 @@ func TestBash_EmptyCWDDoesNotLeakProcessCWD(t *testing.T) {
 		if !strings.Contains(lsResult.Content, "not") {
 			t.Fatalf("bash could still see sentinel file from process cwd: %s", lsResult.Content)
 		}
+	}
+}
+
+func TestBashTool_NoEnvWithoutActivatedSkills(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bash test requires unix shell")
+	}
+	// Even with a secrets store configured, if no skills are activated,
+	// bash must not leak any secrets into the environment.
+	store := skills.NewSecretsStore(t.TempDir())
+	bash := &BashTool{SecretsStore: store}
+	ctx := skills.WithActivatedSet(context.Background(), skills.NewActivatedSet())
+	result, err := bash.Run(ctx, `{"command": "env | grep -c SKILL_SECRET_KEY || true"}`)
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	// grep -c returns "0" (as text) when no match; we just want to confirm
+	// the command ran and SKILL_SECRET_KEY is not present.
+	if strings.Contains(result.Content, "SKILL_SECRET_KEY=") {
+		t.Errorf("bash must not have SKILL_SECRET_KEY in env, got: %s", result.Content)
+	}
+}
+
+// TestBashTool_InjectsActivatedSkillSecrets is a Keychain integration test.
+// It writes a real secret to the login Keychain and verifies that bash only
+// sees it after the skill has been explicitly activated via ActivatedSet.
+// Opt in with SHANNON_KEYCHAIN_TEST=1 (see secrets_test.go).
+func TestBashTool_InjectsActivatedSkillSecrets(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Keychain integration only on darwin")
+	}
+	if os.Getenv("SHANNON_KEYCHAIN_TEST") != "1" {
+		t.Skip("set SHANNON_KEYCHAIN_TEST=1 to run Keychain integration tests")
+	}
+
+	store := skills.NewSecretsStore(t.TempDir())
+	t.Cleanup(func() { _ = store.Delete("test-bash-env") })
+	if err := store.Set("test-bash-env", map[string]string{"TEST_BASH_SECRET": "secret-xyz"}); err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	bash := &BashTool{SecretsStore: store}
+
+	// Before activation: bash should NOT see the secret.
+	ctx := skills.WithActivatedSet(context.Background(), skills.NewActivatedSet())
+	result, err := bash.Run(ctx, `{"command": "echo \"VAL=${TEST_BASH_SECRET:-UNSET}\""}`)
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if !strings.Contains(result.Content, "VAL=UNSET") {
+		t.Errorf("secret must not be visible before activation, got: %s", result.Content)
+	}
+
+	// After activation: bash should see the secret.
+	set := skills.NewActivatedSet()
+	set.Add("test-bash-env")
+	ctx2 := skills.WithActivatedSet(context.Background(), set)
+	result, err = bash.Run(ctx2, `{"command": "echo $TEST_BASH_SECRET"}`)
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if !strings.Contains(result.Content, "secret-xyz") {
+		t.Errorf("expected secret-xyz in output after activation, got: %s", result.Content)
+	}
+}
+
+// TestBashTool_ScopesToActivatedSkill verifies that one skill's secrets
+// are NOT injected into bash when only a different skill has been activated.
+func TestBashTool_ScopesToActivatedSkill(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Keychain integration only on darwin")
+	}
+	if os.Getenv("SHANNON_KEYCHAIN_TEST") != "1" {
+		t.Skip("set SHANNON_KEYCHAIN_TEST=1 to run Keychain integration tests")
+	}
+
+	store := skills.NewSecretsStore(t.TempDir())
+	t.Cleanup(func() {
+		_ = store.Delete("test-skill-a")
+		_ = store.Delete("test-skill-b")
+	})
+	store.Set("test-skill-a", map[string]string{"SECRET_A": "val-a"})
+	store.Set("test-skill-b", map[string]string{"SECRET_B": "val-b"})
+
+	bash := &BashTool{SecretsStore: store}
+
+	// Activate only skill-a. Bash must see SECRET_A but NOT SECRET_B.
+	set := skills.NewActivatedSet()
+	set.Add("test-skill-a")
+	ctx := skills.WithActivatedSet(context.Background(), set)
+
+	result, err := bash.Run(ctx, `{"command": "echo \"A=${SECRET_A:-unset} B=${SECRET_B:-unset}\""}`)
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if !strings.Contains(result.Content, "A=val-a") {
+		t.Errorf("expected A=val-a, got: %s", result.Content)
+	}
+	if !strings.Contains(result.Content, "B=unset") {
+		t.Errorf("SECRET_B must NOT leak when only skill-a is activated, got: %s", result.Content)
 	}
 }
 

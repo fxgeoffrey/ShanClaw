@@ -7,6 +7,7 @@ shannon
 .DS_Store
 .shannon/
 .claude/
+.superpowers/
 .worktrees/
 CLAUDE.local.md
 *.env

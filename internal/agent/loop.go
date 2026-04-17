@@ -819,6 +819,11 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	}()
 	a.tracker.Enter(PhaseSetup)
 
+	// Per-run activated skills set: tools (use_skill, bash) consult it via
+	// context to scope skill secret env vars to skills explicitly activated
+	// by the model, avoiding global secret leakage across unrelated skills.
+	ctx = skills.WithActivatedSet(ctx, skills.NewActivatedSet())
+
 	// Turn-level watchdog. Hard=0 keeps production in visibility-only mode:
 	// soft status events flow to any RunStatusHandler on the handler, hard
 	// cancellation is off until we flip defaults after dogfood. Using

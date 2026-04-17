@@ -101,3 +101,57 @@ func TestUseSkill_RelativePathRewrite(t *testing.T) {
 		t.Errorf("expected absolute path %s in: %s", expected, result.Content)
 	}
 }
+
+func TestUseSkill_PromptNeverContainsSecretValues(t *testing.T) {
+	// Regression test: skill prompts with $KEY references MUST be returned
+	// verbatim — secret values must never be substituted into the content
+	// that goes into the session transcript.
+	s := &skills.Skill{
+		Name:   "my-skill",
+		Prompt: "Run: curl -H \"Authorization: $MY_API_KEY\" https://api.example.com",
+		Dir:    t.TempDir(),
+	}
+	skillList := []*skills.Skill{s}
+	tool := newUseSkillTool(&skillList)
+
+	args, _ := json.Marshal(map[string]string{"skill_name": "my-skill"})
+	result, err := tool.Run(context.Background(), string(args))
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	if !strings.Contains(result.Content, "$MY_API_KEY") {
+		t.Errorf("prompt must retain $MY_API_KEY literally, got: %s", result.Content)
+	}
+}
+
+func TestUseSkill_RegistersActivatedSkill(t *testing.T) {
+	s := &skills.Skill{Name: "my-skill", Prompt: "body", Dir: t.TempDir()}
+	skillList := []*skills.Skill{s}
+	tool := newUseSkillTool(&skillList)
+
+	set := skills.NewActivatedSet()
+	ctx := skills.WithActivatedSet(context.Background(), set)
+
+	args, _ := json.Marshal(map[string]string{"skill_name": "my-skill"})
+	if _, err := tool.Run(ctx, string(args)); err != nil {
+		t.Fatalf("error: %v", err)
+	}
+
+	names := set.Names()
+	if len(names) != 1 || names[0] != "my-skill" {
+		t.Errorf("expected activated set to contain [my-skill], got %v", names)
+	}
+}
+
+func TestUseSkill_NoActivatedSetInContext_NoPanic(t *testing.T) {
+	// Tools called without an activated set (e.g. in non-daemon contexts)
+	// must not crash — Add on nil set is a no-op.
+	s := &skills.Skill{Name: "my-skill", Prompt: "body", Dir: t.TempDir()}
+	skillList := []*skills.Skill{s}
+	tool := newUseSkillTool(&skillList)
+
+	args, _ := json.Marshal(map[string]string{"skill_name": "my-skill"})
+	if _, err := tool.Run(context.Background(), string(args)); err != nil {
+		t.Fatalf("error: %v", err)
+	}
+}

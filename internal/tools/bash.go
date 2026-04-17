@@ -12,6 +12,7 @@ import (
 
 	"github.com/Kocoro-lab/ShanClaw/internal/agent"
 	"github.com/Kocoro-lab/ShanClaw/internal/cwdctx"
+	"github.com/Kocoro-lab/ShanClaw/internal/skills"
 )
 
 type BashTool struct {
@@ -19,6 +20,11 @@ type BashTool struct {
 	ExtraSafeCommands []string
 	CWD               string // working directory for commands; if empty and no session CWD is set, bash runs in an isolated temp dir (NOT the process cwd)
 	MaxOutput         int    // max output chars; 0 = use default 30000
+	// SecretsStore, when set, supplies per-skill API keys as env vars
+	// for skills activated via use_skill in the current run. Values are
+	// fetched lazily at execution time and scoped to bash child processes
+	// only — they never enter prompt context or session transcripts.
+	SecretsStore *skills.SecretsStore
 }
 
 type bashArgs struct {
@@ -102,6 +108,9 @@ func (t *BashTool) Run(ctx context.Context, argsJSON string) (agent.ToolResult, 
 		dir = os.TempDir()
 	}
 	cmd.Dir = dir
+	if envPairs := collectActivatedSkillEnv(ctx, t.SecretsStore); len(envPairs) > 0 {
+		cmd.Env = append(os.Environ(), envPairs...)
+	}
 	output, err := cmd.CombinedOutput()
 
 	result := string(output)
@@ -145,4 +154,30 @@ func (t *BashTool) IsSafeArgs(argsJSON string) bool {
 		return false
 	}
 	return isSafeCommand(args.Command, t.ExtraSafeCommands)
+}
+
+// collectActivatedSkillEnv returns KEY=VALUE pairs for every secret of every
+// skill activated in the current agent run. Returns nil when no skill has
+// been activated, no store is configured, or the store has no values.
+// Called on every bash execution so newly-activated skills become visible
+// to subsequent commands without restart.
+func collectActivatedSkillEnv(ctx context.Context, store *skills.SecretsStore) []string {
+	if store == nil {
+		return nil
+	}
+	set := skills.ActivatedFromContext(ctx)
+	if set == nil {
+		return nil
+	}
+	names := set.Names()
+	if len(names) == 0 {
+		return nil
+	}
+	var envPairs []string
+	for _, name := range names {
+		for k, v := range store.Get(name) {
+			envPairs = append(envPairs, k+"="+v)
+		}
+	}
+	return envPairs
 }

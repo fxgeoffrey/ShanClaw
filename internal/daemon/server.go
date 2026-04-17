@@ -51,8 +51,9 @@ type Server struct {
 	pendingBrokers sync.Map // map[string]*ApprovalBroker
 	onReload       func()   // called after config reload to restart watchers/heartbeat
 
-	marketplace *skills.MarketplaceClient
-	slugLocks   *skills.SlugLocks
+	marketplace  *skills.MarketplaceClient
+	slugLocks    *skills.SlugLocks
+	secretsStore *skills.SecretsStore
 }
 
 // requireDeps returns true if s.deps is non-nil, otherwise writes a 500
@@ -107,6 +108,14 @@ var (
 )
 
 func NewServer(port int, client *Client, deps *ServerDeps, version string) *Server {
+	var shannonDir string
+	if deps != nil {
+		shannonDir = deps.ShannonDir
+	}
+	store := skills.NewSecretsStore(shannonDir)
+	if deps != nil {
+		deps.SecretsStore = store
+	}
 	return &Server{
 		port:                   port,
 		client:                 client,
@@ -117,6 +126,7 @@ func NewServer(port int, client *Client, deps *ServerDeps, version string) *Serv
 		notifyApprovalResolved: func(p ApprovalResolvedPayload) error { return nil },
 		marketplace:            skills.NewMarketplaceClient(resolveRegistryURL(deps), 1*time.Hour),
 		slugLocks:              skills.NewSlugLocks(),
+		secretsStore:           store,
 	}
 }
 
@@ -210,6 +220,9 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("GET /skills/{name}/scripts", s.handleListSkillScripts)
 	mux.HandleFunc("PUT /skills/{name}/scripts/{filename}", s.handlePutSkillScripts)
 	mux.HandleFunc("DELETE /skills/{name}/scripts/{filename}", s.handleDeleteSkillScripts)
+	mux.HandleFunc("PUT /skills/{name}/secrets", s.handlePutSkillSecrets)
+	mux.HandleFunc("DELETE /skills/{name}/secrets", s.handleDeleteSkillSecrets)
+	mux.HandleFunc("DELETE /skills/{name}/secrets/{key}", s.handleDeleteSkillSecretKey)
 	mux.HandleFunc("GET /skills/{name}/references", s.handleListSkillReferences)
 	mux.HandleFunc("PUT /skills/{name}/references/{filename}", s.handlePutSkillReferences)
 	mux.HandleFunc("DELETE /skills/{name}/references/{filename}", s.handleDeleteSkillReferences)
@@ -2347,7 +2360,10 @@ func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
 
 	metas := make([]skills.SkillMeta, 0, len(list))
 	for _, skill := range list {
-		metas = append(metas, skill.ToMeta())
+		meta := skill.ToMeta()
+		meta.RequiredSecrets = skill.RequiredSecrets()
+		meta.ConfiguredSecrets = s.secretsStore.ConfiguredKeys(skill.Name)
+		metas = append(metas, meta)
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"skills": metas})
 }
@@ -2430,6 +2446,8 @@ func (s *Server) handleGetSkill(w http.ResponseWriter, r *http.Request) {
 			if len(skill.AllowedTools) > 0 {
 				detail.AllowedTools = skill.AllowedTools
 			}
+			detail.RequiredSecrets = skill.RequiredSecrets()
+			detail.ConfiguredSecrets = s.secretsStore.ConfiguredKeys(skill.Name)
 			writeJSON(w, http.StatusOK, detail)
 			return
 		}
@@ -2504,6 +2522,71 @@ func (s *Server) handleDeleteGlobalSkill(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	s.auditHTTPOp("DELETE", "/skills/"+name, "deleted skill")
+	s.secretsStore.Delete(name)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (s *Server) handlePutSkillSecrets(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := skills.ValidateSkillName(name); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var secrets map[string]string
+	if !decodeBody(w, r, &secrets) {
+		return
+	}
+	if len(secrets) == 0 {
+		writeError(w, http.StatusBadRequest, "no secrets provided")
+		return
+	}
+	keys := make([]string, 0, len(secrets))
+	for key := range secrets {
+		if !skills.IsValidEnvKey(key) {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid secret key %q: must match [A-Z0-9_]+", key))
+			return
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	if err := s.secretsStore.Set(name, secrets); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.auditHTTPOp("PUT", "/skills/"+name+"/secrets", "set secrets for skill: "+strings.Join(keys, ","))
+	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+func (s *Server) handleDeleteSkillSecrets(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := skills.ValidateSkillName(name); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.secretsStore.Delete(name); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.auditHTTPOp("DELETE", "/skills/"+name+"/secrets", "cleared all secrets for skill")
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (s *Server) handleDeleteSkillSecretKey(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	key := r.PathValue("key")
+	if err := skills.ValidateSkillName(name); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if key == "" {
+		writeError(w, http.StatusBadRequest, "key is required")
+		return
+	}
+	if err := s.secretsStore.DeleteKey(name, key); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.auditHTTPOp("DELETE", "/skills/"+name+"/secrets/"+key, "removed secret key")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -3067,7 +3150,7 @@ func (s *Server) handleConfigReload(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// Config changed but MCP servers didn't — update config and refresh
 		// cached rebuild layers so health-driven rebuilds use current settings.
-		newBaseline, _, newBaseCleanup := tools.RegisterLocalTools(newCfg)
+		newBaseline, _, newBaseCleanup := tools.RegisterLocalTools(newCfg, s.secretsStore)
 		// Re-register gateway tools on top of fresh baseline clone.
 		// Use a short timeout — if the gateway is unavailable, keep existing overlay.
 		freshReg := newBaseline.Clone()

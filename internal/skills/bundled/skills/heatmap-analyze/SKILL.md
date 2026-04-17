@@ -39,6 +39,25 @@ heatmap-analyze/
     └── audience-analysis.md           # Audience segment analysis + schema
 ```
 
+## Data Source Boundary
+
+The **only authoritative data source** for this skill is `ptengine-cli`. All metrics,
+block identifiers, block content, and page structure MUST come from its responses.
+
+**Do not** access the target URL through any other channel, including:
+- `browser_*`, `screenshot`, `computer`, any Playwright MCP (`mcp__playwright__*`),
+  or any other browser-automation tool
+- `http` GET / `WebFetch` against the target URL to scrape HTML or assets
+
+**Why it matters (not just a preference):** ptengine-cli returns aggregated behavior
+over the selected date range. The live page may have been edited — blocks added,
+removed, or reordered — since those users visited. Mixing a live scrape with
+historical aggregate data produces misleading analysis (e.g. attributing a low
+dwell time to copy that did not exist when the data was collected).
+
+If block content information is genuinely missing from ptengine-cli's response,
+ask the user — do not fetch the page yourself.
+
 ## Analysis Types
 
 | Type | Description | When to use |
@@ -164,7 +183,8 @@ module categories for the detected page type.
 Assign each block to phase 1-4 using the criteria in block-analysis.md. Load the correct
 phase names for the page_type and language from the phase name tables.
 
-Use block_name and block position as primary signals when screenshots are unavailable.
+Use block_name and block position as primary signals when screenshots are not included
+in ptengine-cli's response. Do not obtain screenshots by other means (see Data Source Boundary).
 
 ---
 

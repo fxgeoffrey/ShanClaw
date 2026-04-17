@@ -29,6 +29,8 @@ Respond with skill names only:`
 
 const discoveryTimeout = 5 * time.Second
 
+var skillDebug = os.Getenv("SHANNON_SKILL_DEBUG") == "1"
+
 // discoverRelevantSkills calls a small-tier model to identify which skills
 // are relevant to the user's message. Returns matched skills and usage.
 // On timeout or error, returns nil (caller should proceed without discovery).
@@ -61,14 +63,16 @@ func discoverRelevantSkills(ctx context.Context, c ctxwin.Completer, userText st
 	}
 
 	matched := parseDiscoveryOutput(resp.OutputText, loaded)
-	if len(matched) > 0 {
-		names := make([]string, len(matched))
-		for i, s := range matched {
-			names[i] = s.Name
+	if skillDebug {
+		if len(matched) > 0 {
+			names := make([]string, len(matched))
+			for i, s := range matched {
+				names[i] = s.Name
+			}
+			fmt.Fprintf(os.Stderr, "[skill-discovery] matched: %s\n", strings.Join(names, ", "))
+		} else {
+			fmt.Fprintf(os.Stderr, "[skill-discovery] no match (raw: %q)\n", resp.OutputText)
 		}
-		fmt.Fprintf(os.Stderr, "[skill-discovery] matched: %s\n", strings.Join(names, ", "))
-	} else {
-		fmt.Fprintf(os.Stderr, "[skill-discovery] no match (raw: %q)\n", resp.OutputText)
 	}
 	return matched, resp.Usage
 }

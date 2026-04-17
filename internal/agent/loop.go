@@ -41,6 +41,9 @@ func buildSkillListing(agentSkills []*skills.Skill) string {
 	if perSkill > 250 {
 		perSkill = 250
 	}
+	if perSkill < 4 {
+		perSkill = 4
+	}
 
 	var sb strings.Builder
 	sb.WriteString("<system-reminder>\n## Available Skills\nCall use_skill with the skill name to load full instructions.\n\n")
@@ -1265,7 +1268,8 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		// Skill tool filter: when a skill declares allowed-tools, this map
 		// persists across iterations so rebuildSchemas and subsequent use_skill
 		// calls rebuild from the full set, not the already-filtered set.
-		activeSkillFilter map[string]bool
+		activeSkillFilter    map[string]bool
+		activeSkillFilterStr string // precomputed sorted list for error messages
 	)
 
 	// Skill tool filter: activeSkillFilter is checked at execution time
@@ -1406,30 +1410,20 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	// Delta tracking: only announce skills not yet sent in prior Run() calls
 	// (relevant for TUI multi-turn sessions where sentSkillNames persists).
 	if len(a.agentSkills) > 0 {
-		historyHasListing := false
-		for _, m := range history {
-			if strings.Contains(m.Content.Text(), "## Available Skills") {
-				historyHasListing = true
-				break
+		if a.sentSkillNames == nil {
+			a.sentSkillNames = make(map[string]bool)
+		}
+		var newSkills []*skills.Skill
+		for _, s := range a.agentSkills {
+			if !a.sentSkillNames[s.Name] {
+				newSkills = append(newSkills, s)
 			}
 		}
-		if !historyHasListing {
-			// Delta tracking: filter to skills not yet announced
-			if a.sentSkillNames == nil {
-				a.sentSkillNames = make(map[string]bool)
-			}
-			var newSkills []*skills.Skill
-			for _, s := range a.agentSkills {
-				if !a.sentSkillNames[s.Name] {
-					newSkills = append(newSkills, s)
-				}
-			}
+		if len(newSkills) > 0 {
 			if listing := buildSkillListing(newSkills); listing != "" {
 				scaffoldedUserText += "\n\n" + listing
 				messages[len(messages)-1] = replaceUserMessageText(messages[len(messages)-1], scaffoldedUserText)
 			}
-			// Mark all current skills as sent (even if listing was empty due
-			// to budget, the model still has the use_skill description fallback)
 			for _, s := range a.agentSkills {
 				a.sentSkillNames[s.Name] = true
 			}
@@ -1676,7 +1670,9 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 					}
 				}
 			case <-time.After(2 * time.Second):
-				fmt.Fprintf(os.Stderr, "[skill-discovery] prefetch not ready in 2s, proceeding without hint\n")
+				if skillDebug {
+					fmt.Fprintf(os.Stderr, "[skill-discovery] prefetch not ready in 2s, proceeding without hint\n")
+				}
 			case <-ctx.Done():
 			}
 			discoveryCh = nil
@@ -2292,19 +2288,12 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			// calls to tools outside the allowlist. Replaces schema-filtering
 			// (which caused cache miss) with a runtime check.
 			if activeSkillFilter != nil {
-				var allowedList []string
-				for name := range activeSkillFilter {
-					allowedList = append(allowedList, name)
-				}
-				sort.Strings(allowedList)
-				allowedStr := strings.Join(allowedList, ", ")
-
 				var kept []approvedToolCall
 				for _, ac := range approved {
 					if !activeSkillFilter[ac.fc.Name] {
 						execResults[ac.index] = toolExecResult{
 							result: ToolResult{
-								Content: fmt.Sprintf("[skill restriction] tool %q is not allowed by the active skill. Allowed: %s", ac.fc.Name, allowedStr),
+								Content: fmt.Sprintf("[skill restriction] tool %q is not allowed by the active skill. Allowed: %s", ac.fc.Name, activeSkillFilterStr),
 								IsError: true,
 							},
 						}
@@ -2540,13 +2529,17 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			if ac.fc.Name == "use_skill" && !er.result.IsError {
 				if len(er.result.SkillToolFilter) > 0 {
 					activeSkillFilter = make(map[string]bool, len(er.result.SkillToolFilter)+1)
-					for _, name := range er.result.SkillToolFilter {
+					sorted := make([]string, len(er.result.SkillToolFilter))
+					copy(sorted, er.result.SkillToolFilter)
+					sort.Strings(sorted)
+					for _, name := range sorted {
 						activeSkillFilter[name] = true
 					}
 					activeSkillFilter["use_skill"] = true
+					activeSkillFilterStr = strings.Join(sorted, ", ")
 				} else {
-					// Unrestricted skill: clear any prior filter.
 					activeSkillFilter = nil
+					activeSkillFilterStr = ""
 				}
 				break
 			}

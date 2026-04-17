@@ -3125,6 +3125,69 @@ func TestAgentLoop_SkillToolFilter(t *testing.T) {
 	}
 }
 
+func TestAgentLoop_SkillToolHintAppended(t *testing.T) {
+	var mu sync.Mutex
+	var messagesPerCall [][]client.Message
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req client.CompletionRequest
+		json.Unmarshal(body, &req)
+
+		mu.Lock()
+		callNum := len(messagesPerCall)
+		messagesPerCall = append(messagesPerCall, req.Messages)
+		mu.Unlock()
+
+		switch callNum {
+		case 0:
+			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
+				toolCall("use_skill", `{"skill_name": "test-skill"}`), 10, 5))
+		default:
+			json.NewEncoder(w).Encode(nativeResponse("done", "end_turn", nil, 10, 5))
+		}
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+
+	reg.Register(&mockSimpleTool{
+		name: "use_skill",
+		result: ToolResult{
+			Content:       "Skill activated.",
+			SkillToolHint: "\n<system-reminder>Restrict to allowed tools only.</system-reminder>",
+		},
+	})
+
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+	_, _, err := loop.Run(context.Background(), "test", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(messagesPerCall) < 2 {
+		t.Fatalf("expected at least 2 LLM calls, got %d", len(messagesPerCall))
+	}
+
+	// In call 1, the tool_result for use_skill should contain the hint
+	msgs := messagesPerCall[1]
+	found := false
+	for _, m := range msgs {
+		text := m.Content.Text()
+		if strings.Contains(text, "Skill activated.") && strings.Contains(text, "Restrict to allowed tools only.") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("SkillToolHint was not appended to use_skill tool result in LLM context")
+	}
+}
+
 func TestAgentLoop_SkillListingInjected(t *testing.T) {
 	var sentMessages []client.Message
 

@@ -71,6 +71,11 @@ type ToolResult struct {
 	// appear in this list (plus use_skill itself) will be visible. Set by
 	// use_skill when the activated skill declares allowed-tools.
 	SkillToolFilter []string
+	// SkillToolHint, when non-empty, contains a <system-reminder> text to
+	// append to the tool_result content, guiding the LLM to restrict itself
+	// to the allowed tools. Works alongside SkillToolFilter (which provides
+	// execution-time denial).
+	SkillToolHint string
 }
 
 // ToolUsage is ToolResult's per-call cost breakdown. Mirrors client.ToolUsage

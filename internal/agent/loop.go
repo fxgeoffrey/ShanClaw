@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -27,6 +28,36 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/runstatus"
 	"github.com/Kocoro-lab/ShanClaw/internal/skills"
 )
+
+// buildSkillListing formats a <system-reminder> with skill descriptions
+// for injection as a user message. Uses rune-safe truncation with a total
+// character budget.
+func buildSkillListing(agentSkills []*skills.Skill) string {
+	if len(agentSkills) == 0 {
+		return ""
+	}
+	const totalBudget = 4000
+	perSkill := totalBudget / len(agentSkills)
+	if perSkill > 250 {
+		perSkill = 250
+	}
+	if perSkill < 4 {
+		perSkill = 4
+	}
+
+	var sb strings.Builder
+	sb.WriteString("<system-reminder>\n## Available Skills\nCall use_skill with the skill name to load full instructions.\n\n")
+	for _, s := range agentSkills {
+		desc := s.Description
+		runes := []rune(desc)
+		if len(runes) > perSkill {
+			desc = string(runes[:perSkill-3]) + "..."
+		}
+		fmt.Fprintf(&sb, "- %s: %s\n", s.Name, desc)
+	}
+	sb.WriteString("</system-reminder>")
+	return sb.String()
+}
 
 // ErrMaxIterReached is returned when the agent loop hits the iteration limit
 // but has partial work to return. Callers can check errors.Is(err, ErrMaxIterReached)
@@ -157,7 +188,11 @@ IMPORTANT: Do NOT use bash to run find, grep, cat, head, tail, sed, awk, or ls c
 
 ### System
 - system_info: OS/hardware information.
-- process: list/manage running processes.`
+- process: list/manage running processes.
+
+## Skills
+When a skill is relevant to the task, call use_skill to load its full instructions before proceeding.
+Skills relevant to your task may be suggested each turn — check these before starting work.`
 
 const cloudDelegationGuidance = `
 
@@ -370,6 +405,8 @@ type AgentLoop struct {
 	lastRunStatus     RunStatus
 	toolRefSupported  bool   // true when the configured model supports defer_loading + tool_reference protocol
 	cacheSource       string // tag sent to gateway on every Complete call for prompt-cache TTL routing
+	skillDiscovery    bool              // call small-tier model on first turn to identify relevant skills (default true)
+	sentSkillNames    map[string]bool   // delta tracking: skills already announced to the LLM (persists across Run() calls)
 
 	// Watchdog thresholds (0 = disabled). The watchdog observes the loop's
 	// phase tracker and only measures duration in "idle-counted" phases
@@ -420,17 +457,18 @@ func NewAgentLoop(gw client.LLMClient, tools *ToolRegistry, modelTier string, sh
 		argsTrunc = 200
 	}
 	return &AgentLoop{
-		client:      gw,
-		tools:       tools,
-		modelTier:   modelTier,
-		shannonDir:  shannonDir,
-		maxIter:     maxIter,
-		resultTrunc: resultTrunc,
-		argsTrunc:   argsTrunc,
-		permissions: perms,
-		auditor:     auditor,
-		hookRunner:  hookRunner,
-		workingSet:  NewWorkingSet(),
+		client:         gw,
+		tools:          tools,
+		modelTier:      modelTier,
+		shannonDir:     shannonDir,
+		maxIter:        maxIter,
+		resultTrunc:    resultTrunc,
+		argsTrunc:      argsTrunc,
+		permissions:    perms,
+		auditor:        auditor,
+		hookRunner:     hookRunner,
+		workingSet:     NewWorkingSet(),
+		skillDiscovery: true,
 	}
 }
 
@@ -680,6 +718,13 @@ func (a *AgentLoop) SwitchAgent(basePrompt string, memoryDir string, reg *ToolRe
 // SetSkills updates the agent's skill catalog without touching other fields.
 func (a *AgentLoop) SetSkills(s []*skills.Skill) {
 	a.agentSkills = s
+}
+
+// SetSkillDiscovery enables or disables the first-turn skill discovery call.
+// When enabled (default), a small-tier model identifies relevant skills and
+// injects a hint before the main LLM call.
+func (a *AgentLoop) SetSkillDiscovery(enabled bool) {
+	a.skillDiscovery = enabled
 }
 
 // SetSessionID sets the session ID used for audit log correlation.
@@ -998,7 +1043,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	if !deferredMode {
 		effTools = a.tools
 		toolSchemas = effTools.SortedSchemas()
-		baseSchemas = toolSchemas // needed by applySkillFilter's rebuild path
+		baseSchemas = toolSchemas // needed by rebuildSchemas after deferred loading
 		toolNames = liveToolNames(toolSchemas)
 	}
 
@@ -1205,6 +1250,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		cloudNudgeFired      bool
 		cloudDelegateClaimed bool   // set on first cloud_delegate attempt; blocks subsequent calls unless it fails
 		cloudResultContent   string // non-empty when a cloud deliverable should bypass LLM summarization
+		lastDiscoveryInput   string // dedup: skip discovery when user text hasn't changed between iterations
 
 		// Cross-iteration dedup: cache successful results from previous iteration
 		// to prevent re-execution of identical tool calls across consecutive iterations.
@@ -1222,25 +1268,13 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		// Skill tool filter: when a skill declares allowed-tools, this map
 		// persists across iterations so rebuildSchemas and subsequent use_skill
 		// calls rebuild from the full set, not the already-filtered set.
-		activeSkillFilter map[string]bool
+		activeSkillFilter    map[string]bool
+		activeSkillFilterStr string // precomputed sorted list for error messages
 	)
 
-	// applySkillFilter narrows toolSchemas to only the tools in activeSkillFilter.
-	// Always rebuilds from the current full toolSchemas (post-rebuildSchemas) so
-	// that deferred tool loading doesn't erase the restriction, and a second
-	// use_skill with different allowed-tools replaces rather than intersects.
-	applySkillFilter := func(schemas []client.Tool) []client.Tool {
-		if activeSkillFilter == nil {
-			return schemas
-		}
-		filtered := make([]client.Tool, 0, len(activeSkillFilter))
-		for _, s := range schemas {
-			if activeSkillFilter[s.Function.Name] {
-				filtered = append(filtered, s)
-			}
-		}
-		return filtered
-	}
+	// Skill tool filter: activeSkillFilter is checked at execution time
+	// (before running each tool) rather than filtering toolSchemas. This
+	// keeps the tools array byte-stable for Anthropic prompt cache.
 
 	setRunStatus := func(code runstatus.Code, partial bool) {
 		a.lastRunStatus = RunStatus{
@@ -1364,6 +1398,44 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		markInjected()
 	}
 
+	// Inject skill listing into the scaffolded user message.
+	// Resume suppression: historyHasListing guards against TUI multi-turn
+	// re-injection when the listing survives in context. Note: persisted
+	// history strips the scaffold (captureRunMessages restores rawUserMessage),
+	// so daemon runs (which new-build AgentLoop each turn) will re-inject the
+	// listing every turn. The listing sits after <!-- cache_break --> so it is
+	// NOT covered by cache breakpoint 3 and counts as uncached input tokens
+	// (~200 tokens ≈ $0.0006/turn). Acceptable trade-off vs. moving it into
+	// the cached prefix which would break byte stability on skill set changes.
+	// Delta tracking: only announce skills not yet sent in prior Run() calls
+	// (relevant for TUI multi-turn sessions where sentSkillNames persists).
+	if len(a.agentSkills) > 0 {
+		if a.sentSkillNames == nil {
+			a.sentSkillNames = make(map[string]bool)
+		}
+		var newSkills []*skills.Skill
+		for _, s := range a.agentSkills {
+			if !a.sentSkillNames[s.Name] {
+				newSkills = append(newSkills, s)
+			}
+		}
+		if len(newSkills) > 0 {
+			if listing := buildSkillListing(newSkills); listing != "" {
+				scaffoldedUserText += "\n\n" + listing
+				messages[len(messages)-1] = replaceUserMessageText(messages[len(messages)-1], scaffoldedUserText)
+			}
+			for _, s := range a.agentSkills {
+				a.sentSkillNames[s.Name] = true
+			}
+		}
+	}
+
+	const discoveryThreshold = 10
+	type discoveryResult struct {
+		matched []*skills.Skill
+		usage   client.Usage
+	}
+
 	for i := 0; ; i++ {
 		effectiveMax := a.effectiveMaxIter(toolsUsed)
 		if i >= effectiveMax {
@@ -1392,6 +1464,24 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			captureRunMessages()
 			setRunStatus(runstatus.CodeFromError(ctx.Err()), lastText != "")
 			return lastText, usage, ctx.Err()
+		}
+
+		// Skill discovery: launch a small-tier model call concurrently to
+		// identify relevant skills. Gates:
+		// - ≥10 skills installed (below that, listing is sufficient)
+		// - User text changed since last discovery (skip tool-use iterations
+		//   where the user message hasn't changed)
+		var discoveryCh chan discoveryResult
+		userTextChanged := latestUserText != lastDiscoveryInput
+		if len(a.agentSkills) >= discoveryThreshold && a.skillDiscovery && userTextChanged {
+			lastDiscoveryInput = latestUserText
+			discoveryCh = make(chan discoveryResult, 1)
+			discoveryInput := latestUserText // snapshot for goroutine (latestUserText may be mutated by drain below)
+			// Goroutine self-terminates within 5s (discoveryTimeout) even if Run() returns early.
+			go func() {
+				matched, u := discoverRelevantSkills(ctx, a.client, discoveryInput, a.agentSkills)
+				discoveryCh <- discoveryResult{matched: matched, usage: u}
+			}()
 		}
 
 		// Drain injected user messages (non-blocking).
@@ -1551,6 +1641,43 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 					reanchorActiveTask(MetaBoundaryPostCompaction)
 				}
 			}
+		}
+
+		// Collect async skill discovery result (if started above).
+		// Wait up to 2s for the result; if it arrives, embed the hint in the
+		// user message. The discovery goroutine has its own 5s timeout so it
+		// will eventually complete even if we don't collect it here.
+		if discoveryCh != nil {
+			select {
+			case dr := <-discoveryCh:
+				a.emitInternalUsage(dr.usage)
+				if hint := formatDiscoveryHint(dr.matched); hint != "" {
+					if i == 0 {
+						// Turn 0: embed in scaffolded user message (avoids
+						// the "separate user messages" problem where LLM
+						// ignores the actual request).
+						scaffoldedUserText += "\n\n" + hint
+						if newMsgOffset >= 0 && newMsgOffset < len(messages) {
+							messages[newMsgOffset] = replaceUserMessageText(messages[newMsgOffset], scaffoldedUserText)
+						}
+					} else {
+						// Later turns: inject as a new message. This is safe
+						// because the last user message is tool results, not
+						// the user's original prompt.
+						messages = append(messages, client.Message{
+							Role:    "user",
+							Content: client.NewTextContent(hint),
+						})
+						markInjected()
+					}
+				}
+			case <-time.After(2 * time.Second):
+				if skillDebug {
+					fmt.Fprintf(os.Stderr, "[skill-discovery] prefetch not ready in 2s, proceeding without hint\n")
+				}
+			case <-ctx.Done():
+			}
+			discoveryCh = nil
 		}
 
 		// Call LLM — streaming or blocking
@@ -2159,6 +2286,30 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 
 		// ---- Phase 2 (batched): partition by read-only, execute with concurrency limits ----
 		if len(approved) > 0 {
+			// Execution-time denial: if a skill declared allowed-tools, block
+			// calls to tools outside the allowlist. Replaces schema-filtering
+			// (which caused cache miss) with a runtime check.
+			if activeSkillFilter != nil {
+				var kept []approvedToolCall
+				for _, ac := range approved {
+					if !activeSkillFilter[ac.fc.Name] {
+						execResults[ac.index] = toolExecResult{
+							result: ToolResult{
+								Content: fmt.Sprintf("[skill restriction] tool %q is not allowed by the active skill. Allowed: %s", ac.fc.Name, activeSkillFilterStr),
+								IsError: true,
+							},
+						}
+						if a.handler != nil {
+							a.handler.OnToolResult(ac.fc.Name, ac.argsStr, execResults[ac.index].result, 0)
+						}
+						a.logAudit(ac.fc.Name, ac.argsStr, "denied by skill tool filter", "deny", false, 0, nil)
+					} else {
+						kept = append(kept, ac)
+					}
+				}
+				approved = kept
+			}
+
 			batches := partitionToolCalls(approved)
 			a.tracker.Enter(PhaseExecutingTools)
 			executeBatches(ctx, batches, execResults, readTracker, a.handler)
@@ -2190,7 +2341,6 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 						// rebuildSchemas would strip those flags.
 						if !a.toolRefSupported {
 							toolSchemas = rebuildSchemas(effTools, baseSchemas, loadedDeferred)
-							toolSchemas = applySkillFilter(toolSchemas)
 						}
 						if len(names) > 0 {
 							toolSearchFired = true
@@ -2289,6 +2439,14 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				}
 			}
 
+			// Skill tool hint: append the tool-restriction reminder to
+			// use_skill results so the LLM sees the guidance in context.
+			if fc.Name == "use_skill" && !result.IsError {
+				if hint := execResults[idx].result.SkillToolHint; hint != "" {
+					contextResult += hint
+				}
+			}
+
 			if useNative {
 				// Prefer structured blocks when tool_search produced them AND the
 				// model supports the tool_reference protocol. Falls back to the
@@ -2368,24 +2526,23 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		// Skill tool filter: when use_skill is called, update the filter.
 		// - Skill with allowed-tools: restrict to those tools + use_skill.
 		// - Skill without allowed-tools: clear any prior restriction.
-		// Always rebuild from baseSchemas so deferred loading can't erase
-		// the restriction, and a second use_skill replaces (not intersects).
 		for _, ac := range approved {
 			er := execResults[ac.index]
 			if ac.fc.Name == "use_skill" && !er.result.IsError {
 				if len(er.result.SkillToolFilter) > 0 {
 					activeSkillFilter = make(map[string]bool, len(er.result.SkillToolFilter)+1)
-					for _, name := range er.result.SkillToolFilter {
+					sorted := make([]string, len(er.result.SkillToolFilter))
+					copy(sorted, er.result.SkillToolFilter)
+					sort.Strings(sorted)
+					for _, name := range sorted {
 						activeSkillFilter[name] = true
 					}
 					activeSkillFilter["use_skill"] = true
+					activeSkillFilterStr = strings.Join(sorted, ", ")
 				} else {
-					// Unrestricted skill: clear any prior filter.
 					activeSkillFilter = nil
+					activeSkillFilterStr = ""
 				}
-				// Rebuild from full set (baseSchemas + loaded deferred), then filter.
-				fullSchemas := rebuildSchemas(effTools, baseSchemas, loadedDeferred)
-				toolSchemas = applySkillFilter(fullSchemas)
 				break
 			}
 		}
@@ -2741,6 +2898,31 @@ func hasNonTextBlocks(blocks []client.ContentBlock) bool {
 		}
 	}
 	return false
+}
+
+// replaceUserMessageText rebuilds a user message with updated text while
+// preserving non-text content blocks (images, documents). For block-based
+// messages, replaces the first text block's content; for plain text messages,
+// replaces the entire text.
+func replaceUserMessageText(msg client.Message, newText string) client.Message {
+	if !msg.Content.HasBlocks() {
+		return client.Message{Role: "user", Content: client.NewTextContent(newText)}
+	}
+	blocks := msg.Content.Blocks()
+	out := make([]client.ContentBlock, 0, len(blocks))
+	replaced := false
+	for _, b := range blocks {
+		if b.Type == "text" && !replaced {
+			out = append(out, client.ContentBlock{Type: "text", Text: newText})
+			replaced = true
+		} else {
+			out = append(out, b)
+		}
+	}
+	if !replaced {
+		out = append([]client.ContentBlock{{Type: "text", Text: newText}}, out...)
+	}
+	return client.Message{Role: "user", Content: client.NewBlockContent(out)}
 }
 
 // extractToolPath extracts the primary file path from a tool's JSON arguments.

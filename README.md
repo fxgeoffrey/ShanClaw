@@ -364,7 +364,7 @@ Local tools executed on your macOS machine:
 | Tool | Approval | Description |
 |------|----------|-------------|
 | `memory_append` | No | Append entries to agent MEMORY.md (flock-protected) |
-| `use_skill` | No | Activate a skill by name — returns full SKILL.md body |
+| `use_skill` | No | Activate a skill by name — returns full SKILL.md body. Skill discovery auto-suggests relevant skills each turn via `model_tier: small` prefetch. |
 | `cloud_delegate` | Yes | Delegate tasks to Shannon Cloud for remote research/swarm execution |
 
 ### Tool Approval Flow
@@ -588,6 +588,7 @@ agent:
   reasoning_effort: ""             # "low", "medium", "high" (empty = model default)
   idle_soft_timeout_secs: 90       # watchdog: emit "still working" status after this long waiting on the LLM (0 = disabled, default: 90)
   idle_hard_timeout_secs: 0        # watchdog: cancel the run as a soft/partial failure after this long idle (0 = disabled; recommended: 540 once enabled, stays below the 600s gateway timeout)
+  skill_discovery: true            # per-turn small-model skill matching (default: true). Set false to disable the prefetch call.
 
 # Tool settings
 tools:

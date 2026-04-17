@@ -29,7 +29,7 @@ func newUseSkillTool(s *[]*skills.Skill) *useSkillTool {
 func (t *useSkillTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
 		Name:        "use_skill",
-		Description: "Activate a named skill to load its specialized instructions and restrict tools to only those the skill needs. Call this when the user's request matches a skill's purpose — check the Available Skills list. Returns the skill content as your working instructions.",
+		Description: "Activate a named skill to load its specialized instructions. Call this when the user's request matches a skill's purpose. Available skill names are listed in the conversation context.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -92,10 +92,16 @@ func (t *useSkillTool) Run(ctx context.Context, argsJSON string) (agent.ToolResu
 		body += "\n\n## User Context\n\n" + args.Args
 	}
 	var filter []string
+	var hint string
 	if len(skill.AllowedTools) > 0 {
 		filter = skill.AllowedTools
+		allowed := append([]string{}, skill.AllowedTools...)
+		allowed = append(allowed, "use_skill")
+		hint = "\n\n<system-reminder>\nFor this skill session, restrict yourself to ONLY these tools: " +
+			strings.Join(allowed, ", ") +
+			".\nDo not call other tools unless the user explicitly asks.\n</system-reminder>"
 	}
-	return agent.ToolResult{Content: body, SkillToolFilter: filter}, nil
+	return agent.ToolResult{Content: body, SkillToolFilter: filter, SkillToolHint: hint}, nil
 }
 
 var relativePathPattern = regexp.MustCompile("(?m)(^|[\\s`])((?:scripts|references|assets)/[^\\s)`]+)")

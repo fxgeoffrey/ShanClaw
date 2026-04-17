@@ -72,6 +72,15 @@ type AgentConfig struct {
 	// gateway transport ceiling (600s) after dogfood.
 	IdleSoftTimeoutSecs int `mapstructure:"idle_soft_timeout_secs" yaml:"idle_soft_timeout_secs" json:"idle_soft_timeout_secs"`
 	IdleHardTimeoutSecs int `mapstructure:"idle_hard_timeout_secs" yaml:"idle_hard_timeout_secs" json:"idle_hard_timeout_secs"`
+	SkillDiscovery      *bool `mapstructure:"skill_discovery" yaml:"skill_discovery,omitempty" json:"skill_discovery,omitempty"`
+}
+
+// SkillDiscoveryEnabled returns whether skill discovery is enabled (default: true).
+func (c *AgentConfig) SkillDiscoveryEnabled() bool {
+	if c.SkillDiscovery == nil {
+		return true
+	}
+	return *c.SkillDiscovery
 }
 
 type ToolsConfig struct {
@@ -356,8 +365,9 @@ type overlayAgentConfig struct {
 	Model           *string  `yaml:"model"`
 	ContextWindow   *int     `yaml:"context_window"`
 
-	IdleSoftTimeoutSecs *int `yaml:"idle_soft_timeout_secs"`
-	IdleHardTimeoutSecs *int `yaml:"idle_hard_timeout_secs"`
+	IdleSoftTimeoutSecs *int  `yaml:"idle_soft_timeout_secs"`
+	IdleHardTimeoutSecs *int  `yaml:"idle_hard_timeout_secs"`
+	SkillDiscovery      *bool `yaml:"skill_discovery"`
 }
 
 type overlayToolsConfig struct {
@@ -567,6 +577,10 @@ func mergeRuntimeOverlayFile(cfg *Config, file string, level string) {
 		if overlay.Agent.IdleHardTimeoutSecs != nil {
 			cfg.Agent.IdleHardTimeoutSecs = *overlay.Agent.IdleHardTimeoutSecs
 			cfg.Sources["agent.idle_hard_timeout_secs"] = src
+		}
+		if overlay.Agent.SkillDiscovery != nil {
+			cfg.Agent.SkillDiscovery = overlay.Agent.SkillDiscovery
+			cfg.Sources["agent.skill_discovery"] = src
 		}
 	}
 

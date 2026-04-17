@@ -139,19 +139,8 @@ func buildStaticSystem(opts PromptOptions) string {
 			"Only sequence when later calls genuinely depend on earlier results.")
 	}
 
-	// 3. Available Skills (stable once session starts) — compact bullet form:
-	// name + truncated description. Full docs loaded on demand via use_skill.
-	if len(opts.Skills) > 0 {
-		sb.WriteString("\n\n## Available Skills\n")
-		sb.WriteString("Call `use_skill` with the skill name to load full docs. Short list:\n")
-		for _, s := range opts.Skills {
-			desc := s.Description
-			if len(desc) > 80 {
-				desc = desc[:77] + "..."
-			}
-			fmt.Fprintf(&sb, "- %s: %s\n", s.Name, desc)
-		}
-	}
+	// Skills are listed in the user message (not system prompt) to preserve
+	// cache prefix stability. See buildSkillListing() in loop.go.
 
 	// 3b. Deferred Tools (only in deferred mode) — name + truncated description.
 	// Model calls tool_search to load full schemas on demand.

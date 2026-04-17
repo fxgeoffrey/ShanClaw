@@ -247,12 +247,8 @@ func TestBuildSystemPrompt_SystemContainsSkills(t *testing.T) {
 		},
 	})
 
-	if !strings.Contains(parts.System, "## Available Skills") {
-		t.Error("System should contain skills section")
-	}
-	// Compact bullet form: "- <name>: <description>"
-	if !strings.Contains(parts.System, "- pdf:") {
-		t.Error("System should contain skill entry as compact bullet")
+	if strings.Contains(parts.System, "## Available Skills") {
+		t.Error("system prompt should not contain skill listing (moved to user message)")
 	}
 }
 
@@ -373,23 +369,14 @@ func TestBuildSystemPrompt_SkillsListCompact(t *testing.T) {
 		},
 	}
 	p := BuildSystemPrompt(opts)
-	// Each skill must appear; each skill line must be <= 120 chars (compact bullet form).
+	// Skills must NOT appear in system prompt — they are injected as a user message instead.
+	if strings.Contains(p.System, "## Available Skills") {
+		t.Error("system prompt should not contain skill listing (moved to user message)")
+	}
 	for _, s := range opts.Skills {
-		if !strings.Contains(p.System, s.Name) {
-			t.Fatalf("skill %s missing from system prompt", s.Name)
+		if strings.Contains(p.System, s.Name) {
+			t.Fatalf("skill %s should not appear in system prompt", s.Name)
 		}
-	}
-	lineCount := 0
-	for _, l := range strings.Split(p.System, "\n") {
-		if strings.HasPrefix(l, "- skill-") {
-			lineCount++
-			if len(l) > 120 {
-				t.Fatalf("skill line too long (%d chars): %q", len(l), l)
-			}
-		}
-	}
-	if lineCount != 2 {
-		t.Fatalf("expected 2 skill bullet lines, got %d", lineCount)
 	}
 }
 

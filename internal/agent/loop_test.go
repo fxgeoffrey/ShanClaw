@@ -17,6 +17,7 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
 	"github.com/Kocoro-lab/ShanClaw/internal/permissions"
 	"github.com/Kocoro-lab/ShanClaw/internal/runstatus"
+	"github.com/Kocoro-lab/ShanClaw/internal/skills"
 )
 
 // nativeResponse builds a /v1/completions response for tests.
@@ -3028,8 +3029,9 @@ func TestAgentLoop_ReanchorAfterLLMRetryIncludesAttachmentHint(t *testing.T) {
 }
 
 // TestAgentLoop_SkillToolFilter verifies that when use_skill returns a
-// SkillToolFilter, subsequent LLM calls only receive the allowed tools
-// plus use_skill itself (no other tools leak through).
+// SkillToolFilter, tools are denied at execution time (not removed from the
+// schema). All LLM calls still receive the full tools array (cache-stable),
+// but blocked tools get an error result when the LLM tries to call them.
 func TestAgentLoop_SkillToolFilter(t *testing.T) {
 	var mu sync.Mutex
 	var toolsSentPerCall [][]string // tool names sent in each LLM request
@@ -3054,10 +3056,14 @@ func TestAgentLoop_SkillToolFilter(t *testing.T) {
 			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
 				toolCall("use_skill", `{"skill_name": "test-skill"}`), 10, 5))
 		case 1:
-			// After filter: LLM calls http (the allowed tool)
+			// LLM tries to call bash (blocked by skill filter)
+			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
+				toolCall("bash", `{"command": "echo hi"}`), 10, 5))
+		case 2:
+			// LLM calls http (allowed tool) — should succeed
 			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
 				toolCall("http", `{"url": "http://localhost"}`), 10, 5))
-		case 2:
+		case 3:
 			// Final text response
 			json.NewEncoder(w).Encode(nativeResponse("done", "end_turn", nil, 10, 5))
 		default:
@@ -3077,11 +3083,11 @@ func TestAgentLoop_SkillToolFilter(t *testing.T) {
 			SkillToolFilter: []string{"http", "file_read"},
 		},
 	})
-	// Register the tools that should be filtered
+	// Register the tools that should be filtered at execution time
 	reg.Register(&mockSimpleTool{name: "http", result: ToolResult{Content: "ok"}})
 	reg.Register(&mockSimpleTool{name: "file_read", result: ToolResult{Content: "file content"}})
-	reg.Register(&mockSimpleTool{name: "bash", result: ToolResult{Content: "should be filtered"}})
-	reg.Register(&mockSimpleTool{name: "file_write", result: ToolResult{Content: "should be filtered"}})
+	reg.Register(&mockSimpleTool{name: "bash", result: ToolResult{Content: "should be denied at runtime"}})
+	reg.Register(&mockSimpleTool{name: "file_write", result: ToolResult{Content: "should be denied at runtime"}})
 
 	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
 	result, _, err := loop.Run(context.Background(), "set up my agent", nil, nil)
@@ -3095,38 +3101,317 @@ func TestAgentLoop_SkillToolFilter(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if len(toolsSentPerCall) < 3 {
-		t.Fatalf("expected at least 3 LLM calls, got %d", len(toolsSentPerCall))
+	if len(toolsSentPerCall) < 4 {
+		t.Fatalf("expected at least 4 LLM calls, got %d", len(toolsSentPerCall))
 	}
 
-	// Call 0: all tools should be present (before skill activation)
-	call0Tools := make(map[string]bool)
-	for _, n := range toolsSentPerCall[0] {
-		call0Tools[n] = true
-	}
-	for _, expected := range []string{"use_skill", "http", "file_read", "bash", "file_write"} {
-		if !call0Tools[expected] {
-			t.Errorf("call 0: expected tool %q to be present before filter", expected)
-		}
-	}
-
-	// Call 1+: only allowed tools (http, file_read, use_skill) should be present
-	for callIdx := 1; callIdx < len(toolsSentPerCall); callIdx++ {
+	// All calls should have the full tools array (execution-time denial
+	// keeps tools in schema for cache stability).
+	call0Count := len(toolsSentPerCall[0])
+	for callIdx := 0; callIdx < len(toolsSentPerCall); callIdx++ {
 		tools := make(map[string]bool)
 		for _, n := range toolsSentPerCall[callIdx] {
 			tools[n] = true
 		}
-		// bash and file_write must NOT be present
-		for _, blocked := range []string{"bash", "file_write"} {
-			if tools[blocked] {
-				t.Errorf("call %d: tool %q should be filtered out after skill activation, but was present", callIdx, blocked)
+		// All 5 tools must be present in every call
+		for _, expected := range []string{"use_skill", "http", "file_read", "bash", "file_write"} {
+			if !tools[expected] {
+				t.Errorf("call %d: expected tool %q to be present (tools should not be filtered from schema)", callIdx, expected)
 			}
 		}
-		// http, file_read, use_skill MUST be present
-		for _, allowed := range []string{"http", "file_read", "use_skill"} {
-			if !tools[allowed] {
-				t.Errorf("call %d: expected tool %q to be present after skill activation", callIdx, allowed)
+		if len(toolsSentPerCall[callIdx]) != call0Count {
+			t.Errorf("call %d: expected %d tools (same as call 0), got %d", callIdx, call0Count, len(toolsSentPerCall[callIdx]))
+		}
+	}
+}
+
+func TestAgentLoop_SkillListingInjected(t *testing.T) {
+	var sentMessages []client.Message
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req client.CompletionRequest
+		json.Unmarshal(body, &req)
+		sentMessages = req.Messages
+		json.NewEncoder(w).Encode(nativeResponse("done", "end_turn", nil, 10, 5))
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+	loop.SetSkills([]*skills.Skill{
+		{Name: "kocoro", Description: "Platform configuration assistant"},
+		{Name: "reviewer", Description: "Code review helper"},
+	})
+
+	_, _, err := loop.Run(context.Background(), "hello", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	found := false
+	for _, m := range sentMessages {
+		if m.Role == "user" && strings.Contains(m.Content.Text(), "## Available Skills") {
+			found = true
+			text := m.Content.Text()
+			if !strings.Contains(text, "kocoro: Platform configuration assistant") {
+				t.Errorf("skill listing missing kocoro entry")
+			}
+			if !strings.Contains(text, "reviewer: Code review helper") {
+				t.Errorf("skill listing missing reviewer entry")
+			}
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected a user message with skill listing, but none found")
+	}
+}
+
+func TestAgentLoop_SkillListingAbsentWhenNoSkills(t *testing.T) {
+	var sentMessages []client.Message
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req client.CompletionRequest
+		json.Unmarshal(body, &req)
+		sentMessages = req.Messages
+		json.NewEncoder(w).Encode(nativeResponse("done", "end_turn", nil, 10, 5))
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+	// No SetSkills call — agentSkills is nil
+
+	_, _, err := loop.Run(context.Background(), "hello", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, m := range sentMessages {
+		if m.Role == "user" && strings.Contains(m.Content.Text(), "## Available Skills") {
+			t.Errorf("expected no skill listing when no skills are set, but found one")
+		}
+	}
+}
+
+func TestAgentLoop_SkillDiscovery(t *testing.T) {
+	var mu sync.Mutex
+	var discoveryCallSeen bool
+	var mainCallMessages []client.Message
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Messages  []client.Message `json:"messages"`
+			ModelTier string           `json:"model_tier"`
+		}
+		json.Unmarshal(body, &req)
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		if req.ModelTier == "small" {
+			discoveryCallSeen = true
+			json.NewEncoder(w).Encode(nativeResponse("kocoro", "end_turn", nil, 5, 3))
+			return
+		}
+
+		mainCallMessages = req.Messages
+		json.NewEncoder(w).Encode(nativeResponse("done", "end_turn", nil, 10, 5))
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+	// Need ≥10 skills to cross the discovery threshold
+	testSkills := make([]*skills.Skill, 0, 12)
+	testSkills = append(testSkills, &skills.Skill{Name: "kocoro", Description: "platform management"})
+	for si := 2; si <= 12; si++ {
+		testSkills = append(testSkills, &skills.Skill{Name: fmt.Sprintf("skill-%d", si), Description: fmt.Sprintf("test skill %d", si)})
+	}
+	loop.SetSkills(testSkills)
+
+	_, _, err := loop.Run(context.Background(), "帮我创建一个 agent", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if !discoveryCallSeen {
+		t.Error("discovery call (model_tier=small) should have been made")
+	}
+
+	// Main call should contain a discovery hint message
+	found := false
+	for _, m := range mainCallMessages {
+		if m.Role == "user" && strings.Contains(m.Content.Text(), "Skills relevant to your task") {
+			found = true
+			if !strings.Contains(m.Content.Text(), "kocoro") {
+				t.Error("hint should contain matched skill name")
 			}
 		}
+	}
+	if !found {
+		t.Error("discovery hint message not found in main LLM call")
+	}
+}
+
+func TestAgentLoop_SkillDiscoveryDisabled(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		json.NewEncoder(w).Encode(nativeResponse("done", "end_turn", nil, 10, 5))
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+	loop.SetSkills([]*skills.Skill{
+		{Name: "kocoro", Description: "platform management"},
+	})
+	loop.SetSkillDiscovery(false)
+
+	_, _, err := loop.Run(context.Background(), "hello", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Only 1 LLM call (the main one), no discovery call
+	if callCount != 1 {
+		t.Errorf("expected 1 LLM call (no discovery), got %d", callCount)
+	}
+}
+
+func TestReplaceUserMessageText(t *testing.T) {
+	t.Run("plain text message", func(t *testing.T) {
+		msg := client.Message{Role: "user", Content: client.NewTextContent("original")}
+		got := replaceUserMessageText(msg, "replaced")
+		if got.Content.HasBlocks() {
+			t.Error("expected plain text, got blocks")
+		}
+		if got.Content.Text() != "replaced" {
+			t.Errorf("text = %q, want %q", got.Content.Text(), "replaced")
+		}
+	})
+
+	t.Run("block message preserves images", func(t *testing.T) {
+		blocks := []client.ContentBlock{
+			{Type: "text", Text: "original scaffold"},
+			{Type: "image", Source: &client.ImageSource{Type: "base64", MediaType: "image/png", Data: "abc123"}},
+		}
+		msg := client.Message{Role: "user", Content: client.NewBlockContent(blocks)}
+
+		got := replaceUserMessageText(msg, "new scaffold with skills")
+		if !got.Content.HasBlocks() {
+			t.Fatal("expected blocks, got plain text")
+		}
+		gotBlocks := got.Content.Blocks()
+		if len(gotBlocks) != 2 {
+			t.Fatalf("expected 2 blocks, got %d", len(gotBlocks))
+		}
+		if gotBlocks[0].Type != "text" || gotBlocks[0].Text != "new scaffold with skills" {
+			t.Errorf("first block = %q, want replaced text", gotBlocks[0].Text)
+		}
+		if gotBlocks[1].Type != "image" {
+			t.Errorf("second block type = %q, want image", gotBlocks[1].Type)
+		}
+		if gotBlocks[1].Source == nil || gotBlocks[1].Source.Data != "abc123" {
+			t.Error("image data was corrupted")
+		}
+	})
+
+	t.Run("block message with no text block prepends", func(t *testing.T) {
+		blocks := []client.ContentBlock{
+			{Type: "image", Source: &client.ImageSource{Type: "base64", MediaType: "image/png", Data: "xyz"}},
+		}
+		msg := client.Message{Role: "user", Content: client.NewBlockContent(blocks)}
+
+		got := replaceUserMessageText(msg, "prepended text")
+		gotBlocks := got.Content.Blocks()
+		if len(gotBlocks) != 2 {
+			t.Fatalf("expected 2 blocks, got %d", len(gotBlocks))
+		}
+		if gotBlocks[0].Type != "text" || gotBlocks[0].Text != "prepended text" {
+			t.Errorf("first block should be prepended text, got %q", gotBlocks[0].Text)
+		}
+	})
+}
+
+func TestAgentLoop_SkillListingPreservesMultimodal(t *testing.T) {
+	var sentMessages []client.Message
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req client.CompletionRequest
+		json.Unmarshal(body, &req)
+		sentMessages = req.Messages
+		json.NewEncoder(w).Encode(nativeResponse("done", "end_turn", nil, 10, 5))
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+	loop.SetSkills([]*skills.Skill{
+		{Name: "kocoro", Description: "Platform configuration assistant"},
+	})
+
+	imageBlocks := []client.ContentBlock{
+		{Type: "image", Source: &client.ImageSource{Type: "base64", MediaType: "image/png", Data: "fakedata"}},
+	}
+
+	_, _, err := loop.Run(context.Background(), "describe this image", imageBlocks, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Find the user message sent to LLM
+	var userMsg *client.Message
+	for i := range sentMessages {
+		if sentMessages[i].Role == "user" {
+			userMsg = &sentMessages[i]
+		}
+	}
+	if userMsg == nil {
+		t.Fatal("no user message found")
+	}
+
+	if !userMsg.Content.HasBlocks() {
+		t.Fatal("user message should be block-based (multimodal), but was plain text — image blocks were dropped")
+	}
+
+	blocks := userMsg.Content.Blocks()
+	hasText := false
+	hasImage := false
+	for _, b := range blocks {
+		if b.Type == "text" {
+			hasText = true
+			if !strings.Contains(b.Text, "## Available Skills") {
+				t.Error("skill listing not found in text block")
+			}
+		}
+		if b.Type == "image" {
+			hasImage = true
+			if b.Source == nil || b.Source.Data != "fakedata" {
+				t.Error("image data was corrupted")
+			}
+		}
+	}
+	if !hasText {
+		t.Error("no text block found in multimodal message")
+	}
+	if !hasImage {
+		t.Error("image block was dropped from multimodal message")
 	}
 }

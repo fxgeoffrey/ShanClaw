@@ -890,6 +890,7 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 	loop.SetEnableStreaming(false)
 	loop.SetDeltaProvider(agent.NewTemporalDelta())
 	loop.SetCacheSource(cacheSourceFromDaemonSource(req.Source))
+	loop.SetSkillDiscovery(runCfg.Agent.SkillDiscoveryEnabled())
 	if agentOverride != nil {
 		scopedMCPCtx := tools.ResolveMCPContext(runCfg, agentOverride)
 		agentDir := filepath.Join(deps.ShannonDir, "agents", agentName)

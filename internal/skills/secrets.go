@@ -2,12 +2,15 @@ package skills
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"syscall"
+
+	"github.com/zalando/go-keyring"
 )
 
 var validEnvKey = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
@@ -203,4 +206,34 @@ func (s *SecretsStore) modifyIndex(fn func(*secretsIndex)) error {
 		return err
 	}
 	return os.Rename(tmp, s.indexPath)
+}
+
+// keychainWrite stores a secret in the OS keychain. On macOS this uses
+// `security` interactive mode internally (via zalando/go-keyring) so the
+// password travels over stdin, never argv — process listings (`ps`,
+// ProcessInformation) cannot observe the value.
+func keychainWrite(service, account, password string) error {
+	if err := keyring.Set(service, account, password); err != nil {
+		return fmt.Errorf("keyring set %s/%s: %w", service, account, err)
+	}
+	return nil
+}
+
+// keychainRead retrieves a secret. Returns an error if the item is not found.
+func keychainRead(service, account string) (string, error) {
+	val, err := keyring.Get(service, account)
+	if err != nil {
+		return "", fmt.Errorf("keyring get %s/%s: %w", service, account, err)
+	}
+	return val, nil
+}
+
+// keychainDelete removes a secret. Returns nil if the item does not exist
+// (idempotent delete).
+func keychainDelete(service, account string) error {
+	err := keyring.Delete(service, account)
+	if err == nil || errors.Is(err, keyring.ErrNotFound) {
+		return nil
+	}
+	return fmt.Errorf("keyring delete %s/%s: %w", service, account, err)
 }

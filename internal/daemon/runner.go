@@ -845,6 +845,19 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		reg = tools.ApplyToolFilter(reg, agentOverride)
 	}
 
+	// Attach SecretsStore to the session-scoped bash tool so use_skill
+	// activations can expose skill secrets as child-process env vars.
+	// Baseline bash is created at daemon start before NewServer, so the
+	// store has to be wired here, after CloneWithRuntimeConfig has
+	// deep-copied bash for this run.
+	if deps.SecretsStore != nil {
+		if bashTool, ok := reg.Get("bash"); ok {
+			if bt, ok := bashTool.(*tools.BashTool); ok {
+				bt.SecretsStore = deps.SecretsStore
+			}
+		}
+	}
+
 	// Load skills (agent-scoped or global) and wire to registry
 	var loadedSkills []*skills.Skill
 	if agentOverride != nil {

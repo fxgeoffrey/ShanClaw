@@ -2540,16 +2540,20 @@ func (s *Server) handlePutSkillSecrets(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "no secrets provided")
 		return
 	}
+	keys := make([]string, 0, len(secrets))
 	for key := range secrets {
 		if !skills.IsValidEnvKey(key) {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid secret key %q: must match [A-Z0-9_]+", key))
 			return
 		}
+		keys = append(keys, key)
 	}
+	sort.Strings(keys)
 	if err := s.secretsStore.Set(name, secrets); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.auditHTTPOp("PUT", "/skills/"+name+"/secrets", "set secrets for skill: "+strings.Join(keys, ","))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
@@ -2563,6 +2567,7 @@ func (s *Server) handleDeleteSkillSecrets(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.auditHTTPOp("DELETE", "/skills/"+name+"/secrets", "cleared all secrets for skill")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -2581,6 +2586,7 @@ func (s *Server) handleDeleteSkillSecretKey(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.auditHTTPOp("DELETE", "/skills/"+name+"/secrets/"+key, "removed secret key")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 

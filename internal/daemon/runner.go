@@ -417,7 +417,8 @@ type ServerDeps struct {
 	SessionCache    *SessionCache
 	EventBus        *EventBus
 	ScheduleManager *schedule.Manager
-	WSClient        *Client // WebSocket client for proactive messages
+	WSClient        *Client              // WebSocket client for proactive messages
+	SecretsStore    *skills.SecretsStore // skill secrets for env injection
 }
 
 // Snapshot returns current Config, Registry, and Supervisor under read lock.

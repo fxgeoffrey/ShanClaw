@@ -77,6 +77,13 @@ func (t *useSkillTool) Run(ctx context.Context, argsJSON string) (agent.ToolResu
 		}, nil
 	}
 
+	// Register this skill as activated for the current run, so subsequent
+	// bash commands can access its declared secrets via environment vars.
+	// Secret values are NEVER substituted into the prompt body — they must
+	// only reach the shell child process, never the LLM context or session
+	// transcript.
+	skills.ActivatedFromContext(ctx).Add(skill.Name)
+
 	body := skill.Prompt
 	if skill.Dir != "" {
 		body = rewriteRelativePaths(body, skill.Dir)

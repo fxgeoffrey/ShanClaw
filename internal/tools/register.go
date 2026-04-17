@@ -22,7 +22,7 @@ import (
 // are passed to the BashTool so they skip approval.
 // Returns the registry and a cleanup function that shuts down any active
 // tool resources (e.g. browser process).
-func RegisterLocalTools(cfg *config.Config) (*agent.ToolRegistry, *[]*skills.Skill, func()) {
+func RegisterLocalTools(cfg *config.Config, secretsStore *skills.SecretsStore) (*agent.ToolRegistry, *[]*skills.Skill, func()) {
 	reg := agent.NewToolRegistry()
 
 	skillsPtr := &[]*skills.Skill{}
@@ -34,7 +34,7 @@ func RegisterLocalTools(cfg *config.Config) (*agent.ToolRegistry, *[]*skills.Ski
 	reg.Register(&GlobTool{})
 	reg.Register(&GrepTool{})
 
-	bashTool := &BashTool{}
+	bashTool := &BashTool{SecretsStore: secretsStore}
 	if cfg != nil {
 		bashTool.ExtraSafeCommands = cfg.Permissions.AllowedCommands
 		if cfg.Tools.BashMaxOutput > 0 {
@@ -299,7 +299,7 @@ func RegisterAllWithBaseline(gw *client.GatewayClient, cfg *config.Config, agent
 	err error,
 ) {
 	CleanupOrphanedChromedp()
-	localReg, sp, baseCleanup := RegisterLocalTools(cfg)
+	localReg, sp, baseCleanup := RegisterLocalTools(cfg, nil)
 	baseline = localReg
 
 	// 45s allows time for Chrome CDP launch (up to 15s) + MCP handshake.
@@ -324,7 +324,7 @@ func RegisterAll(gw *client.GatewayClient, cfg *config.Config, agentDef ...*agen
 	// Kill any orphaned chromedp Chrome processes from previous daemon runs
 	CleanupOrphanedChromedp()
 
-	reg, skillsPtr, baseCleanup := RegisterLocalTools(cfg)
+	reg, skillsPtr, baseCleanup := RegisterLocalTools(cfg, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

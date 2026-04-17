@@ -89,7 +89,7 @@ func TestApplyRuntimeContext_RefreshesConfigAndCommands(t *testing.T) {
 		Sources: map[string]config.ConfigSource{},
 	}
 
-	reg, skillsPtr, cleanup := tools.RegisterLocalTools(baseCfg)
+	reg, skillsPtr, cleanup := tools.RegisterLocalTools(baseCfg, nil)
 	defer cleanup()
 
 	sessions := session.NewManager(t.TempDir())

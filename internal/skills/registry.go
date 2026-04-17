@@ -1,5 +1,12 @@
 package skills
 
+// SecretSpec describes a single secret (API key) that a skill requires.
+type SecretSpec struct {
+	Key      string `json:"key"`
+	Label    string `json:"label"`
+	Required bool   `json:"required"`
+}
+
 // Skill is a composable capability loaded from a SKILL.md file.
 // Follows the Anthropic Agent Skills spec (agentskills.io/specification).
 type Skill struct {
@@ -21,11 +28,13 @@ type Skill struct {
 
 // SkillMeta is the lightweight representation for API responses (no body/prompt).
 type SkillMeta struct {
-	Name            string `json:"name"`
-	Description     string `json:"description"`
-	Source          string `json:"source,omitempty"`
-	InstallSource   string `json:"install_source"`
-	MarketplaceSlug string `json:"marketplace_slug,omitempty"`
+	Name             string       `json:"name"`
+	Description      string       `json:"description"`
+	Source           string       `json:"source,omitempty"`
+	InstallSource    string       `json:"install_source"`
+	MarketplaceSlug  string       `json:"marketplace_slug,omitempty"`
+	RequiredSecrets  []SecretSpec `json:"required_secrets,omitempty"`
+	ConfiguredSecrets []string    `json:"configured_secrets,omitempty"`
 }
 
 // ToMeta returns API-safe metadata without the full prompt body.
@@ -37,4 +46,54 @@ func (s *Skill) ToMeta() SkillMeta {
 		InstallSource:   s.InstallSource,
 		MarketplaceSlug: s.MarketplaceSlug,
 	}
+}
+
+// RequiredSecrets parses requires.env from ClawHub metadata
+// (metadata.openclaw.requires.env and metadata.clawdbot.requires.env).
+// Returns nil if no secrets are declared or metadata is malformed.
+func (s *Skill) RequiredSecrets() []SecretSpec {
+	if len(s.Metadata) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	var result []SecretSpec
+	for _, parentKey := range []string{"openclaw", "clawdbot"} {
+		envKeys := extractRequiresEnv(s.Metadata, parentKey)
+		for _, key := range envKeys {
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			result = append(result, SecretSpec{
+				Key:      key,
+				Label:    key,
+				Required: true,
+			})
+		}
+	}
+	return result
+}
+
+// extractRequiresEnv safely navigates metadata[parentKey].requires.env
+// and returns the string slice. Returns nil on any type mismatch.
+func extractRequiresEnv(metadata map[string]any, parentKey string) []string {
+	parent, ok := metadata[parentKey].(map[string]any)
+	if !ok {
+		return nil
+	}
+	requires, ok := parent["requires"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	envList, ok := requires["env"].([]any)
+	if !ok {
+		return nil
+	}
+	var result []string
+	for _, v := range envList {
+		if s, ok := v.(string); ok && s != "" {
+			result = append(result, s)
+		}
+	}
+	return result
 }

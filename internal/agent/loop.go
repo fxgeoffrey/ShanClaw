@@ -1399,9 +1399,10 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	// re-injection when the listing survives in context. Note: persisted
 	// history strips the scaffold (captureRunMessages restores rawUserMessage),
 	// so daemon runs (which new-build AgentLoop each turn) will re-inject the
-	// listing every turn (~500 tokens). This is acceptable: the listing lands
-	// inside the scaffolded user message which is cache-eligible, and the cost
-	// is <3% of a typical prompt.
+	// listing every turn. The listing sits after <!-- cache_break --> so it is
+	// NOT covered by cache breakpoint 3 and counts as uncached input tokens
+	// (~200 tokens ≈ $0.0006/turn). Acceptable trade-off vs. moving it into
+	// the cached prefix which would break byte stability on skill set changes.
 	// Delta tracking: only announce skills not yet sent in prior Run() calls
 	// (relevant for TUI multi-turn sessions where sentSkillNames persists).
 	if len(a.agentSkills) > 0 {

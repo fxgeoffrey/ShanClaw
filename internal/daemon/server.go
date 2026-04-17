@@ -39,6 +39,7 @@ type Server struct {
 	client                 *Client
 	deps                   *ServerDeps
 	server                 *http.Server
+	listenerMu             sync.Mutex // protects listener
 	listener               net.Listener
 	version                string
 	ctx                    context.Context // daemon lifecycle context, set on Start
@@ -176,8 +177,11 @@ func (s *Server) SetApprovalResolvedNotifier(fn func(ApprovalResolvedPayload) er
 }
 
 func (s *Server) Port() int {
-	if s.listener != nil {
-		return s.listener.Addr().(*net.TCPAddr).Port
+	s.listenerMu.Lock()
+	ln := s.listener
+	s.listenerMu.Unlock()
+	if ln != nil {
+		return ln.Addr().(*net.TCPAddr).Port
 	}
 	return s.port
 }
@@ -271,7 +275,9 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("daemon server listen: %w", err)
 	}
+	s.listenerMu.Lock()
 	s.listener = ln
+	s.listenerMu.Unlock()
 	s.server = &http.Server{Handler: mux}
 
 	go func() {

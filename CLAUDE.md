@@ -50,6 +50,7 @@ internal/
     readtracker.go     # read-before-edit enforcement
     approval_cache.go  # per-turn approval caching
     normalize.go       # response normalization
+    skill_discovery.go # Per-turn small-model skill matching (discoverRelevantSkills)
   agents/
     loader.go          # LoadAgent (config.yaml, commands/, _attached.yaml), ListAgents, ParseAgentMention
     api.go             # Agent CRUD operations for daemon API
@@ -147,6 +148,14 @@ Must match `^[a-z0-9][a-z0-9_-]{0,63}$`. Validated before any path concatenation
 ### Tool Priority
 Local tools > MCP tools > Gateway tools. Deduplication by name in registry.
 
+### Skill Discovery
+Three-layer system for triggering `use_skill`:
+1. **Skill listing** — full descriptions (rune-safe truncated, 4000 char total budget) embedded in the scaffolded user message on first turn. Not in the system prompt (moved out for cache stability).
+2. **Semantic discovery** — blocking `model_tier: "small"` call on iteration 0 (5s timeout). Matches user intent against loaded skill descriptions, injects `<system-reminder>` hint into the scaffolded user message. Gated by `agent.skill_discovery` config (default `true`).
+3. **Fallback catalog** — `use_skill` tool description dynamically includes all loaded skill names.
+
+**Skill allowed-tools enforcement** uses execution-time denial (`loop.go`), NOT schema filtering. The tools array stays full for the entire `Run()` to preserve Anthropic prompt cache stability. Blocked tools receive an error `ToolResult` with `[skill restriction]` message. A `<system-reminder>` hint is also appended to the `use_skill` result for soft guidance.
+
 ### Permission Model
 ```
 hard-block constants → denied_commands → compound-command splitting → allowed_commands → default safe → RequiresApproval + SafeChecker
@@ -204,6 +213,8 @@ See `docs/cache-strategy.md` for the authoritative design (4-breakpoint allocati
 - `cache_source` tags every LLM call; `_ttl_block(request)` routes 1h for channel/TUI, 5m for one-shot/subagent (fail cheap).
 - `SHANNON_FORCE_TTL=off|5m|1h` overrides for operator debug / A-B.
 - `normalizeToolInput` in `gateway.go` canonicalizes nested JSON key ordering so cross-turn `system_h` / tool_use-input stays byte-stable.
+- **Skill allowed-tools** uses execution-time denial (not schema filtering) to keep `toolSchemas` byte-stable. Previous `applySkillFilter` shrank the tools array after `use_skill`, causing ~$0.10 cache rebuild per activation; now tools stay full ($0.02).
+- **Skill listing** is embedded in the scaffolded user message (not system prompt) so different skill sets don't invalidate the system prefix cache.
 
 ### Context Management
 - **Proactive compaction**: `PersistLearnings` → `GenerateSummary` (two-phase: `<analysis>` scratchpad → `<summary>`) → `ShapeHistory` at 85% context window.

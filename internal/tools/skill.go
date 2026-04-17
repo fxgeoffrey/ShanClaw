@@ -27,17 +27,9 @@ func newUseSkillTool(s *[]*skills.Skill) *useSkillTool {
 }
 
 func (t *useSkillTool) Info() agent.ToolInfo {
-	desc := "Activate a named skill to load its specialized instructions. Call this when the user's request matches a skill's purpose."
-	if t.skills != nil && len(*t.skills) > 0 {
-		names := make([]string, 0, len(*t.skills))
-		for _, s := range *t.skills {
-			names = append(names, s.Name)
-		}
-		desc += " Available: " + strings.Join(names, ", ") + "."
-	}
 	return agent.ToolInfo{
 		Name:        "use_skill",
-		Description: desc,
+		Description: "Activate a named skill to load its specialized instructions. Call this when the user's request matches a skill's purpose. Available skill names are listed in the conversation context.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

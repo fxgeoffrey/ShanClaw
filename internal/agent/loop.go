@@ -1430,6 +1430,12 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		}
 	}
 
+	const discoveryThreshold = 10
+	type discoveryResult struct {
+		matched []*skills.Skill
+		usage   client.Usage
+	}
+
 	for i := 0; ; i++ {
 		effectiveMax := a.effectiveMaxIter(toolsUsed)
 		if i >= effectiveMax {
@@ -1465,17 +1471,13 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		// - ≥10 skills installed (below that, listing is sufficient)
 		// - User text changed since last discovery (skip tool-use iterations
 		//   where the user message hasn't changed)
-		const discoveryThreshold = 10
-		type discoveryResult struct {
-			matched []*skills.Skill
-			usage   client.Usage
-		}
 		var discoveryCh chan discoveryResult
 		userTextChanged := latestUserText != lastDiscoveryInput
 		if len(a.agentSkills) >= discoveryThreshold && a.skillDiscovery && userTextChanged {
 			lastDiscoveryInput = latestUserText
 			discoveryCh = make(chan discoveryResult, 1)
 			discoveryInput := latestUserText // snapshot for goroutine (latestUserText may be mutated by drain below)
+			// Goroutine self-terminates within 5s (discoveryTimeout) even if Run() returns early.
 			go func() {
 				matched, u := discoverRelevantSkills(ctx, a.client, discoveryInput, a.agentSkills)
 				discoveryCh <- discoveryResult{matched: matched, usage: u}

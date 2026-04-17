@@ -5,10 +5,15 @@
 # Usage:
 #   sh install.sh              # Install (if needed) and show status
 #   sh install.sh --check-only # Check status without installing
-set -e
+set -eu
+
+# Pin upstream to a specific release tag to prevent unreviewed changes on
+# main from affecting every ShanClaw user. Bump together with any
+# ptengine-cli release validated against this skill.
+PTENGINE_CLI_REF="v0.1.0"
 
 CHECK_ONLY=false
-if [ "$1" = "--check-only" ]; then
+if [ "${1-}" = "--check-only" ]; then
   CHECK_ONLY=true
 fi
 
@@ -40,7 +45,7 @@ if has_cli; then
     echo "Run:  ptengine-cli config set --api-key <YOUR_API_KEY> --profile-id <YOUR_PROFILE_ID>"
     echo ""
     echo "STATUS: NEEDS_CONFIG"
-    exit 0
+    exit 1
   fi
 fi
 
@@ -55,7 +60,7 @@ fi
 # ---------- install ----------
 echo "Installing ptengine-cli via official script..."
 echo ""
-curl -sSL https://raw.githubusercontent.com/Kocoro-lab/ptengine-cli/main/scripts/install.sh | sh
+curl -sSL "https://raw.githubusercontent.com/Kocoro-lab/ptengine-cli/${PTENGINE_CLI_REF}/scripts/install.sh" | sh
 
 echo ""
 

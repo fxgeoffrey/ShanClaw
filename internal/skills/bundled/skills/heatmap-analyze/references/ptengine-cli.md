@@ -6,7 +6,7 @@ ptengine-cli is a CLI tool for querying Ptengine heatmap analytics data via thei
 
 ```bash
 # Via official install script (recommended)
-curl -sSL https://raw.githubusercontent.com/Kocoro-lab/ptengine-cli/main/scripts/install.sh | sh
+curl -sSL https://raw.githubusercontent.com/Kocoro-lab/ptengine-cli/v0.1.0/scripts/install.sh | sh
 
 # Or use the project's wrapper
 sh install.sh

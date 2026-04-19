@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"testing"
@@ -215,5 +216,93 @@ func TestPuller_AuditOnUnsafePath(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected memory_bundle_unsafe_path audit, got %v", captured)
+	}
+}
+
+func TestPuller_AtomicInstallAndRetention(t *testing.T) {
+	root := t.TempDir()
+	// Pre-install 4 old bundles + current symlink.
+	bundles := []string{
+		"2026-04-15T00-00-00Z",
+		"2026-04-16T00-00-00Z",
+		"2026-04-17T00-00-00Z",
+		"2026-04-18T00-00-00Z",
+	}
+	for _, ts := range bundles {
+		if err := os.MkdirAll(filepath.Join(root, "bundles", ts), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(root, "bundles", "2026-04-18T00-00-00Z"), filepath.Join(root, "current")); err != nil {
+		t.Fatal(err)
+	}
+	WriteFingerprint(root, "k")
+
+	const dataSha = "3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/manifest") {
+			_ = json.NewEncoder(w).Encode(Manifest{
+				BundleTs:      "2026-04-19T00-00-00Z",
+				BundleVersion: "0.4.0",
+				Files:         []ManifestFile{{Path: "data", Size: 4, Sha256: dataSha}},
+			})
+			return
+		}
+		_, _ = w.Write([]byte("data"))
+	}))
+	defer srv.Close()
+	p := NewPuller(Config{Provider: "cloud", BundleRoot: root, Endpoint: srv.URL, APIKey: "k"}, nil, nil)
+	if err := p.tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	target, err := os.Readlink(filepath.Join(root, "current"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(target) != "2026-04-19T00-00-00Z" {
+		t.Fatalf("current=%q", target)
+	}
+	if _, err := os.Stat(filepath.Join(root, "bundles", "2026-04-19T00-00-00Z", "data")); err != nil {
+		t.Fatal("installed bundle missing data file")
+	}
+	// Retention: newest 3 by ts (keeps 04-19, 04-18, 04-17). Plus current symlink target
+	// is preserved if it falls outside newest-3 (here it does NOT — 04-19 is current).
+	// 04-15 and 04-16 should be removed.
+	entries, _ := os.ReadDir(filepath.Join(root, "bundles"))
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	want := []string{"2026-04-17T00-00-00Z", "2026-04-18T00-00-00Z", "2026-04-19T00-00-00Z"}
+	if len(names) != 3 {
+		t.Fatalf("kept %v want %v", names, want)
+	}
+	for i, n := range names {
+		if n != want[i] {
+			t.Fatalf("kept[%d]=%s want %s", i, n, want[i])
+		}
+	}
+}
+
+func TestPuller_RetentionPreservesCurrent(t *testing.T) {
+	// Edge case: current symlink targets a bundle that falls OUTSIDE the
+	// newest-3 by ts. Retention must still keep it (defensive).
+	root := t.TempDir()
+	for _, ts := range []string{"a", "b", "c", "d", "e"} {
+		os.MkdirAll(filepath.Join(root, "bundles", ts), 0o755)
+	}
+	// current → "a" (oldest by lexicographic sort)
+	os.Symlink(filepath.Join(root, "bundles", "a"), filepath.Join(root, "current"))
+	WriteFingerprint(root, "k")
+	// Manifest reports same ts as current ("a") → tick is noop and won't trigger
+	// install, but we want to test retention in isolation. Call retain directly.
+	p := NewPuller(Config{Provider: "cloud", BundleRoot: root, Endpoint: "http://x", APIKey: "k"}, nil, nil)
+	p.retain(3)
+	if _, err := os.Stat(filepath.Join(root, "bundles", "a")); err != nil {
+		t.Fatal("retain wiped current symlink target")
 	}
 }

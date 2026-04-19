@@ -27,11 +27,6 @@ type Manifest struct {
 	Files           []ManifestFile `json:"files"`
 }
 
-// Sidecar placeholder — Task 7 will replace this with the real definition
-// (sidecar.go: managed child process + AttachPolicy). The puller only holds
-// a pointer to schedule /bundle/reload after install.
-type Sidecar struct{}
-
 // Puller drives the periodic bundle download cycle in cloud mode.
 //   - cfg supplies BundleRoot, Endpoint, APIKey.
 //   - sidecar may be nil; reload notification is wired in a later task.

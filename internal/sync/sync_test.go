@@ -114,3 +114,63 @@ func TestSyncRun_HappyPath(t *testing.T) {
 		t.Errorf("expected at least one audit event")
 	}
 }
+
+func TestSyncRun_DisabledIsNoop(t *testing.T) {
+	home := t.TempDir()
+
+	cfg := DefaultConfig()
+	cfg.Enabled = false
+
+	uploader := &stubUploader{respFn: func(b client.SyncBatchRequest) (client.SyncBatchResponse, error) {
+		t.Fatalf("uploader must not be called when disabled")
+		return client.SyncBatchResponse{}, nil
+	}}
+	audit := &stubAudit{}
+
+	deps := Deps{
+		Cfg: cfg, HomeDir: home, Uploader: uploader, Audit: audit,
+		Now: func() time.Time { return time.Now().UTC() },
+	}
+	if err := Run(context.Background(), deps); err != nil {
+		t.Fatalf("Run (disabled): %v", err)
+	}
+	if uploader.calls != 0 {
+		t.Errorf("expected 0 upload calls, got %d", uploader.calls)
+	}
+	if len(audit.events) != 1 || audit.events[0]["outcome"] != OutcomeNoop {
+		t.Errorf("expected single noop audit event, got %+v", audit.events)
+	}
+}
+
+func TestSyncRun_FlockSerializes(t *testing.T) {
+	// Two concurrent Run calls on the same HomeDir; second should block then
+	// either no-op (marker advanced) or run fresh.
+	home := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.Enabled = true
+	cfg.LockTimeout = 5 * time.Second
+
+	uploader := &stubUploader{respFn: func(b client.SyncBatchRequest) (client.SyncBatchResponse, error) {
+		return client.SyncBatchResponse{}, nil
+	}}
+	deps := Deps{
+		Cfg: cfg, HomeDir: home, Uploader: uploader, Audit: &stubAudit{},
+		Loader: func(dir, id string) ([]byte, error) { return nil, os.ErrNotExist },
+		Now:    func() time.Time { return time.Now().UTC() },
+	}
+
+	done := make(chan error, 2)
+	go func() { done <- Run(context.Background(), deps) }()
+	go func() { done <- Run(context.Background(), deps) }()
+
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("Run #%d: %v", i, err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("Run #%d timed out — flock likely deadlocked", i)
+		}
+	}
+}

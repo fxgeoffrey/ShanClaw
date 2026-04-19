@@ -2,8 +2,11 @@ package sync
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
@@ -30,9 +33,9 @@ type Deps struct {
 // Run executes one sync iteration: read marker, scan candidates, build batches,
 // upload, apply per-session ack/reject, write marker, audit.
 //
-// Flock acquisition is layered on in Task 15. The current happy-path body
-// is single-process-safe but does NOT guard against concurrent CLI + daemon
-// invocations.
+// Concurrent CLI + daemon callers are serialized via an exclusive flock on
+// ~/.shannon/sync.lock. On contention timeout we emit an OutcomeNoop audit
+// event and return cleanly — losing the race is not an error.
 func Run(ctx context.Context, deps Deps) error {
 	now := time.Now().UTC()
 	if deps.Now != nil {
@@ -40,6 +43,17 @@ func Run(ctx context.Context, deps Deps) error {
 	}
 
 	markerPath := filepath.Join(deps.HomeDir, "sync_marker.json")
+
+	lockPath := filepath.Join(deps.HomeDir, "sync.lock")
+	release, err := acquireFlock(lockPath, deps.Cfg.LockTimeout)
+	if err != nil {
+		audit(deps.Audit, "session_sync", map[string]any{
+			"outcome": OutcomeNoop,
+			"reason":  "lock_contention",
+		})
+		return nil // not an error; another caller is running
+	}
+	defer release()
 
 	marker, err := ReadMarker(markerPath)
 	if err != nil {
@@ -205,4 +219,37 @@ func audit(a AuditLogger, event string, fields map[string]any) {
 		return
 	}
 	a.Log(event, fields)
+}
+
+// acquireFlock takes an exclusive flock on path, blocking up to timeout.
+// The lock file is never deleted (a deletion would race with a concurrent
+// Open on a different inode — same warning as internal/schedule/schedule.go).
+func acquireFlock(path string, timeout time.Duration) (release func(), err error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("open lock: %w", err)
+	}
+
+	deadline := time.Now().Add(timeout)
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return func() {
+				_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+				_ = f.Close()
+			}, nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			f.Close()
+			return nil, fmt.Errorf("flock: %w", err)
+		}
+		if time.Now().After(deadline) {
+			f.Close()
+			return nil, fmt.Errorf("flock contention: %w", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }

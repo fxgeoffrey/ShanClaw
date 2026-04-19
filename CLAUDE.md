@@ -90,6 +90,16 @@ internal/
     manager.go         # NewSession, Resume, Save, List, Search, Close, OnClose callbacks
     index.go           # SQLite FTS5 search index (sessions.db)
     title.go           # Session title generation helper
+  memory/
+    types.go             # Wire schemas mirroring the Kocoro Cloud memory sidecar HTTP contract
+    errclass.go          # ErrorClass enum + ClassifyHTTP (sub_code → class)
+    config.go            # LoadConfig, ResolveAPIKey, ResolveEndpoint
+    tenant.go            # sha256 fingerprint + tenant-switch detection
+    audit.go             # AuditLogger interface (boolean-only key/endpoint state)
+    client.go            # UDS HTTP client (Query/Reload/Health, X-Request-ID, ctx-cancel dial)
+    sidecar.go           # Spawn/WaitReady/Shutdown + AttachPolicy + Supervisor
+    bundle.go            # Puller: manifest fetch, tenant check, sandboxed stage, atomic install, retention
+    service.go           # Orchestrator: status FSM, supervisor + puller goroutines, NewServiceAttached
   mcp/
     client.go          # MCP client manager (stdio + HTTP transports)
     server.go          # MCP server (JSON-RPC 2.0 over stdio)
@@ -182,6 +192,7 @@ Unknown tools → denied by default (fail-safe).
 - **Mid-turn checkpoint**: `AgentLoop.SetCheckpointFunc(func(ctx) error)` fires at three phase-exit boundaries (after each `executeBatches`, after successful reactive compaction, before `runForceStopTurn`), gated by `tracker.TakeDirty()`. Agent-side `SetCheckpointMinInterval(2s)` debounce; failed save (callback returns error) leaves dirty set and skips the time stamp so the next fire retries. Runner uses `captureTurnBaseline` + `applyTurnMessages` + `applyTurnUsage` — the SAME helpers run from the normal final save AND the hard-error save so a turn is never persisted twice via different paths. `session.Session.InProgress` is set mid-turn, cleared on final save; a non-zero flag on reload indicates a crash-recovered session with a partial transcript.
 - **Playwright `file://` preview bridge** (`internal/tools/filepreview.go`): loopback HTTP server rewrites `browser_navigate(file://…)` → `http://127.0.0.1/<token>/<name>`. Fail-closed allowlist via `AllowRoot(dir)` / `AllowFile(path)`, both symlink-resolved via `filepath.EvalSymlinks`. Daemon populates per-run from effective CWD + user-attached paths so browser reach never exceeds `permissions.CheckFilePath`. Uses `http.ServeContent` (not `http.ServeFile`) to avoid the `index.html` internal redirect. Defense-in-depth: `r.RemoteAddr` loopback check in the handler.
 - **Session sync** (`internal/sync/`): uploads local session JSON to Shannon Cloud once per day (opt-in via `sync.enabled`). Single entry point `sync.Run`; called from daemon ticker and `shan sessions sync` CLI; flock + atomic marker write serialize concurrent callers. Per-session ACK with persistent `marker.failed` bookkeeping; permanent reasons (`size_limit_exceeded`, `load_error`) stay forever and self-heal on session edit.
+- **Memory client** (`internal/memory/`, Phase 2.3): daemon owns sidecar lifecycle (spawn / health / restart / shutdown) and the 24h bundle pull loop. Tool `memory_recall` (`internal/tools/memory.go`) delegates to `memory.Service.Query` via UDS; falls back to `session_search` + MEMORY.md whenever `Service.Status() != Ready`. CLI/TUI use `memory.AttachPolicy` (probe-only, never spawn) and connect via `memory.NewServiceAttached`. Privacy invariant: the resolved API key bytes never reach disk or audit logs (only `sha256[:16]` fingerprint in `<bundle_root>/.tenant_fingerprint`).
 
 ### Daemon Approval Protocol
 - **Interactive mode** (default): Tools requiring approval send `approval_request` over WS → Cloud relays to Ptfrog → user responds → `approval_response` relayed back. Agent loop blocks until response.
@@ -213,6 +224,8 @@ Scalars override, lists merge+dedup, structs field-level merge. MCP server env v
 - Sync dry-run outbox: `~/.shannon/sync_outbox/` (only when `sync.dry_run=true`)
 - Audit log: `~/.shannon/logs/audit.log`
 - Schedule logs: `~/.shannon/logs/schedule-<id>.log`
+- Memory sidecar socket: `~/.shannon/memory.sock`
+- Memory bundle root: `~/.shannon/memory/` (with `bundles/<ts>/`, `current` symlink, `.tenant_fingerprint`, `bundle.lock`)
 
 ### Atomic Writes
 `schedules.json` and `secrets-index.json` use write-to-temp + `os.Rename` + `syscall.Flock` on a persistent `.lock` file. Never delete the lock file (causes flock race on different inodes).

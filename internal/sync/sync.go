@@ -45,7 +45,7 @@ func Run(ctx context.Context, deps Deps) error {
 	markerPath := filepath.Join(deps.HomeDir, "sync_marker.json")
 
 	lockPath := filepath.Join(deps.HomeDir, "sync.lock")
-	release, err := acquireFlock(lockPath, deps.Cfg.LockTimeout)
+	release, err := acquireFlock(ctx, lockPath, deps.Cfg.LockTimeout)
 	if err != nil {
 		audit(deps.Audit, "session_sync", map[string]any{
 			"outcome":      OutcomeNoop,
@@ -227,10 +227,11 @@ func audit(a AuditLogger, event string, fields map[string]any) {
 	a.Log(event, fields)
 }
 
-// acquireFlock takes an exclusive flock on path, blocking up to timeout.
-// The lock file is never deleted (a deletion would race with a concurrent
-// Open on a different inode — same warning as internal/schedule/schedule.go).
-func acquireFlock(path string, timeout time.Duration) (release func(), err error) {
+// acquireFlock takes an exclusive flock on path, blocking up to timeout
+// or until ctx is canceled (whichever fires first). The lock file is never
+// deleted (a deletion would race with a concurrent Open on a different inode
+// — same warning as internal/schedule/schedule.go).
+func acquireFlock(ctx context.Context, path string, timeout time.Duration) (release func(), err error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
@@ -256,6 +257,11 @@ func acquireFlock(path string, timeout time.Duration) (release func(), err error
 			f.Close()
 			return nil, fmt.Errorf("flock contention: %w", err)
 		}
-		time.Sleep(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			f.Close()
+			return nil, ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 }

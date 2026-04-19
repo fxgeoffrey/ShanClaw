@@ -21,6 +21,7 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/config"
 	"github.com/Kocoro-lab/ShanClaw/internal/mcp"
 	"github.com/Kocoro-lab/ShanClaw/internal/skills"
+	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 )
 
@@ -1814,5 +1815,76 @@ func TestServer_EditMessage_Validation(t *testing.T) {
 				t.Errorf("body = %q, want substring %q", rec.Body.String(), tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestRunSyncLoop_StaysAliveWhenInitiallyDisabled(t *testing.T) {
+	// Regression: prior to the post-PR-78 fix, the goroutine returned early
+	// if sync.enabled was false at startup, so flipping enabled=true via
+	// config edit did nothing until daemon restart. The fix keeps the
+	// goroutine alive and re-checks Enabled per tick.
+
+	viper.Reset()
+	defer viper.Reset()
+
+	// Sync disabled at startup but with a valid (short) interval so the
+	// ticker actually fires while the test is watching.
+	viper.Set("sync.enabled", false)
+	viper.Set("sync.daemon_interval", "100ms")
+	viper.Set("sync.daemon_startup_delay", "0")
+
+	c := NewClient("ws://localhost:1/x", "", func(msg MessagePayload) string { return "" }, nil)
+	srv := NewServer(0, c, nil, "test")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		srv.runSyncLoop(ctx)
+		close(done)
+	}()
+
+	// Wait through several ticker periods. Goroutine MUST still be running.
+	// (Pre-fix: it returned within microseconds because !Enabled at startup.)
+	select {
+	case <-done:
+		t.Fatalf("runSyncLoop returned early while sync.enabled=false — should stay alive for hot-enable")
+	case <-time.After(500 * time.Millisecond):
+		// Good: goroutine is still in its tick loop.
+	}
+
+	// Cancel ctx and confirm goroutine exits promptly.
+	cancel()
+	select {
+	case <-done:
+		// Good.
+	case <-time.After(2 * time.Second):
+		t.Fatalf("runSyncLoop did not exit within 2s of ctx cancel")
+	}
+}
+
+func TestRunSyncLoop_ReturnsImmediatelyOnZeroInterval(t *testing.T) {
+	// The only legitimate early-return path: misconfigured DaemonInterval <= 0.
+	viper.Reset()
+	defer viper.Reset()
+
+	viper.Set("sync.enabled", true)
+	viper.Set("sync.daemon_interval", "0s") // misconfigured
+
+	c := NewClient("ws://localhost:1/x", "", func(msg MessagePayload) string { return "" }, nil)
+	srv := NewServer(0, c, nil, "test")
+
+	done := make(chan struct{})
+	go func() {
+		srv.runSyncLoop(context.Background())
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Good: returned immediately on misconfig.
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("runSyncLoop should return immediately when DaemonInterval <= 0")
 	}
 }

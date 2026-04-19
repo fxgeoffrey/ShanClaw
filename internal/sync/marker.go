@@ -105,7 +105,7 @@ func ReadMarker(path string) (Marker, error) {
 
 func sidecarMarker(originalPath string, contents []byte, suffix string) error {
 	side := originalPath + suffix
-	return os.WriteFile(side, contents, 0o644)
+	return os.WriteFile(side, contents, 0o600)
 }
 
 // WriteMarkerAtomic writes m to path via write-temp + rename.

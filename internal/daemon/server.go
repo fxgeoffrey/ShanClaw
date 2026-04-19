@@ -3310,12 +3310,17 @@ func (a syncAuditAdapter) Log(event string, fields map[string]any) {
 }
 
 // runSyncLoop runs sync.Run on a startup-delayed ticker until ctx is canceled.
-// Reads config + rebuilds deps on each tick so config changes (or a fixed
-// missing endpoint/api_key) take effect on the next iteration.
+// Reads config + rebuilds deps on each tick so config changes (enable/disable,
+// fixed missing endpoint/api_key) take effect on the next iteration.
+//
+// Note: the goroutine stays alive even when sync is initially disabled, so
+// enabling sync via config edit without restarting the daemon is picked up
+// on the next tick. The ticker cadence itself (DaemonInterval) is still read
+// once at startup — changing it requires a daemon restart.
 func (s *Server) runSyncLoop(ctx context.Context) {
 	initialCfg := syncpkg.LoadConfig(viper.GetViper())
-	if !initialCfg.Enabled || initialCfg.DaemonInterval <= 0 {
-		return
+	if initialCfg.DaemonInterval <= 0 {
+		return // misconfigured: nothing to do
 	}
 
 	// Wait for startup delay, but respect ctx.
@@ -3330,7 +3335,7 @@ func (s *Server) runSyncLoop(ctx context.Context) {
 	tick := func() {
 		cfg := syncpkg.LoadConfig(viper.GetViper())
 		if !cfg.Enabled {
-			return // operator disabled mid-flight
+			return // disabled now; cheap to re-check next tick
 		}
 		deps, ok := s.buildSyncDeps(cfg)
 		if !ok {
@@ -3341,7 +3346,9 @@ func (s *Server) runSyncLoop(ctx context.Context) {
 		}
 	}
 
-	tick() // catch-up
+	if initialCfg.Enabled {
+		tick() // catch-up only if currently enabled
+	}
 
 	t := time.NewTicker(initialCfg.DaemonInterval)
 	defer t.Stop()

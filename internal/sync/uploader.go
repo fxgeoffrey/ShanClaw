@@ -66,7 +66,7 @@ func (u *DryRunUploader) Send(_ context.Context, batch client.SyncBatchRequest) 
 	}
 	name := fmt.Sprintf("%s-%d.json", now.UTC().Format("20060102T150405Z"), now.UnixNano()%1000)
 	path := filepath.Join(u.OutboxDir, name)
-	if err := os.WriteFile(path, body, 0o644); err != nil {
+	if err := os.WriteFile(path, body, 0o600); err != nil {
 		return client.SyncBatchResponse{}, fmt.Errorf("write outbox: %w", err)
 	}
 

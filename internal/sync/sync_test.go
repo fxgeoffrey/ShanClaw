@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -538,5 +539,53 @@ func TestSyncRun_429SingleAttemptNoLoop(t *testing.T) {
 	}
 	if !m.LastSyncAt.IsZero() {
 		t.Errorf("LastSyncAt must NOT advance on 429; got %v", m.LastSyncAt)
+	}
+}
+
+func TestAcquireFlock_RespectsContextCancellation(t *testing.T) {
+	dir := t.TempDir()
+	lockPath := filepath.Join(dir, "test.lock")
+
+	// First caller holds the lock.
+	releaseFirst, err := acquireFlock(context.Background(), lockPath, 30*time.Second)
+	if err != nil {
+		t.Fatalf("first acquireFlock: %v", err)
+	}
+	defer releaseFirst()
+
+	// Second caller blocks on the lock with a long timeout, but its ctx will
+	// be canceled. It must return promptly with ctx.Err(), NOT wait the full
+	// 30s LockTimeout.
+	ctx, cancel := context.WithCancel(context.Background())
+	type result struct {
+		release func()
+		err     error
+		elapsed time.Duration
+	}
+	done := make(chan result, 1)
+	go func() {
+		start := time.Now()
+		rel, err := acquireFlock(ctx, lockPath, 30*time.Second)
+		done <- result{release: rel, err: err, elapsed: time.Since(start)}
+	}()
+
+	// Let the second caller block for a moment, then cancel.
+	time.Sleep(150 * time.Millisecond)
+	cancel()
+
+	select {
+	case r := <-done:
+		if r.err == nil {
+			t.Fatalf("expected ctx.Err() after cancellation, got nil error (lock acquired?)")
+			r.release()
+		}
+		if !errors.Is(r.err, context.Canceled) {
+			t.Errorf("expected context.Canceled, got %v", r.err)
+		}
+		if r.elapsed > 1*time.Second {
+			t.Errorf("acquireFlock took %v after cancel — should return promptly (well under 1s)", r.elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("acquireFlock did not return within 2s after ctx cancel — ctx not respected")
 	}
 }

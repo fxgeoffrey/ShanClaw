@@ -1724,24 +1724,20 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		// guidance as a <system-reminder> so it survives compaction of the
 		// original use_skill tool_result. Idempotent: armed on activation and
 		// on filter-drift only, NOT per-turn.
+		//
+		// Note: stickyInjectPending is only ever set inside tool-result
+		// processing (use_skill activation or activeSkillFilter denial), both
+		// of which run AFTER an LLM call. It is therefore never true at
+		// i == 0, so this branch only executes on i >= 1.
 		if stickyInjectPending {
 			if reminder := buildStickySkillReminder(stickySkillName, stickySkillSnippet); reminder != "" {
-				if i == 0 && newMsgOffset >= 0 && newMsgOffset < len(messages) {
-					// Turn 0: the user-turn scaffolding is still the last
-					// user message, so append to its text (same pattern as
-					// the skill-discovery hint above).
-					scaffoldedUserText += "\n\n" + reminder
-					messages[newMsgOffset] = replaceUserMessageText(messages[newMsgOffset], scaffoldedUserText)
-				} else {
-					// Later turns: previous user message is tool results;
-					// append as a new user message (same pattern as
-					// discovery hint on i > 0).
-					messages = append(messages, client.Message{
-						Role:    "user",
-						Content: client.NewTextContent(reminder),
-					})
-					markInjected()
-				}
+				// Previous user message is tool results; append as a new user
+				// message (same pattern as the discovery hint on i > 0).
+				messages = append(messages, client.Message{
+					Role:    "user",
+					Content: client.NewTextContent(reminder),
+				})
+				markInjected()
 			}
 			stickyInjectPending = false
 		}

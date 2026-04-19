@@ -350,11 +350,10 @@ func TestScorePlatformIntent_Breakdown(t *testing.T) {
 
 // TestPolicySkillPreFilter_ObserveOnly verifies SHANNON_SKILL_DISCOVERY_OBSERVE
 // suppresses actual pre-filter firing (safety rollback).
+// Uses t.Setenv to avoid package-level mutation, keeping the test safe under
+// -race and future parallel runs.
 func TestPolicySkillPreFilter_ObserveOnly(t *testing.T) {
-	// Flip observe-only mode on for this test.
-	orig := skillObserveOnly
-	skillObserveOnly = true
-	defer func() { skillObserveOnly = orig }()
+	t.Setenv("SHANNON_SKILL_DISCOVERY_OBSERVE", "1")
 
 	policy := &skills.Skill{
 		Name:        "kocoro",

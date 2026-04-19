@@ -209,9 +209,14 @@ var calendarVetoJA = []string{
 	"歓迎会",   // welcome party
 }
 
-// SHANNON_SKILL_DISCOVERY_OBSERVE=1 disables pre-filter firing while still
-// logging score breakdowns. Rollback switch without rebuild.
-var skillObserveOnly = os.Getenv("SHANNON_SKILL_DISCOVERY_OBSERVE") == "1"
+// isObserveOnlyMode reports whether SHANNON_SKILL_DISCOVERY_OBSERVE is set
+// to "1" at call time. Read per-call rather than captured at package init
+// so tests can flip it via t.Setenv without touching package state (no
+// global mutation, no data race under -parallel). The env lookup cost is
+// ~50ns — negligible vs. the small-model call this gates.
+func isObserveOnlyMode() bool {
+	return os.Getenv("SHANNON_SKILL_DISCOVERY_OBSERVE") == "1"
+}
 
 const discoveryPrompt = `Match the user message to available skills. Output skill names ONLY — no explanations, no commentary, no questions. The user may write in any language; skill descriptions are in English. Match by INTENT.
 
@@ -519,7 +524,7 @@ func policySkillPreFilter(userText string, loaded []*skills.Skill) ([]*skills.Sk
 	if !ok {
 		return nil, false
 	}
-	if skillObserveOnly {
+	if isObserveOnlyMode() {
 		if skillDebug {
 			fmt.Fprintf(os.Stderr, "[skill-discovery] observe-only: suppressing pre-filter fire (marker=%s)\n", marker)
 		}

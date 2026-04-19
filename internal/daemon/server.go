@@ -2538,15 +2538,37 @@ func (s *Server) handlePutGlobalSkill(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "daemon deps not configured")
 		return
 	}
+	// Load the existing skill so we can preserve fields the PUT body doesn't
+	// carry (AllowedTools, Metadata, Compatibility). If the skill directory
+	// already exists but load fails, refuse the write rather than silently
+	// clobber those fields with zero values — kocoro's `allowed-tools:
+	// http file_read` is security-critical and must not be dropped on a
+	// transient FS error.
 	var skillToWrite skills.Skill
+	skillExistsOnDisk := false
+	if s.deps != nil && s.deps.ShannonDir != "" {
+		if _, statErr := os.Stat(filepath.Join(s.deps.ShannonDir, "skills", name, "SKILL.md")); statErr == nil {
+			skillExistsOnDisk = true
+		}
+	}
 	sources, err := s.skillSources()
-	if err == nil {
-		if list, loadErr := skills.LoadSkills(sources...); loadErr == nil {
-			for _, existing := range list {
-				if existing.Name == name {
-					skillToWrite = *existing
-					break
-				}
+	if err != nil {
+		if skillExistsOnDisk {
+			writeError(w, http.StatusServiceUnavailable,
+				fmt.Sprintf("cannot resolve skill sources to preserve existing fields: %v", err))
+			return
+		}
+	} else {
+		list, loadErr := skills.LoadSkills(sources...)
+		if loadErr != nil && skillExistsOnDisk {
+			writeError(w, http.StatusServiceUnavailable,
+				fmt.Sprintf("cannot load existing skill %q (refusing to clobber AllowedTools/Metadata): %v", name, loadErr))
+			return
+		}
+		for _, existing := range list {
+			if existing.Name == name {
+				skillToWrite = *existing
+				break
 			}
 		}
 	}

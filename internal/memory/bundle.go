@@ -2,6 +2,8 @@ package memory
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -168,9 +170,114 @@ func (p *Puller) currentTs() string {
 	return filepath.Base(target)
 }
 
-// installBundle is implemented in a later task (sandbox + stage + atomic
-// install + reload + retention). For now it's a no-op so the manifest /
-// tenant / version paths are testable in isolation.
 func (p *Puller) installBundle(ctx context.Context, mf *Manifest) error {
+	staging := filepath.Join(p.cfg.BundleRoot, "staging", mf.BundleTs)
+	if err := os.MkdirAll(staging, 0o755); err != nil {
+		return err
+	}
+	cleanup := func() { _ = os.RemoveAll(staging) }
+
+	for _, f := range mf.Files {
+		if err := validateManifestPath(f.Path, staging); err != nil {
+			sample := f.Path
+			if len(sample) > 64 {
+				sample = sample[:64]
+			}
+			if p.audit != nil {
+				p.audit.Log("memory_bundle_unsafe_path", map[string]any{
+					"path_sample": sample,
+					"reason":      err.Error(),
+				})
+			}
+			cleanup()
+			return fmt.Errorf("unsafe manifest path %q: %w", sample, err)
+		}
+		if err := p.downloadFile(ctx, mf.BundleTs, f, staging); err != nil {
+			cleanup()
+			return err
+		}
+	}
+
+	// Atomic install lives in Task 11. Until that lands this is a no-op so
+	// the sandbox/stage/sha256 paths are testable end-to-end.
+	return p.atomicInstall(staging, mf.BundleTs)
+}
+
+// validateManifestPath enforces the path-sandboxing rules from spec §4.2:
+// reject empty, null bytes, absolute paths, parent traversal, and any path
+// that escapes the staging dir after Clean+Join. This MUST run before any
+// network I/O so a malicious manifest cannot trigger a download to an
+// unauthorized location.
+func validateManifestPath(rel string, stagingDir string) error {
+	if rel == "" {
+		return fmt.Errorf("empty path")
+	}
+	if strings.ContainsRune(rel, 0) {
+		return fmt.Errorf("null byte in path")
+	}
+	if strings.HasPrefix(rel, "/") {
+		return fmt.Errorf("absolute path")
+	}
+	cleaned := filepath.Clean(rel)
+	if cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.Contains(cleaned, string(os.PathSeparator)+"..") {
+		return fmt.Errorf("contains parent traversal")
+	}
+	abs := filepath.Join(stagingDir, cleaned)
+	cleanedAbs := filepath.Clean(abs)
+	prefix := filepath.Clean(stagingDir) + string(os.PathSeparator)
+	if !strings.HasPrefix(cleanedAbs+string(os.PathSeparator), prefix) {
+		return fmt.Errorf("escapes staging dir")
+	}
+	return nil
+}
+
+// downloadFile streams one manifest file into the (already-sandboxed) staging
+// path while computing its SHA256. Mismatch → return error and let the caller
+// clean staging.
+func (p *Puller) downloadFile(ctx context.Context, ts string, f ManifestFile, staging string) error {
+	target := filepath.Join(staging, filepath.Clean(f.Path))
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.cfg.Endpoint+"/api/v1/memory/bundle/"+ts+"/"+f.Path, nil)
+	if err != nil {
+		return err
+	}
+	if p.cfg.APIKey != "" {
+		req.Header.Set("X-API-Key", p.cfg.APIKey)
+	}
+	resp, err := p.httpc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("file %s status %d", f.Path, resp.StatusCode)
+	}
+	out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	h := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(out, h), resp.Body); err != nil {
+		return err
+	}
+	got := hex.EncodeToString(h.Sum(nil))
+	if got != f.Sha256 {
+		if p.audit != nil {
+			p.audit.Log("memory_bundle_install_failed", map[string]any{
+				"reason":      "sha256_mismatch",
+				"path_sample": f.Path,
+			})
+		}
+		return fmt.Errorf("sha256 mismatch on %s: got %s want %s", f.Path, got, f.Sha256)
+	}
+	return nil
+}
+
+// atomicInstall is implemented in Task 11 (rename staging→bundles, symlink
+// swap). Currently a no-op so Task 10 can ship sandbox+stage in isolation.
+func (p *Puller) atomicInstall(stagingDir, ts string) error {
 	return nil
 }

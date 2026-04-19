@@ -971,6 +971,75 @@ curl -X POST http://localhost:7533/message \
 
 **Bridging a messaging platform (Discord, Matrix, custom webhook, etc.) to the daemon?** See the [Channel Integration Guide](examples/channel-integration-guide.md) for the full `POST /message` + SSE + interactive approval workflow, plus a community reference Discord bot. Official Slack/LINE/Feishu/Lark integrations go through Shannon Cloud for multi-tenant OAuth and audit — the local HTTP path here is for personal/dev deployments.
 
+## Session sync to Cloud (opt-in)
+
+ShanClaw can upload your local session JSON to Shannon Cloud once per day. This is **opt-in and disabled by default**. When enabled, it powers Cloud-side analytics, replay, and per-user memory training.
+
+**What's uploaded:** the full session JSON files under `~/.shannon/sessions/` and `~/.shannon/agents/*/sessions/`. Sessions are sent as-is — there is no built-in PII or secret redaction in v1. Skill secrets are never included (they live in the macOS Keychain, never in transcripts), but tool output, file contents, and bash command results are uploaded verbatim.
+
+**Configure in `~/.shannon/config.yaml`:**
+
+```yaml
+sync:
+  enabled: true                  # default false
+  dry_run: false                 # if true, write batches to ~/.shannon/sync_outbox/ instead of POSTing
+  exclude_agents: []             # ["personal", "scratch", "default"]
+  exclude_sources: []            # ["local", "cli", "slack"]; legacy sessions with no source treated as "local"
+  batch_max_sessions: 25
+  batch_max_bytes: 5242880       # 5 MiB
+  single_session_max_bytes: 4194304  # 4 MiB; sessions over this are flagged in the marker, not uploaded
+  daemon_interval: 24h
+  daemon_startup_delay: 60s
+```
+
+**How it runs:**
+
+1. **Daemon ticker** — if the daemon is running, it syncs once 60s after startup, then every 24h. No setup needed beyond `sync.enabled: true`.
+2. **Manual** — run `shan sessions sync` any time. Useful for dry-run verification.
+3. **launchd schedule (recommended for daemon-off coverage on macOS).** `shan schedule create` is for scheduling agent prompts and does not run arbitrary commands, so install a launchd plist by hand:
+
+   Create `~/Library/LaunchAgents/com.shannon.sessions-sync.plist`:
+   ```xml
+   <?xml version="1.0" encoding="UTF-8"?>
+   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+   <plist version="1.0">
+   <dict>
+     <key>Label</key>
+     <string>com.shannon.sessions-sync</string>
+     <key>ProgramArguments</key>
+     <array>
+       <string>/usr/local/bin/shan</string>
+       <string>sessions</string>
+       <string>sync</string>
+     </array>
+     <key>StartCalendarInterval</key>
+     <dict>
+       <key>Hour</key><integer>3</integer>
+       <key>Minute</key><integer>30</integer>
+     </dict>
+     <key>StandardOutPath</key>
+     <string>/tmp/shannon-sessions-sync.log</string>
+     <key>StandardErrorPath</key>
+     <string>/tmp/shannon-sessions-sync.err</string>
+   </dict>
+   </plist>
+   ```
+
+   Adjust `/usr/local/bin/shan` to your install path (`which shan` to find it). Then load:
+   ```bash
+   launchctl load ~/Library/LaunchAgents/com.shannon.sessions-sync.plist
+   ```
+
+   On Linux, use `crontab -e` and add:
+   ```
+   30 3 * * * /usr/local/bin/shan sessions sync
+   ```
+
+**State files:**
+- `~/.shannon/sync_marker.json` — high-watermark + per-session retry bookkeeping. `cat` this to triage. Failed sessions show their reason and byte size.
+- `~/.shannon/sync.lock` — flock for serialization across daemon + CLI calls. Never delete.
+- `~/.shannon/sync_outbox/` — only present in `dry_run` mode; contains JSON batches that would have been uploaded.
+
 ## Scheduled Tasks
 
 Run agents on a cron schedule using macOS launchd. Schedules persist across reboots.

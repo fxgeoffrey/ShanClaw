@@ -84,6 +84,90 @@ func TestScanner_MultiDir_WatermarkOnly(t *testing.T) {
 	}
 }
 
+func TestScanner_RetryUnion_DueOnly(t *testing.T) {
+	env := newScannerEnv(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	older := now.Add(-3 * time.Hour)
+	due := now.Add(-1 * time.Minute)
+	notDue := now.Add(1 * time.Hour)
+
+	// Seed three failed-retry sessions in the default dir, all OLDER than the watermark.
+	env.seedSession(t, "", &session.Session{ID: "due-retry", CreatedAt: older, UpdatedAt: older})
+	env.seedSession(t, "", &session.Session{ID: "not-due-retry", CreatedAt: older, UpdatedAt: older})
+	env.seedSession(t, "", &session.Session{ID: "permanent-fail", CreatedAt: older, UpdatedAt: older})
+
+	cfg := DefaultConfig()
+	cfg.Enabled = true
+	marker := emptyMarker()
+	marker.LastSyncAt = now.Add(-1 * time.Hour) // newer than `older`, so SQL query returns nothing
+	marker.Failed = map[string]FailedEntry{
+		"due-retry": {
+			Reason: "cloud_rejected_retryable", Category: CategoryTransient,
+			Attempts: 1, NextAttemptAt: &due,
+		},
+		"not-due-retry": {
+			Reason: "cloud_rejected_retryable", Category: CategoryTransient,
+			Attempts: 1, NextAttemptAt: &notDue,
+		},
+		"permanent-fail": {
+			Reason: "size_limit_exceeded", Category: CategoryPermanent,
+			Attempts: 1, NextAttemptAt: nil,
+		},
+	}
+
+	cands, err := DiscoverCandidates(context.Background(), ScannerDeps{HomeDir: env.HomeDir}, cfg, marker, now)
+	if err != nil {
+		t.Fatalf("DiscoverCandidates: %v", err)
+	}
+
+	gotIDs := []string{}
+	for _, c := range cands {
+		gotIDs = append(gotIDs, c.SessionID)
+	}
+	sort.Strings(gotIDs)
+	wantIDs := []string{"due-retry"}
+	if !equalStrings(gotIDs, wantIDs) {
+		t.Errorf("retry union: got %v, want %v (only transient with NextAttemptAt<=now)", gotIDs, wantIDs)
+	}
+}
+
+func TestScanner_DedupeOnIDCollision(t *testing.T) {
+	// If a failed-retry ID also matches the SQL watermark query (e.g., user
+	// edited a previously-failed session), it must appear exactly once with
+	// the freshest UpdatedAt.
+	env := newScannerEnv(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	freshUpdate := now.Add(-5 * time.Minute)
+
+	env.seedSession(t, "", &session.Session{ID: "edited-after-fail", CreatedAt: freshUpdate, UpdatedAt: freshUpdate})
+
+	cfg := DefaultConfig()
+	cfg.Enabled = true
+	marker := emptyMarker()
+	marker.LastSyncAt = now.Add(-1 * time.Hour)
+	due := now.Add(-1 * time.Minute)
+	marker.Failed = map[string]FailedEntry{
+		"edited-after-fail": {
+			Reason: "cloud_rejected_retryable", Category: CategoryTransient,
+			Attempts: 1, NextAttemptAt: &due,
+		},
+	}
+
+	cands, err := DiscoverCandidates(context.Background(), ScannerDeps{HomeDir: env.HomeDir}, cfg, marker, now)
+	if err != nil {
+		t.Fatalf("DiscoverCandidates: %v", err)
+	}
+	if len(cands) != 1 {
+		t.Fatalf("expected 1 candidate after dedupe, got %d: %+v", len(cands), cands)
+	}
+	if cands[0].SessionID != "edited-after-fail" {
+		t.Errorf("got ID %q, want edited-after-fail", cands[0].SessionID)
+	}
+	if !cands[0].UpdatedAt.Equal(freshUpdate) {
+		t.Errorf("expected freshest UpdatedAt %v, got %v", freshUpdate, cands[0].UpdatedAt)
+	}
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

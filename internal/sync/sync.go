@@ -99,6 +99,7 @@ func Run(ctx context.Context, deps Deps) error {
 	totalAccepted := 0
 	totalRejectedTransient := 0
 	totalRejectedPermanent := 0
+	sentCount := 0
 	outcome := OutcomeOK
 	transportErr := false
 
@@ -124,6 +125,7 @@ func Run(ctx context.Context, deps Deps) error {
 			})
 		}
 
+		sentCount += len(req.Sessions)
 		resp, err := deps.Uploader.Send(ctx, req)
 		if err != nil {
 			// Transport error: stop sending more batches, but keep advances from
@@ -164,7 +166,7 @@ func Run(ctx context.Context, deps Deps) error {
 	}
 
 	audit(deps.Audit, "session_sync", map[string]any{
-		"sent":               len(byID),
+		"sent":               sentCount,
 		"accepted":           totalAccepted,
 		"rejected_transient": totalRejectedTransient,
 		"rejected_permanent": totalRejectedPermanent,

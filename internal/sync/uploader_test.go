@@ -46,3 +46,43 @@ func TestDryRunUploader_WritesOutboxAndAcceptsAll(t *testing.T) {
 		t.Errorf("outbox file is not valid JSON: %s", body)
 	}
 }
+
+func TestNormalizeResponse_UnknownAcceptedIDDropped(t *testing.T) {
+	batch := client.SyncBatchRequest{
+		Sessions: []client.SessionEnvelope{
+			{Session: json.RawMessage(`{"id":"a"}`)},
+		},
+	}
+	raw := client.SyncBatchResponse{
+		Accepted: []string{"a", "ghost"},
+	}
+	out := normalizeResponse(batch, raw)
+	if len(out.Accepted) != 1 || out.Accepted[0] != "a" {
+		t.Errorf("expected only [a]; got %v", out.Accepted)
+	}
+}
+
+func TestNormalizeResponse_DuplicatesDeduped(t *testing.T) {
+	batch := client.SyncBatchRequest{
+		Sessions: []client.SessionEnvelope{
+			{Session: json.RawMessage(`{"id":"a"}`)},
+			{Session: json.RawMessage(`{"id":"b"}`)},
+		},
+	}
+	raw := client.SyncBatchResponse{
+		Accepted: []string{"a", "a", "b"},
+		Rejected: []client.RejectedEntry{
+			{ID: "b", Reason: "x"}, // b is in BOTH lists
+		},
+	}
+	out := normalizeResponse(batch, raw)
+	if len(out.Accepted) != 1 || out.Accepted[0] != "a" {
+		t.Errorf("Accepted should dedupe to [a]; got %v", out.Accepted)
+	}
+	if len(out.Rejected) != 1 || out.Rejected[0].ID != "b" {
+		t.Errorf("b should be in Rejected; got %v", out.Rejected)
+	}
+	if out.Rejected[0].Reason != "cloud_inconsistent_response" {
+		t.Errorf("conflict reason: got %q, want cloud_inconsistent_response", out.Rejected[0].Reason)
+	}
+}

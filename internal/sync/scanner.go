@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -15,6 +16,7 @@ type Candidate struct {
 	AgentName string
 	SessionID string
 	UpdatedAt time.Time
+	Source    string // "" treated as "local" for exclusion matching
 }
 
 type ScannerDeps struct {
@@ -48,15 +50,18 @@ func DiscoverCandidates(ctx context.Context, deps ScannerDeps, cfg Config, marke
 			// empty sessions.db just to query it.
 			continue
 		}
+		// Skip this dir on OpenIndex/query failure. Marker advances per accepted
+		// session, not per-time, so sessions in a skipped dir are picked up on
+		// the next run when the dir becomes readable — no data loss.
 		idx, err := session.OpenIndex(sd.Dir)
 		if err != nil {
-			// Skip this dir; do not fail the whole run.
-			// Caller's audit log will reflect skipped dirs separately.
+			log.Printf("sync: skipping session dir %s: %v", sd.Dir, err)
 			continue
 		}
 		rows, err := idx.ListUpdatedSince(ctx, marker.LastSyncAt)
 		idx.Close()
 		if err != nil {
+			log.Printf("sync: skipping session dir %s: %v", sd.Dir, err)
 			continue
 		}
 		for _, r := range rows {
@@ -76,6 +81,7 @@ func DiscoverCandidates(ctx context.Context, deps ScannerDeps, cfg Config, marke
 				AgentName: sd.AgentName,
 				SessionID: r.ID,
 				UpdatedAt: r.UpdatedAt,
+				Source:    r.Source,
 			}
 			if existing, ok := byID[r.ID]; !ok || r.UpdatedAt.After(existing.UpdatedAt) {
 				byID[r.ID] = c
@@ -118,11 +124,38 @@ func DiscoverCandidates(ctx context.Context, deps ScannerDeps, cfg Config, marke
 		}
 	}
 
+	// Apply ExcludeAgents / ExcludeSources after dedupe so the keys are
+	// canonical: empty AgentName ⇢ "default", empty Source ⇢ "local".
+	excludeAgent := makeStringSet(cfg.ExcludeAgents)
+	excludeSource := makeStringSet(cfg.ExcludeSources)
+
 	out := make([]Candidate, 0, len(byID))
 	for _, c := range byID {
+		agentKey := c.AgentName
+		if agentKey == "" {
+			agentKey = "default"
+		}
+		if excludeAgent[agentKey] {
+			continue
+		}
+		srcKey := c.Source
+		if srcKey == "" {
+			srcKey = "local"
+		}
+		if excludeSource[srcKey] {
+			continue
+		}
 		out = append(out, c)
 	}
 	return out, nil
+}
+
+func makeStringSet(ss []string) map[string]bool {
+	m := make(map[string]bool, len(ss))
+	for _, s := range ss {
+		m[s] = true
+	}
+	return m
 }
 
 // locateSession scans the discovered dirs for a session JSON file.

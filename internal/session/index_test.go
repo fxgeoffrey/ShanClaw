@@ -2,7 +2,9 @@ package session
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -636,6 +638,77 @@ func TestIndex_IsEmpty(t *testing.T) {
 	}
 	if empty {
 		t.Error("expected non-empty index after insert")
+	}
+}
+
+// TestIndex_V2ToV3MigrationRebuildsFromJSON verifies that an existing v2
+// sessions.db (no `source` column, PRAGMA user_version = 2) can be opened by
+// the v3 schema without error: the rebuild path drops messages tables, the
+// ALTER TABLE backfills the new column, and subsequent UpsertSession calls
+// populate `source` correctly.
+func TestIndex_V2ToV3MigrationRebuildsFromJSON(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "sessions.db")
+	{
+		raw, err := sql.Open("sqlite", dbPath)
+		if err != nil {
+			t.Fatalf("open raw sqlite: %v", err)
+		}
+		// Exact v2 CREATE TABLE — no source column.
+		if _, err := raw.Exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', cwd TEXT NOT NULL DEFAULT '', created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL, msg_count INTEGER NOT NULL DEFAULT 0)`); err != nil {
+			t.Fatalf("create v2 sessions table: %v", err)
+		}
+		if _, err := raw.Exec(`PRAGMA user_version = 2`); err != nil {
+			t.Fatalf("stamp v2 user_version: %v", err)
+		}
+		now := time.Now().UTC()
+		if _, err := raw.Exec(
+			`INSERT INTO sessions (id, title, created_at, updated_at, msg_count) VALUES (?, ?, ?, ?, ?)`,
+			"s1", "old session", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), 1,
+		); err != nil {
+			t.Fatalf("seed v2 row: %v", err)
+		}
+		if err := raw.Close(); err != nil {
+			t.Fatalf("close raw sqlite: %v", err)
+		}
+	}
+
+	// Open via the actual API. The version mismatch (2 != 3) MUST trigger
+	// the drop-and-rebuild path AND backfill the `source` column.
+	idx, err := OpenIndex(dir)
+	if err != nil {
+		t.Fatalf("OpenIndex (v2->v3): %v", err)
+	}
+	defer idx.Close()
+
+	// Confirm new column is queryable. Rebuild reads JSON files on disk
+	// (none seeded here), so an empty result set is expected — the assertion
+	// is that the query SUCCEEDS against the migrated schema.
+	rows, err := idx.ListUpdatedSince(context.Background(), time.Time{})
+	if err != nil {
+		t.Fatalf("ListUpdatedSince after migration: %v", err)
+	}
+	_ = rows
+
+	// Confirm a fresh Upsert populates the source column.
+	if err := idx.UpsertSession(&Session{
+		ID: "s2", Source: "slack",
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("UpsertSession with source: %v", err)
+	}
+	rows2, err := idx.ListUpdatedSince(context.Background(), time.Time{})
+	if err != nil {
+		t.Fatalf("ListUpdatedSince after upsert: %v", err)
+	}
+	found := false
+	for _, r := range rows2 {
+		if r.ID == "s2" && r.Source == "slack" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected s2 with Source=slack after migration; got %+v", rows2)
 	}
 }
 

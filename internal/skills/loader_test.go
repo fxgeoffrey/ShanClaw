@@ -327,6 +327,213 @@ func TestLoadSkills_InstallProvenance(t *testing.T) {
 	}
 }
 
+func TestLoadSkills_StickyInstructions_OptIn(t *testing.T) {
+	tmp := t.TempDir()
+	body := "---\nname: policy\ndescription: Policy skill\nsticky-instructions: true\n---\n\n# Policy\n\nRoute all platform operations through http://localhost:7533 — never edit ~/.shannon files directly.\n\nMore detail in later sections."
+	createSkillDir(t, tmp, "policy", body)
+
+	loaded, err := LoadSkills(SkillSource{Dir: tmp, Source: "global"})
+	if err != nil {
+		t.Fatalf("LoadSkills: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(loaded))
+	}
+	s := loaded[0]
+	if !s.StickyInstructions {
+		t.Errorf("StickyInstructions = false, want true")
+	}
+	if s.StickySnippet == "" {
+		t.Error("StickySnippet is empty, expected first-paragraph extraction")
+	}
+	if strings.HasPrefix(s.StickySnippet, "#") {
+		t.Errorf("snippet should not start with an ATX heading: %q", s.StickySnippet)
+	}
+	if !strings.Contains(s.StickySnippet, "Route all platform operations") {
+		t.Errorf("snippet missing expected body content: %q", s.StickySnippet)
+	}
+	if strings.Contains(s.StickySnippet, "\n") {
+		t.Errorf("snippet should be single-line (newlines collapsed), got %q", s.StickySnippet)
+	}
+}
+
+func TestLoadSkills_StickyInstructions_DefaultFalse(t *testing.T) {
+	tmp := t.TempDir()
+	createSkillDir(t, tmp, "plain", "---\nname: plain\ndescription: Plain skill\n---\n# Heading\n\nBody text.")
+
+	loaded, err := LoadSkills(SkillSource{Dir: tmp, Source: "global"})
+	if err != nil {
+		t.Fatalf("LoadSkills: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("expected 1, got %d", len(loaded))
+	}
+	if loaded[0].StickyInstructions {
+		t.Error("StickyInstructions should default to false when frontmatter omits it")
+	}
+}
+
+func TestLoadSkills_StickySnippet_TruncatedTo400(t *testing.T) {
+	tmp := t.TempDir()
+	// Build a long first paragraph (>400 chars) to exercise the cap.
+	long := strings.Repeat("abcdefghij ", 60) // 660 chars
+	body := "---\nname: long\ndescription: Long skill\nsticky-instructions: true\n---\n\n" + long
+	createSkillDir(t, tmp, "long", body)
+
+	loaded, err := LoadSkills(SkillSource{Dir: tmp, Source: "global"})
+	if err != nil {
+		t.Fatalf("LoadSkills: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("expected 1, got %d", len(loaded))
+	}
+	runes := []rune(loaded[0].StickySnippet)
+	if len(runes) > stickySnippetMaxChars {
+		t.Errorf("snippet len=%d, want <= %d", len(runes), stickySnippetMaxChars)
+	}
+	if len(runes) < 10 {
+		t.Errorf("snippet too short: %q", loaded[0].StickySnippet)
+	}
+	if !strings.HasSuffix(loaded[0].StickySnippet, "...") {
+		t.Errorf("truncated snippet should end with '...', got %q", loaded[0].StickySnippet)
+	}
+}
+
+func TestLoadSkills_StickySnippet_FallsBackToDescription(t *testing.T) {
+	tmp := t.TempDir()
+	// Frontmatter-only SKILL.md — body is empty, so snippet should fall back.
+	createSkillDir(t, tmp, "empty", "---\nname: empty\ndescription: Fallback description text\nsticky-instructions: true\n---\n")
+
+	loaded, err := LoadSkills(SkillSource{Dir: tmp, Source: "global"})
+	if err != nil {
+		t.Fatalf("LoadSkills: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(loaded))
+	}
+	if loaded[0].StickySnippet != "Fallback description text" {
+		t.Errorf("expected description fallback, got %q", loaded[0].StickySnippet)
+	}
+}
+
+func TestExtractStickySnippet_SkipsHeadings(t *testing.T) {
+	body := "# Title\n\n## Sub\n\nThe actual first guidance paragraph."
+	got := extractStickySnippet(body)
+	if got != "The actual first guidance paragraph." {
+		t.Errorf("extractStickySnippet = %q", got)
+	}
+}
+
+func TestExtractStickySnippet_CollapsesNewlines(t *testing.T) {
+	body := "Line one\nline two\nline three."
+	got := extractStickySnippet(body)
+	if got != "Line one line two line three." {
+		t.Errorf("extractStickySnippet = %q", got)
+	}
+}
+
+// TestExtractStickySnippet_PrefersImperativeParagraph locks in the core
+// reviewer-flagged bug: when a SKILL.md body has a bland intro paragraph
+// followed by the actual policy ("ALL platform operations MUST go through
+// ..."), the extractor must prefer the policy paragraph, not the intro.
+func TestExtractStickySnippet_PrefersImperativeParagraph(t *testing.T) {
+	body := "You help users manage the platform.\n\nALL platform operations go through the daemon HTTP API. Never edit config files directly.\n\nMore detail later."
+	got := extractStickySnippet(body)
+	if !strings.Contains(got, "ALL platform operations") {
+		t.Errorf("expected imperative paragraph, got %q", got)
+	}
+	if strings.Contains(got, "You help users") {
+		t.Errorf("should NOT select the bland intro paragraph, got %q", got)
+	}
+}
+
+func TestExtractStickySnippet_ImperativeMarkers(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string // substring that must be in the returned snippet
+	}{
+		{"MUST", "Intro paragraph.\n\nYou MUST do X before Y.", "MUST do X"},
+		{"NEVER caps", "Intro.\n\nNEVER run destructive commands.", "NEVER run"},
+		{"DO NOT", "Intro.\n\nDO NOT bypass validation.", "DO NOT bypass"},
+		{"DON'T", "Intro.\n\nDON'T touch prod.", "DON'T touch"},
+		{"Never sentence-start", "Intro.\n\nNever commit without review.", "Never commit"},
+		{"Use the ...", "Intro.\n\nUse the http tool for every operation.", "Use the http tool"},
+		{"ZH 必须", "中性描述。\n\n必须通过 API 操作，不要直接改文件。", "必须通过"},
+		{"ZH 绝不", "介绍段落。\n\n绝不要直接写 ~/.shannon 文件。", "绝不要"},
+		{"JA 必ず", "汎用説明。\n\n必ずAPIを使用してください。", "必ずAPI"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractStickySnippet(tt.body)
+			if !strings.Contains(got, tt.want) {
+				t.Errorf("extractStickySnippet missed imperative paragraph, got %q (want substring %q)", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadSkills_StickySnippet_ExplicitOverride(t *testing.T) {
+	tmp := t.TempDir()
+	// Body has a clear imperative paragraph that SHOULD win via heuristic,
+	// but the frontmatter explicitly pins a different snippet — override wins.
+	body := "---\nname: over\ndescription: Override test\nsticky-instructions: true\nsticky-snippet: \"Explicit: use http tool only.\"\n---\n\nIntro.\n\nMUST not appear in snippet because override is set."
+	createSkillDir(t, tmp, "over", body)
+
+	loaded, err := LoadSkills(SkillSource{Dir: tmp, Source: "global"})
+	if err != nil {
+		t.Fatalf("LoadSkills: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("expected 1, got %d", len(loaded))
+	}
+	if loaded[0].StickySnippet != "Explicit: use http tool only." {
+		t.Errorf("expected explicit override, got %q", loaded[0].StickySnippet)
+	}
+}
+
+// TestLoadSkills_Kocoro_StickySnippetPicksPolicy asserts the actual bundled
+// kocoro SKILL.md extracts the HTTP-API policy paragraph, not the bland
+// "You help users ..." intro. This locks in the reviewer-flagged bug fix.
+func TestLoadSkills_Kocoro_StickySnippetPicksPolicy(t *testing.T) {
+	// Walk up to the repo root so this test works from any cwd.
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	// loader_test.go lives at internal/skills/; bundled skills are a sibling
+	// subdir. Resolve the path relative to the current file's directory.
+	bundledDir := filepath.Join(wd, "bundled", "skills")
+	loaded, err := LoadSkills(SkillSource{Dir: bundledDir, Source: "bundled"})
+	if err != nil {
+		t.Fatalf("LoadSkills bundled: %v", err)
+	}
+	var kocoro *Skill
+	for _, s := range loaded {
+		if s.Name == "kocoro" {
+			kocoro = s
+			break
+		}
+	}
+	if kocoro == nil {
+		t.Fatalf("kocoro skill not found in bundled; loaded=%d", len(loaded))
+	}
+	if !kocoro.StickyInstructions {
+		t.Fatal("kocoro.StickyInstructions must be true")
+	}
+	// The bug: snippet was picking "You help users ..." bland intro.
+	if strings.HasPrefix(kocoro.StickySnippet, "You help users") {
+		t.Errorf("kocoro snippet regressed to bland intro: %q", kocoro.StickySnippet)
+	}
+	// The policy: snippet should mention HTTP API + the "never direct file" rule.
+	if !strings.Contains(kocoro.StickySnippet, "HTTP API") && !strings.Contains(kocoro.StickySnippet, "http") {
+		t.Errorf("kocoro snippet missing HTTP policy: %q", kocoro.StickySnippet)
+	}
+	if !strings.Contains(kocoro.StickySnippet, "Never") && !strings.Contains(kocoro.StickySnippet, "never") {
+		t.Errorf("kocoro snippet missing 'Never' directive: %q", kocoro.StickySnippet)
+	}
+}
+
 func TestWriteGlobalSkillClearsMarketplaceProvenance(t *testing.T) {
 	shannonDir := t.TempDir()
 	skillDir := filepath.Join(shannonDir, "skills", "ontology")
@@ -364,4 +571,115 @@ func TestWriteGlobalSkillClearsMarketplaceProvenance(t *testing.T) {
 	if loaded[0].MarketplaceSlug != "" {
 		t.Errorf("marketplace slug = %q, want empty", loaded[0].MarketplaceSlug)
 	}
+}
+
+// TestWriteGlobalSkill_RoundTripsSticky guards the reviewer-flagged
+// persistence gap: WriteGlobalSkill must preserve sticky-instructions and
+// the author-pinned sticky-snippet across a write→load cycle. Otherwise
+// global skills silently lose sticky config on save.
+func TestWriteGlobalSkill_RoundTripsSticky(t *testing.T) {
+	shannonDir := t.TempDir()
+
+	// Case A: sticky-instructions=true + author-pinned sticky-snippet override.
+	t.Run("explicit snippet preserved", func(t *testing.T) {
+		err := WriteGlobalSkill(shannonDir, &Skill{
+			Name:                  "policy-a",
+			Description:           "A",
+			Prompt:                "# Policy\n\nBland intro here.\n\nALL ops go through http://localhost.",
+			StickyInstructions:    true,
+			StickySnippetOverride: "Use the http tool for every platform op.",
+		})
+		if err != nil {
+			t.Fatalf("WriteGlobalSkill: %v", err)
+		}
+		loaded, err := LoadSkills(SkillSource{Dir: filepath.Join(shannonDir, "skills"), Source: SourceGlobal})
+		if err != nil {
+			t.Fatalf("LoadSkills: %v", err)
+		}
+		var s *Skill
+		for _, x := range loaded {
+			if x.Name == "policy-a" {
+				s = x
+				break
+			}
+		}
+		if s == nil {
+			t.Fatal("policy-a not reloaded")
+		}
+		if !s.StickyInstructions {
+			t.Error("StickyInstructions dropped on round-trip")
+		}
+		if s.StickySnippetOverride != "Use the http tool for every platform op." {
+			t.Errorf("StickySnippetOverride lost: %q", s.StickySnippetOverride)
+		}
+		if s.StickySnippet != "Use the http tool for every platform op." {
+			t.Errorf("resolved StickySnippet != override: %q", s.StickySnippet)
+		}
+	})
+
+	// Case B: sticky-instructions=true but NO explicit override. Save must
+	// NOT freeze the heuristic result into the file; on reload, the
+	// heuristic must run again and still pick the imperative paragraph.
+	t.Run("heuristic snippet not frozen", func(t *testing.T) {
+		err := WriteGlobalSkill(shannonDir, &Skill{
+			Name:                  "policy-b",
+			Description:           "B",
+			Prompt:                "# Policy\n\nBland intro here.\n\nNEVER edit config.yaml directly.",
+			StickyInstructions:    true,
+			StickySnippet:         "bland intro here.", // would-be frozen value
+			StickySnippetOverride: "",                  // NOT explicit — should be dropped
+		})
+		if err != nil {
+			t.Fatalf("WriteGlobalSkill: %v", err)
+		}
+		raw, err := os.ReadFile(filepath.Join(shannonDir, "skills", "policy-b", "SKILL.md"))
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if strings.Contains(string(raw), "sticky-snippet:") {
+			t.Errorf("WriteGlobalSkill froze heuristic snippet into SKILL.md:\n%s", raw)
+		}
+		if !strings.Contains(string(raw), "sticky-instructions: true") {
+			t.Errorf("WriteGlobalSkill dropped sticky-instructions flag:\n%s", raw)
+		}
+
+		loaded, _ := LoadSkills(SkillSource{Dir: filepath.Join(shannonDir, "skills"), Source: SourceGlobal})
+		var s *Skill
+		for _, x := range loaded {
+			if x.Name == "policy-b" {
+				s = x
+				break
+			}
+		}
+		if s == nil {
+			t.Fatal("policy-b not reloaded")
+		}
+		// Heuristic should run on reload and pick the NEVER paragraph.
+		if !strings.Contains(s.StickySnippet, "NEVER edit") {
+			t.Errorf("heuristic re-extraction failed, got %q", s.StickySnippet)
+		}
+	})
+
+	// Case C: sticky-instructions=false + no override → neither field
+	// appears in the written frontmatter (no noisy `false` line).
+	t.Run("disabled sticky omitted", func(t *testing.T) {
+		err := WriteGlobalSkill(shannonDir, &Skill{
+			Name:        "plain",
+			Description: "Plain",
+			Prompt:      "# plain\n\nhello",
+		})
+		if err != nil {
+			t.Fatalf("WriteGlobalSkill: %v", err)
+		}
+		raw, err := os.ReadFile(filepath.Join(shannonDir, "skills", "plain", "SKILL.md"))
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if strings.Contains(string(raw), "sticky-instructions:") {
+			t.Errorf("plain skill gained noisy sticky-instructions: line:\n%s", raw)
+		}
+		if strings.Contains(string(raw), "sticky-snippet:") {
+			t.Errorf("plain skill gained noisy sticky-snippet: line:\n%s", raw)
+		}
+	})
 }

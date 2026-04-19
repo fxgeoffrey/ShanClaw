@@ -24,6 +24,8 @@ type SkillDetail struct {
 	Compatibility     string         `json:"compatibility,omitempty"`
 	Metadata          map[string]any `json:"metadata,omitempty"`
 	AllowedTools      []string       `json:"allowed_tools,omitempty"`
+	StickyInstructions bool          `json:"sticky_instructions,omitempty"`
+	StickySnippet     string         `json:"sticky_snippet,omitempty"`
 	RequiredSecrets   []SecretSpec   `json:"required_secrets,omitempty"`
 	ConfiguredSecrets []string       `json:"configured_secrets,omitempty"`
 }
@@ -38,14 +40,22 @@ func WriteGlobalSkill(shannonDir string, skill *Skill) error {
 	}
 
 	fm := skillFrontmatter{
-		Name:          skill.Name,
-		Description:   skill.Description,
-		License:       skill.License,
-		Compatibility: skill.Compatibility,
-		Metadata:      skill.Metadata,
+		Name:               skill.Name,
+		Description:        skill.Description,
+		License:            skill.License,
+		Compatibility:      skill.Compatibility,
+		Metadata:           skill.Metadata,
+		StickyInstructions: skill.StickyInstructions,
 	}
 	if len(skill.AllowedTools) > 0 {
 		fm.AllowedTools = strings.Join(skill.AllowedTools, " ")
+	}
+	// Only marshal the sticky-snippet when the author explicitly pinned one
+	// (via StickySnippetOverride). The resolved StickySnippet may come from
+	// the heuristic extractor; serializing that would freeze a heuristic
+	// choice into the file and, on the next reload, skip Pass-1 entirely.
+	if override := strings.TrimSpace(skill.StickySnippetOverride); override != "" {
+		fm.StickySnippet = override
 	}
 
 	fmBytes, err := yaml.Marshal(fm)

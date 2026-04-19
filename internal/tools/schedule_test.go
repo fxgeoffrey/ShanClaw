@@ -2,12 +2,15 @@ package tools
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/agent"
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
+	"github.com/Kocoro-lab/ShanClaw/internal/schedule"
 )
 
 // snapshotCtx builds a context with a fake conversation snapshot provider.
@@ -148,6 +151,94 @@ func TestExtractConversationContext_StripsToolResultPayloads(t *testing.T) {
 	}
 	if strings.Contains(got[0].Content, "SPILL") || strings.Contains(got[0].Content, ".shannon/tmp") {
 		t.Errorf("spill / internal path leaked into captured context: %q", got[0].Content)
+	}
+}
+
+// setupShannonHomeWithAgent configures a fake ~/.shannon under HOME (via t.Setenv)
+// and writes an agent named agentName with optional heartbeat.
+func setupShannonHomeWithAgent(t *testing.T, agentName, heartbeatEvery string) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	shan := filepath.Join(home, ".shannon")
+	agentDir := filepath.Join(shan, "agents", agentName)
+	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+		t.Fatalf("mkdir agent: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "AGENT.md"), []byte("# "+agentName+"\n"), 0o600); err != nil {
+		t.Fatalf("write AGENT.md: %v", err)
+	}
+	if heartbeatEvery != "" {
+		cfg := "heartbeat:\n  every: " + heartbeatEvery + "\n"
+		if err := os.WriteFile(filepath.Join(agentDir, "config.yaml"), []byte(cfg), 0o600); err != nil {
+			t.Fatalf("write config.yaml: %v", err)
+		}
+	}
+	return shan
+}
+
+func TestScheduleTool_CreateAppendsHeartbeatWarning(t *testing.T) {
+	shan := setupShannonHomeWithAgent(t, "hb", "1h")
+	mgr := schedule.NewManager(filepath.Join(shan, "schedules.json"))
+	tool := &ScheduleTool{manager: mgr, action: "create"}
+
+	res, err := tool.Run(context.Background(), `{"agent":"hb","cron":"*/5 * * * *","prompt":"check"}`)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected IsError=true: %s", res.Content)
+	}
+	if !strings.Contains(res.Content, "Schedule created:") {
+		t.Errorf("missing success message: %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "heartbeat") {
+		t.Errorf("warning line missing, got: %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "1h") {
+		t.Errorf("warning missing interval, got: %q", res.Content)
+	}
+}
+
+func TestScheduleTool_CreateNoWarningWithoutHeartbeat(t *testing.T) {
+	shan := setupShannonHomeWithAgent(t, "plain", "")
+	mgr := schedule.NewManager(filepath.Join(shan, "schedules.json"))
+	tool := &ScheduleTool{manager: mgr, action: "create"}
+
+	res, err := tool.Run(context.Background(), `{"agent":"plain","cron":"*/5 * * * *","prompt":"check"}`)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected IsError=true: %s", res.Content)
+	}
+	if strings.Contains(res.Content, "heartbeat") {
+		t.Errorf("unexpected heartbeat warning: %q", res.Content)
+	}
+}
+
+func TestScheduleTool_UpdateAppendsHeartbeatWarning(t *testing.T) {
+	shan := setupShannonHomeWithAgent(t, "hb", "30m")
+	mgr := schedule.NewManager(filepath.Join(shan, "schedules.json"))
+
+	id, err := mgr.Create("hb", "*/5 * * * *", "initial")
+	if err != nil {
+		t.Fatalf("seed schedule: %v", err)
+	}
+	tool := &ScheduleTool{manager: mgr, action: "update"}
+
+	res, err := tool.Run(context.Background(), `{"id":"`+id+`","prompt":"updated"}`)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected IsError=true: %s", res.Content)
+	}
+	if !strings.Contains(res.Content, "updated.") {
+		t.Errorf("missing success message: %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "heartbeat") {
+		t.Errorf("warning line missing, got: %q", res.Content)
 	}
 }
 

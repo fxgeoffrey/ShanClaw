@@ -79,6 +79,105 @@ func TestHTTP_POST(t *testing.T) {
 	}
 }
 
+func TestHTTP_StatusCodeErrorFlag(t *testing.T) {
+	// Method-aware IsError semantics:
+	//   5xx                       → IsError always (server failure)
+	//   GET/HEAD/OPTIONS 4xx       → IsError EXCEPT 404 and 410 (polling-exempt)
+	//                                401/403/429 etc. are real failures — auth,
+	//                                rate-limit — the loop detector should see.
+	//   POST/PUT/PATCH/DELETE 4xx  → IsError always (mutations don't 4xx legitimately)
+	tests := []struct {
+		name           string
+		method         string
+		status         int
+		body           string
+		wantIsError    bool
+		wantStatusText string
+	}{
+		// Reads: only 404/410 are polling-exempt. Everything else 4xx+ IS error.
+		{"GET 200", "GET", 200, "ok", false, "Status: 200"},
+		{"GET 400", "GET", 400, "bad query", true, "Status: 400"},
+		{"GET 401 auth fail", "GET", 401, "unauth", true, "Status: 401"},
+		{"GET 403 forbidden", "GET", 403, "forbidden", true, "Status: 403"},
+		{"GET 404 polling-exempt", "GET", 404, "not found", false, "Status: 404"},
+		{"GET 410 polling-exempt", "GET", 410, "gone", false, "Status: 410"},
+		{"GET 429 rate-limit", "GET", 429, "slow down", true, "Status: 429"},
+		{"GET 500", "GET", 500, "boom", true, "Status: 500"},
+		{"GET 502", "GET", 502, "bad gw", true, "Status: 502"},
+		{"HEAD 404 polling-exempt", "HEAD", 404, "", false, "Status: 404"},
+		{"HEAD 401", "HEAD", 401, "", true, "Status: 401"},
+		// Mutations: all 4xx+ IS error (real validation / auth / routing bug).
+		{"POST 201", "POST", 201, "created", false, "Status: 201"},
+		{"POST 400 malformed body", "POST", 400, "bad request", true, "Status: 400"},
+		{"POST 401", "POST", 401, "unauth", true, "Status: 401"},
+		{"POST 404 wrong endpoint", "POST", 404, "not found", true, "Status: 404"},
+		{"PUT 400", "PUT", 400, "bad", true, "Status: 400"},
+		{"PATCH 404", "PATCH", 404, "not found", true, "Status: 404"},
+		{"DELETE 400", "DELETE", 400, "bad", true, "Status: 400"},
+		{"DELETE 404", "DELETE", 404, "not found", true, "Status: 404"},
+		{"POST 500", "POST", 500, "boom", true, "Status: 500"},
+		// Empty method → treated as GET (conservative default).
+		{"empty method treated as GET 404 exempt", "", 404, "not found", false, "Status: 404"},
+		{"empty method treated as GET 401 error", "", 401, "unauth", true, "Status: 401"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.status)
+				w.Write([]byte(tt.body))
+			}))
+			defer srv.Close()
+
+			tool := &HTTPTool{}
+			var argsJSON string
+			if tt.method == "" {
+				argsJSON = `{"url": "` + srv.URL + `"}`
+			} else {
+				argsJSON = `{"url": "` + srv.URL + `", "method": "` + tt.method + `", "body": "x"}`
+			}
+			result, err := tool.Run(context.Background(), argsJSON)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result.IsError != tt.wantIsError {
+				t.Errorf("IsError = %v, want %v (content: %s)", result.IsError, tt.wantIsError, result.Content)
+			}
+			if !contains(result.Content, tt.wantStatusText) {
+				t.Errorf("expected %q in output, got: %s", tt.wantStatusText, result.Content)
+			}
+		})
+	}
+}
+
+func TestHTTP_RedirectNotError(t *testing.T) {
+	// Target server returns 200 after redirect.
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte("final"))
+	}))
+	defer target.Close()
+
+	// Redirector issues 302 pointing at target. Go's default client follows the redirect,
+	// so the final observed response is 200 (IsError false). If a future change disables
+	// redirect following, this test documents that a bare 302 is < 400 and thus not an error.
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	tool := &HTTPTool{}
+	result, err := tool.Run(context.Background(), `{"url": "`+redirector.URL+`"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Errorf("expected IsError=false for 302→200 chain, got true. content: %s", result.Content)
+	}
+	if !contains(result.Content, "Status: 200") {
+		t.Errorf("expected final Status: 200 in output (redirect followed), got: %s", result.Content)
+	}
+}
+
 func TestHTTP_InvalidURL(t *testing.T) {
 	tool := &HTTPTool{}
 	result, err := tool.Run(context.Background(), `{"url": "http://invalid.localhost.test:99999/nope"}`)

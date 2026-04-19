@@ -48,8 +48,19 @@ type skillFrontmatter struct {
 	// up unmarshal. A flat `map[string]string` would reject any non-string
 	// value and surface as ErrInvalidSkillPayload / HTTP 422 "malformed"
 	// — see the regression test in marketplace_test.go.
-	Metadata     map[string]any `yaml:"metadata"`
-	AllowedTools string         `yaml:"allowed-tools"`
+	Metadata     map[string]any `yaml:"metadata,omitempty"`
+	AllowedTools string         `yaml:"allowed-tools,omitempty"`
+	// StickyInstructions opts the skill into post-activation / post-drift
+	// <system-reminder> reinjection. Opt-in only. See Skill.StickyInstructions.
+	// omitempty so skills that never set it don't gain a noisy
+	// `sticky-instructions: false` line on re-save.
+	StickyInstructions bool `yaml:"sticky-instructions,omitempty"`
+	// StickySnippet, when set, overrides the auto-extracted snippet so
+	// authors can pin the precise guidance to re-inject. Essential for
+	// skills where the first paragraph is boilerplate ("You help users ...")
+	// but the actual policy sits further down. Falls back to the imperative-
+	// paragraph heuristic and then to the first non-heading paragraph.
+	StickySnippet string `yaml:"sticky-snippet,omitempty"`
 }
 
 // canonicalName returns the authoritative identity for a skill:
@@ -144,16 +155,122 @@ func loadSkillMD(path, dirName, source string) (*Skill, error) {
 	if fm.AllowedTools != "" {
 		allowedTools = strings.Fields(fm.AllowedTools)
 	}
+	prompt := strings.TrimSpace(string(body))
+	override := strings.TrimSpace(fm.StickySnippet)
+	snippet := override
+	if snippet == "" {
+		snippet = extractStickySnippet(prompt)
+	}
+	if snippet == "" {
+		snippet = fm.Description
+	}
+	snippet = truncateStickySnippet(snippet, stickySnippetMaxChars)
 	return &Skill{
-		Name:          canonical,
-		Description:   fm.Description,
-		Prompt:        strings.TrimSpace(string(body)),
-		License:       fm.License,
-		Compatibility: fm.Compatibility,
-		Metadata:      fm.Metadata,
-		AllowedTools:  allowedTools,
-		Source:        source,
+		Name:                  canonical,
+		Description:           fm.Description,
+		Prompt:                prompt,
+		License:               fm.License,
+		Compatibility:         fm.Compatibility,
+		Metadata:              fm.Metadata,
+		AllowedTools:          allowedTools,
+		StickyInstructions:    fm.StickyInstructions,
+		StickySnippet:         snippet,
+		StickySnippetOverride: override,
+		Source:                source,
 	}, nil
+}
+
+// stickySnippetMaxChars caps the per-activation / per-drift reinjection size.
+// 400 chars is the budget called out in the task plan — adds to the turn after
+// use_skill and after every skill-filter denial, so keep it small.
+const stickySnippetMaxChars = 400
+
+// imperativeMarkers identify paragraphs with actionable policy language.
+// Matched case-sensitively for EN (caps are a strong imperative signal —
+// "MUST use" vs "must use") and as substring for CJK.
+var imperativeMarkers = []string{
+	// EN — capitalized imperatives (strong signal)
+	"MUST", "ALWAYS", "NEVER", "DO NOT", "DON'T",
+	"REQUIRED", "ONLY", "ALL ",
+	// EN — sentence-start imperatives (moderate signal, case-insensitive check)
+	"Never ", "Always ", "Must ", "Use the ", "Do not ",
+	// ZH
+	"必须", "绝不", "仅限", "总是", "不要", "只能",
+	// JA
+	"必ず", "決して", "絶対", "禁止", "常に", "使用してください",
+}
+
+// extractStickySnippet returns a single paragraph from the SKILL.md body
+// most likely to be actionable guidance. Selection order:
+//   1. First paragraph containing any imperativeMarker ("MUST", "NEVER",
+//      "必须", "必ず", …) — these are pre-filtered actionable policy.
+//   2. First non-heading paragraph — title/boilerplate is skipped.
+// Newlines within the paragraph are collapsed to single spaces so the
+// snippet renders cleanly inside a single-line <system-reminder>.
+// Returns "" when no suitable paragraph is found (caller falls back to
+// Description). Authors can override with the `sticky-snippet:` frontmatter
+// field when neither heuristic picks the right paragraph.
+func extractStickySnippet(body string) string {
+	if body == "" {
+		return ""
+	}
+	paragraphs := strings.Split(body, "\n\n")
+
+	// Pass 1: prefer paragraphs with imperative/policy markers. Ignore
+	// headings but don't require them to be absent — a paragraph can start
+	// with "**MUST:** ..." and that's still policy.
+	for _, p := range paragraphs {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if strings.HasPrefix(p, "#") {
+			continue
+		}
+		if hasImperativeMarker(p) {
+			return strings.Join(strings.Fields(p), " ")
+		}
+	}
+
+	// Pass 2: fall back to first non-heading paragraph.
+	for _, p := range paragraphs {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if strings.HasPrefix(p, "#") {
+			continue
+		}
+		return strings.Join(strings.Fields(p), " ")
+	}
+	return ""
+}
+
+// hasImperativeMarker reports whether p contains any imperative/policy
+// marker. EN caps markers require exact case; CJK markers use substring.
+func hasImperativeMarker(p string) bool {
+	for _, m := range imperativeMarkers {
+		if strings.Contains(p, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// truncateStickySnippet rune-safe truncates to max chars, appending an
+// ellipsis when shortened so the model can tell the reminder is abbreviated.
+func truncateStickySnippet(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	if max <= 3 {
+		return string(runes[:max])
+	}
+	return string(runes[:max-3]) + "..."
 }
 
 func warnLegacyYAML(dir string) {

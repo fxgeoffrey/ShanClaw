@@ -59,6 +59,36 @@ func buildSkillListing(agentSkills []*skills.Skill) string {
 	return sb.String()
 }
 
+// parseUseSkillName extracts the skill_name argument from a use_skill call's
+// args JSON. Returns "" on parse failure or when the field is absent/empty;
+// callers must treat that as "unknown skill" and skip sticky arming.
+func parseUseSkillName(argsJSON string) string {
+	if argsJSON == "" {
+		return ""
+	}
+	var args struct {
+		SkillName string `json:"skill_name"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return ""
+	}
+	return args.SkillName
+}
+
+// buildStickySkillReminder returns the <system-reminder> body reinjected on
+// skill activation and on skill-filter drift for skills that opt in via
+// frontmatter `sticky-instructions: true`. Returns "" when either input is
+// empty (caller should treat as "nothing to inject"). Kept separate from
+// buildSkillListing so loop_test can exercise it without the full loop.
+func buildStickySkillReminder(skillName, snippet string) string {
+	skillName = strings.TrimSpace(skillName)
+	snippet = strings.TrimSpace(snippet)
+	if skillName == "" || snippet == "" {
+		return ""
+	}
+	return "<system-reminder>skill=" + skillName + " sticky: " + snippet + "</system-reminder>"
+}
+
 // ErrMaxIterReached is returned when the agent loop hits the iteration limit
 // but has partial work to return. Callers can check errors.Is(err, ErrMaxIterReached)
 // to distinguish truncated results from hard failures.
@@ -1270,6 +1300,15 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		// calls rebuild from the full set, not the already-filtered set.
 		activeSkillFilter    map[string]bool
 		activeSkillFilterStr string // precomputed sorted list for error messages
+
+		// Sticky skill instructions: when an activated skill opts in via
+		// frontmatter `sticky-instructions: true`, the next iteration prepends a
+		// short <system-reminder> to the scaffolded user text. Re-armed on
+		// skill-filter drift (execution-time denial) so the reminder reappears
+		// exactly when the model drifts from the policy, never per-turn.
+		stickySkillName     string
+		stickySkillSnippet  string
+		stickyInjectPending bool
 	)
 
 	// Skill tool filter: activeSkillFilter is checked at execution time
@@ -1678,6 +1717,33 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			case <-ctx.Done():
 			}
 			discoveryCh = nil
+		}
+
+		// Sticky skill reminder: when a sticky skill was activated (previous
+		// iteration) or the model drifted past its filter, re-inject its
+		// guidance as a <system-reminder> so it survives compaction of the
+		// original use_skill tool_result. Idempotent: armed on activation and
+		// on filter-drift only, NOT per-turn.
+		if stickyInjectPending {
+			if reminder := buildStickySkillReminder(stickySkillName, stickySkillSnippet); reminder != "" {
+				if i == 0 && newMsgOffset >= 0 && newMsgOffset < len(messages) {
+					// Turn 0: the user-turn scaffolding is still the last
+					// user message, so append to its text (same pattern as
+					// the skill-discovery hint above).
+					scaffoldedUserText += "\n\n" + reminder
+					messages[newMsgOffset] = replaceUserMessageText(messages[newMsgOffset], scaffoldedUserText)
+				} else {
+					// Later turns: previous user message is tool results;
+					// append as a new user message (same pattern as
+					// discovery hint on i > 0).
+					messages = append(messages, client.Message{
+						Role:    "user",
+						Content: client.NewTextContent(reminder),
+					})
+					markInjected()
+				}
+			}
+			stickyInjectPending = false
 		}
 
 		// Call LLM — streaming or blocking
@@ -2293,9 +2359,18 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				var kept []approvedToolCall
 				for _, ac := range approved {
 					if !activeSkillFilter[ac.fc.Name] {
+						denyMsg := fmt.Sprintf("[skill restriction] tool %q is not allowed by the active skill. Allowed: %s", ac.fc.Name, activeSkillFilterStr)
+						// Drift re-arm: when the active skill is sticky,
+						// append a soft nudge to this denial and re-arm the
+						// reminder for the NEXT iteration. One nudge per
+						// drift event — no per-turn spam.
+						if stickySkillName != "" && stickySkillSnippet != "" {
+							denyMsg += " — see sticky reminder above for guidance"
+							stickyInjectPending = true
+						}
 						execResults[ac.index] = toolExecResult{
 							result: ToolResult{
-								Content: fmt.Sprintf("[skill restriction] tool %q is not allowed by the active skill. Allowed: %s", ac.fc.Name, activeSkillFilterStr),
+								Content: denyMsg,
 								IsError: true,
 							},
 						}
@@ -2542,6 +2617,21 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				} else {
 					activeSkillFilter = nil
 					activeSkillFilterStr = ""
+				}
+				// Arm sticky reminder if the activated skill opted in. The
+				// use_skill result doesn't carry the flag directly, so look
+				// it up on a.agentSkills by name (parsed from the call args).
+				stickySkillName = ""
+				stickySkillSnippet = ""
+				if sn := parseUseSkillName(ac.argsStr); sn != "" {
+					for _, s := range a.agentSkills {
+						if s != nil && s.Name == sn && s.StickyInstructions {
+							stickySkillName = s.Name
+							stickySkillSnippet = s.StickySnippet
+							stickyInjectPending = true
+							break
+						}
+					}
 				}
 				break
 			}

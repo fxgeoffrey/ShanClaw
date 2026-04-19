@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/agent"
+	"github.com/Kocoro-lab/ShanClaw/internal/agents"
+	"github.com/Kocoro-lab/ShanClaw/internal/config"
 	"github.com/Kocoro-lab/ShanClaw/internal/schedule"
 )
 
@@ -102,7 +105,11 @@ func (t *ScheduleTool) Run(ctx context.Context, argsJSON string) (agent.ToolResu
 				return agent.ToolResult{Content: fmt.Sprintf("Schedule created: %s (warning: failed to save context: %v)", id, saveErr)}, nil
 			}
 		}
-		return agent.ToolResult{Content: fmt.Sprintf("Schedule created: %s", id)}, nil
+		msg := fmt.Sprintf("Schedule created: %s", id)
+		if w := t.triggerConflictWarning(agentName); w != "" {
+			msg += "\n" + w
+		}
+		return agent.ToolResult{Content: msg}, nil
 	case "list":
 		list, err := t.manager.List()
 		if err != nil {
@@ -146,7 +153,16 @@ func (t *ScheduleTool) Run(ctx context.Context, argsJSON string) (agent.ToolResu
 		if err := t.manager.Update(id, opts); err != nil {
 			return agent.ToolResult{Content: err.Error(), IsError: true}, nil
 		}
-		return agent.ToolResult{Content: fmt.Sprintf("Schedule %s updated.", id)}, nil
+		msg := fmt.Sprintf("Schedule %s updated.", id)
+		// Look up the updated schedule to resolve its agent name before
+		// checking for trigger conflicts. Best-effort: lookup errors are
+		// silently swallowed since warnings are additive-only.
+		if sched, err := t.manager.Get(id); err == nil && sched != nil {
+			if w := t.triggerConflictWarning(sched.Agent); w != "" {
+				msg += "\n" + w
+			}
+		}
+		return agent.ToolResult{Content: msg}, nil
 	case "remove":
 		id, _ := args["id"].(string)
 		if id == "" {
@@ -166,6 +182,36 @@ func (t *ScheduleTool) RequiresApproval() bool {
 
 func (t *ScheduleTool) IsReadOnlyCall(string) bool {
 	return t.action == "list"
+}
+
+// triggerConflictWarning returns a user-facing warning line (with the leading
+// "⚠️ Note:" marker) when the named agent has a non-zero heartbeat AND an
+// enabled schedule referencing it. Returns an empty string on no conflict, on
+// an empty agent name, or when lookups fail — this is visibility only, never
+// a hard error.
+func (t *ScheduleTool) triggerConflictWarning(agentName string) string {
+	if agentName == "" {
+		return ""
+	}
+	shanDir := config.ShannonDir()
+	if shanDir == "" {
+		return ""
+	}
+	agentsDir := filepath.Join(shanDir, "agents")
+
+	list, err := t.manager.List()
+	if err != nil {
+		return ""
+	}
+	refs := make([]agents.ScheduleRef, 0, len(list))
+	for _, s := range list {
+		refs = append(refs, agents.ScheduleRef{ID: s.ID, Agent: s.Agent, Enabled: s.Enabled})
+	}
+	warnings := agents.DetectTriggerConflicts(agentsDir, agentName, refs)
+	if len(warnings) == 0 {
+		return ""
+	}
+	return "⚠️ Note: " + warnings[0]
 }
 
 // extractConversationContext pulls a compact context from the live

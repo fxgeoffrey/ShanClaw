@@ -96,7 +96,34 @@ func (t *HTTPTool) Run(ctx context.Context, argsJSON string) (agent.ToolResult, 
 	}
 	fmt.Fprintf(&sb, "\nBody:\n%s", string(body))
 
-	return agent.ToolResult{Content: sb.String()}, nil
+	// Method-aware IsError. Status is always visible in the "Status: ..." line
+	// of the body, so the model can branch on any status regardless of IsError.
+	//   5xx                      → always IsError (server failure)
+	//   4xx on mutations
+	//   (POST/PUT/PATCH/DELETE)  → IsError (validation / auth / routing bug)
+	//   4xx on reads
+	//   (GET/HEAD/OPTIONS/other) → IsError EXCEPT 404 and 410, which are
+	//                              polling-friendly ("not yet" / "gone").
+	//                              401/403/429 and other 4xx stay IsError:
+	//                              auth failures and rate-limits are real
+	//                              operational errors that the SameToolError
+	//                              loop detector should see.
+	isError := false
+	switch {
+	case resp.StatusCode >= 500:
+		isError = true
+	case resp.StatusCode >= 400:
+		switch method {
+		case "POST", "PUT", "PATCH", "DELETE":
+			isError = true
+		default:
+			// Reads: only 404/410 are polling-exempt.
+			if resp.StatusCode != http.StatusNotFound && resp.StatusCode != http.StatusGone {
+				isError = true
+			}
+		}
+	}
+	return agent.ToolResult{Content: sb.String(), IsError: isError}, nil
 }
 
 func (t *HTTPTool) RequiresApproval() bool { return true }

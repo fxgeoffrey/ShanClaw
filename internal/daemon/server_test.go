@@ -36,6 +36,99 @@ func writeTestGlobalSkill(t *testing.T, shannonDir, name string) {
 	}
 }
 
+func TestServer_GlobalSkillStickyRoundTrip(t *testing.T) {
+	shannonDir := t.TempDir()
+	if err := skills.WriteGlobalSkill(shannonDir, &skills.Skill{
+		Name:                  "policy",
+		Description:           "policy description",
+		Prompt:                "# policy\n\nUse the API.",
+		License:               "MIT",
+		StickyInstructions:    true,
+		StickySnippetOverride: "Use the http tool for platform operations.",
+	}); err != nil {
+		t.Fatalf("seed global skill: %v", err)
+	}
+
+	deps := &ServerDeps{ShannonDir: shannonDir}
+	c := NewClient("ws://localhost:1/x", "", func(msg MessagePayload) string { return "" }, nil)
+	srv := NewServer(0, c, deps, "test")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Start(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/skills/policy", srv.Port()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /skills/policy status = %d", resp.StatusCode)
+	}
+	var detail struct {
+		Name               string `json:"name"`
+		StickyInstructions bool   `json:"sticky_instructions"`
+		StickySnippet      string `json:"sticky_snippet"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&detail); err != nil {
+		t.Fatalf("decode GET body: %v", err)
+	}
+	if detail.Name != "policy" {
+		t.Fatalf("GET returned name %q", detail.Name)
+	}
+	if !detail.StickyInstructions {
+		t.Fatal("GET dropped sticky_instructions")
+	}
+	if detail.StickySnippet != "Use the http tool for platform operations." {
+		t.Fatalf("GET sticky_snippet = %q", detail.StickySnippet)
+	}
+
+	reqBody := `{"description":"updated description","prompt":"# policy\n\nUpdated.","license":"Apache-2.0"}`
+	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("http://127.0.0.1:%d/skills/policy", srv.Port()), strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp2, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp2.Body)
+		t.Fatalf("PUT /skills/policy status = %d body=%s", resp2.StatusCode, string(body))
+	}
+
+	loaded, err := skills.LoadSkills(skills.SkillSource{
+		Dir:    filepath.Join(shannonDir, "skills"),
+		Source: skills.SourceGlobal,
+	})
+	if err != nil {
+		t.Fatalf("reload skills: %v", err)
+	}
+	var policy *skills.Skill
+	for _, skill := range loaded {
+		if skill.Name == "policy" {
+			policy = skill
+			break
+		}
+	}
+	if policy == nil {
+		t.Fatal("reloaded skill not found")
+	}
+	if !policy.StickyInstructions {
+		t.Fatal("PUT dropped sticky instructions")
+	}
+	if policy.StickySnippetOverride != "Use the http tool for platform operations." {
+		t.Fatalf("PUT dropped sticky snippet override: %q", policy.StickySnippetOverride)
+	}
+	if policy.License != "Apache-2.0" {
+		t.Fatalf("license not updated: %q", policy.License)
+	}
+}
+
 func TestServer_Health(t *testing.T) {
 	c := NewClient("ws://localhost:1/x", "", func(msg MessagePayload) string { return "" }, nil)
 	srv := NewServer(0, c, nil, "test")

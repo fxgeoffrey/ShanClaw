@@ -5,6 +5,7 @@ description: >
   MUST use for: create/delete/configure agent, install skill, connect
   Slack/DB, manage rules, project init — any platform management task.
 allowed-tools: http file_read
+sticky-instructions: true
 ---
 
 # Kocoro — Platform Configuration Assistant

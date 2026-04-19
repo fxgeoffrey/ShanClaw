@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -76,15 +77,15 @@ func versionInRange(v string) bool {
 //  3. fetch manifest + version range gate
 //  4. compare bundle_ts against the current symlink target (no-op if same)
 //
-// Steps 5-8 (sandbox/stage/atomic install/reload/retention) are landed in a
-// later task; installBundle is a stub so this path is testable in isolation.
+// Steps 5-8 perform sandboxed download, SHA256 verification, atomic install,
+// reload, and retention.
 func (p *Puller) tick(ctx context.Context) error {
 	// Step 1: flock
-	if err := os.MkdirAll(p.cfg.BundleRoot, 0o755); err != nil {
+	if err := os.MkdirAll(p.cfg.BundleRoot, 0o700); err != nil {
 		return err
 	}
 	lockPath := filepath.Join(p.cfg.BundleRoot, "bundle.lock")
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return err
 	}
@@ -128,7 +129,6 @@ func (p *Puller) tick(ctx context.Context) error {
 		return nil
 	}
 
-	// Steps 5-8 land in a later task.
 	return p.installBundle(ctx, mf)
 }
 
@@ -168,7 +168,7 @@ func (p *Puller) currentTs() string {
 
 func (p *Puller) installBundle(ctx context.Context, mf *Manifest) error {
 	staging := filepath.Join(p.cfg.BundleRoot, "staging", mf.BundleTs)
-	if err := os.MkdirAll(staging, 0o755); err != nil {
+	if err := os.MkdirAll(staging, 0o700); err != nil {
 		return err
 	}
 	cleanup := func() { _ = os.RemoveAll(staging) }
@@ -238,10 +238,13 @@ func validateManifestPath(rel string, stagingDir string) error {
 // clean staging.
 func (p *Puller) downloadFile(ctx context.Context, ts string, f ManifestFile, staging string) error {
 	target := filepath.Join(staging, filepath.Clean(f.Path))
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.cfg.Endpoint+"/api/v1/memory/bundle/"+ts+"/"+f.Path, nil)
+	escapedTS := url.PathEscape(ts)
+	escapedPath := escapedManifestPath(f.Path)
+	fullURL := strings.TrimSuffix(p.cfg.Endpoint, "/") + "/api/v1/memory/bundle/" + escapedTS + "/" + escapedPath
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
 	if err != nil {
 		return err
 	}
@@ -278,12 +281,21 @@ func (p *Puller) downloadFile(ctx context.Context, ts string, f ManifestFile, st
 	return nil
 }
 
+func escapedManifestPath(raw string) string {
+	parts := strings.Split(filepath.ToSlash(raw), "/")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		out = append(out, url.PathEscape(part))
+	}
+	return strings.Join(out, "/")
+}
+
 // atomicInstall renames the staging dir into bundles/<ts> and atomically
 // swaps the `current` symlink. Both rename + symlink-swap are POSIX-atomic
 // on the same filesystem.
 func (p *Puller) atomicInstall(stagingDir, ts string) error {
 	bundlesDir := filepath.Join(p.cfg.BundleRoot, "bundles")
-	if err := os.MkdirAll(bundlesDir, 0o755); err != nil {
+	if err := os.MkdirAll(bundlesDir, 0o700); err != nil {
 		return err
 	}
 	finalDir := filepath.Join(bundlesDir, ts)

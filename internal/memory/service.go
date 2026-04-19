@@ -50,7 +50,7 @@ func NewService(cfg Config, audit AuditLogger) *Service {
 
 // NewServiceAttached builds a Service for the CLI/TUI attach-only path.
 // AttachPolicy must have already confirmed a reachable sidecar before this
-// is constructed; the returned Service never spawns. (Wired in Task 19.)
+// is constructed; the returned Service never spawns.
 func NewServiceAttached(cfg Config, audit AuditLogger) *Service {
 	return &Service{cfg: cfg, audit: audit, attached: true}
 }
@@ -80,9 +80,9 @@ func (s *Service) tlmAvailable() bool {
 	return err == nil
 }
 
-// Start runs the cold-path gates from spec §3.6 (steps 1-3) and sets status
-// accordingly. Sidecar spawn + supervisor + puller wiring lands in Task 14;
-// this function returns nil after the gates without spawning anything.
+// Start runs the cold-path gates from spec §3.6 (steps 1-3) and, if all
+// gates pass, spawns the supervisor goroutine that owns sidecar lifecycle
+// and (in cloud mode) the bundle puller.
 //
 // All failure modes are silent: the function returns nil even when the
 // service is Unavailable or Disabled. Callers check Status() to decide

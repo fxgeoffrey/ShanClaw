@@ -92,8 +92,8 @@ func (s *Sidecar) Spawn(ctx context.Context) error {
 	return nil
 }
 
-// Wait blocks until the child exits. Used by the supervisor (Task 8) to
-// detect crashes. Returns nil if the cmd was never started.
+// Wait blocks until the child exits. The Supervisor uses this to detect
+// crashes and trigger backoff + re-spawn. Returns nil if cmd was never started.
 func (s *Sidecar) Wait() error {
 	if s.cmd == nil {
 		return nil

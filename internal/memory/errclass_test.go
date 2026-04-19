@@ -12,6 +12,8 @@ func TestClassifyHTTP(t *testing.T) {
 		{"200 ok", 200, &ResponseEnvelope{Reason: "ok"}, ClassOK},
 		{"200 no_data", 200, &ResponseEnvelope{Reason: "no_data"}, ClassOK},
 		{"200 degraded", 200, &ResponseEnvelope{Reason: "degraded"}, ClassOK},
+		{"401 auth", 401, &ResponseEnvelope{Error: &ErrorObject{Code: "auth", Details: map[string]any{"sub_code": "invalid_api_key"}}}, ClassPermanent},
+		{"403 forbidden", 403, &ResponseEnvelope{Error: &ErrorObject{Code: "auth", Details: map[string]any{"sub_code": "token_expired"}}}, ClassPermanent},
 		{"503 not_ready", 503, &ResponseEnvelope{Error: &ErrorObject{Code: "not_ready"}}, ClassUnavailable},
 		{"503 incompatible", 503, &ResponseEnvelope{Error: &ErrorObject{Code: "incompatible_bundle", Details: map[string]any{"sub_code": "version_out_of_range"}}}, ClassPermanent},
 		{"503 missing_artifact", 503, &ResponseEnvelope{Error: &ErrorObject{Code: "incompatible_bundle", Details: map[string]any{"sub_code": "missing_artifact"}}}, ClassPermanent},

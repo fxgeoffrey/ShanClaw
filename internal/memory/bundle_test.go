@@ -2,6 +2,8 @@ package memory
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -105,6 +107,48 @@ func TestPuller_TenantSwitch(t *testing.T) {
 	fp, _ := ReadFingerprint(root)
 	if fp != Fingerprint("new-key") {
 		t.Fatalf("fp=%q", fp)
+	}
+}
+
+func TestPuller_EscapesManifestPathInDownload(t *testing.T) {
+	root := t.TempDir()
+	if err := WriteFingerprint(root, "k"); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte("hello"))
+	sum := hex.EncodeToString(digest[:])
+
+	var gotPath string
+	var gotRawQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/manifest") {
+			_ = json.NewEncoder(w).Encode(Manifest{
+				BundleTs:      "2026-04-19T06-00-00Z",
+				BundleVersion: "0.4.0",
+				Files: []ManifestFile{
+					{Path: "dir/a b?x#c", Size: 5, Sha256: sum},
+				},
+			})
+			return
+		}
+		gotPath = r.URL.EscapedPath()
+		gotRawQuery = r.URL.RawQuery
+		_, _ = w.Write([]byte("hello"))
+	}))
+	defer srv.Close()
+
+	p := NewPuller(Config{Provider: "cloud", BundleRoot: root, Endpoint: srv.URL, APIKey: "k"}, nil, nil)
+	if err := p.tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if gotPath == "" {
+		t.Fatal("file download request not observed")
+	}
+	if !strings.Contains(gotPath, "a%20b%3Fx%23c") {
+		t.Fatalf("expected escaped segment in file request path, got %q", gotPath)
+	}
+	if gotRawQuery != "" {
+		t.Fatalf("expected empty raw query, got %q", gotRawQuery)
 	}
 }
 

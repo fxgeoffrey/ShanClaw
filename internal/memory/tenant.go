@@ -34,7 +34,7 @@ func ReadFingerprint(bundleRoot string) (string, error) {
 }
 
 func WriteFingerprint(bundleRoot, apiKey string) error {
-	if err := os.MkdirAll(bundleRoot, 0o755); err != nil {
+	if err := os.MkdirAll(bundleRoot, 0o700); err != nil {
 		return err
 	}
 	return os.WriteFile(filepath.Join(bundleRoot, tenantFile), []byte(Fingerprint(apiKey)), 0o600)

@@ -41,6 +41,8 @@ func ClassifyHTTP(status int, env *ResponseEnvelope) ErrorClass {
 	switch status {
 	case 400:
 		return ClassPermanent
+	case 401, 403:
+		return ClassPermanent
 	case 409:
 		return ClassRetryable
 	case 422:

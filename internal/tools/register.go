@@ -431,6 +431,17 @@ func RegisterSessionSearch(reg *agent.ToolRegistry, mgr *session.Manager) {
 	reg.Register(&SessionSearchTool{manager: mgr})
 }
 
+// RegisterMemoryTool registers the memory_recall tool. svc may be nil when
+// the daemon's memory service failed to start, when memory.provider is
+// disabled, or in CLI/TUI attach paths where AttachPolicy returned ready=false.
+// fallback must always be supplied so the tool can degrade gracefully.
+func RegisterMemoryTool(reg *agent.ToolRegistry, svc MemoryQuerier, fallback FallbackQuery) {
+	if reg == nil {
+		return
+	}
+	reg.Register(&MemoryTool{Service: svc, Fallback: fallback})
+}
+
 // RegisterCloudDelegate registers the cloud_delegate tool if cloud is enabled.
 func RegisterCloudDelegate(reg *agent.ToolRegistry, gw *client.GatewayClient, cfg *config.Config, handler agent.EventHandler, agentName, agentPrompt string) {
 	if cfg == nil || !cfg.Cloud.Enabled {

@@ -111,6 +111,14 @@ internal/
     compact.go         # TUI /compact command
   update/
     selfupdate.go      # GitHub release auto-update
+  sync/
+    sync.go            # Run(ctx, deps) — flock, marker read, scan, batch, upload, write, audit
+    marker.go          # Marker + FailedEntry; atomic read/write; sidecar on unknown version
+    config.go          # Typed view of sync.* config keys
+    scanner.go         # Multi-dir candidate discovery; failed-retry union; exclusions
+    batcher.go         # Marshal-once; dual-cap (sessions+bytes) packing; oversized + load-error rejection
+    uploader.go        # Uploader interface; CloudUploader + DryRunUploader; response anomaly normalization
+    backoff.go         # Reason classification + transient backoff math
 ```
 
 ## Key Conventions
@@ -158,6 +166,7 @@ Unknown tools are denied by default.
 - Large tool results spill to `~/.shannon/tmp/` and are cleaned up:
   - per-run in daemon and TUI
   - on manager close in one-shot mode
+- **Session sync** (`internal/sync/`): uploads local session JSON to Shannon Cloud once per day (opt-in via `sync.enabled`). Single entry point `sync.Run`; called from the daemon ticker and the `shan sessions sync` CLI; flock + atomic marker write serialize concurrent callers. Per-session ACK with persistent `marker.failed` bookkeeping; permanent reasons (`size_limit_exceeded`, `load_error`) stay forever and self-heal on session edit.
 
 ### Turn Lifecycle
 
@@ -192,6 +201,9 @@ Scalars override, lists merge+dedup, structs merge field-by-field. MCP server en
 - Spill files: `~/.shannon/tmp/tool_result_<session>_<call_id>.txt`
 - Schedule index: `~/.shannon/schedules.json`
 - Schedule plists: `~/Library/LaunchAgents/com.shannon.schedule.<id>.plist`
+- Sync marker: `~/.shannon/sync_marker.json`
+- Sync lock (flock): `~/.shannon/sync.lock` (never delete)
+- Sync dry-run outbox: `~/.shannon/sync_outbox/` (only when `sync.dry_run=true`)
 - Audit log: `~/.shannon/logs/audit.log`
 - Schedule logs: `~/.shannon/logs/schedule-<id>.log`
 

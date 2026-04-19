@@ -171,6 +171,22 @@ func Load() (*Config, error) {
 	viper.SetDefault("cloud.enabled", true)
 	viper.SetDefault("cloud.timeout", 3600)
 
+	// sync.* defaults — MUST stay in sync with setSyncDefaults in
+	// internal/sync/config.go. The duplicate exists so internal/sync unit
+	// tests can establish defaults without importing internal/config.
+	viper.SetDefault("sync.enabled", false)
+	viper.SetDefault("sync.dry_run", false)
+	viper.SetDefault("sync.endpoint", "")
+	viper.SetDefault("sync.exclude_agents", []string{})
+	viper.SetDefault("sync.exclude_sources", []string{})
+	viper.SetDefault("sync.batch_max_sessions", 25)
+	viper.SetDefault("sync.batch_max_bytes", 5*1024*1024)
+	viper.SetDefault("sync.single_session_max_bytes", 4*1024*1024)
+	viper.SetDefault("sync.daemon_interval", "24h")
+	viper.SetDefault("sync.daemon_startup_delay", "60s")
+	viper.SetDefault("sync.failed_max_attempts_transient", 5)
+	viper.SetDefault("sync.lock_timeout", "30s")
+
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
 			configPath := filepath.Join(dir, "config.yaml")

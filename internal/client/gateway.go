@@ -1011,3 +1011,60 @@ func readResponseBody(resp *http.Response) string {
 	}
 	return strings.TrimSpace(string(body))
 }
+
+// SessionEnvelope wraps one session JSON with its routing hint.
+// agent_name is a sub-partition hint only — tenancy is anchored by API key auth.
+type SessionEnvelope struct {
+	AgentName string          `json:"agent_name"`
+	Session   json.RawMessage `json:"session"`
+}
+
+type SyncBatchRequest struct {
+	ClientVersion string            `json:"client_version"`
+	SyncAt        time.Time         `json:"sync_at"`
+	Sessions      []SessionEnvelope `json:"sessions"`
+}
+
+type RejectedEntry struct {
+	ID     string `json:"id"`
+	Reason string `json:"reason"`
+}
+
+type SyncBatchResponse struct {
+	Accepted []string        `json:"accepted"`
+	Rejected []RejectedEntry `json:"rejected"`
+}
+
+// SyncSessions POSTs a batch to /api/v1/sessions/sync. Non-2xx responses,
+// network errors, and malformed bodies are returned as errors. Per-session
+// accepted/rejected partitioning is the caller's responsibility.
+func (c *GatewayClient) SyncSessions(ctx context.Context, batch SyncBatchRequest) (SyncBatchResponse, error) {
+	body, err := json.Marshal(batch)
+	if err != nil {
+		return SyncBatchResponse{}, fmt.Errorf("marshal sync batch: %w", err)
+	}
+	endpoint := c.baseURL + "/api/v1/sessions/sync"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return SyncBatchResponse{}, fmt.Errorf("build sync request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if c.apiKey != "" {
+		httpReq.Header.Set("X-API-Key", c.apiKey)
+	}
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return SyncBatchResponse{}, fmt.Errorf("sync request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return SyncBatchResponse{}, fmt.Errorf("sync returned %d: %s", resp.StatusCode, string(respBody))
+	}
+	var out SyncBatchResponse
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return SyncBatchResponse{}, fmt.Errorf("parse sync response: %w", err)
+	}
+	return out, nil
+}

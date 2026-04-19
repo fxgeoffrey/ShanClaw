@@ -27,13 +27,9 @@ type Manifest struct {
 	Files           []ManifestFile `json:"files"`
 }
 
-// Sidecar is the managed memory sidecar process handle. Its full definition
-// (lifecycle, supervision, UDS client wiring) lives in another file in this
-// package; the puller only needs the pointer to schedule a /bundle/reload
-// after a successful install (wired in a later task).
-//
-// Forward-declared here so Task 9 compiles standalone; when the sidecar
-// task lands its definition takes over and this stub is removed.
+// Sidecar placeholder — Task 7 will replace this with the real definition
+// (sidecar.go: managed child process + AttachPolicy). The puller only holds
+// a pointer to schedule /bundle/reload after install.
 type Sidecar struct{}
 
 // Puller drives the periodic bundle download cycle in cloud mode.

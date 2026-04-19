@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/permissions"
+	"github.com/spf13/viper"
 )
 
 func TestValidateConfig_IdleTimeouts(t *testing.T) {
@@ -262,5 +263,24 @@ func TestMergeRuntimeOverlayFile_MCPWorkspaceRoots(t *testing.T) {
 	}
 	if src, ok := cfg.Sources["mcp.workspace_roots"]; !ok || src.Level != "project" {
 		t.Errorf("expected source to record project overlay, got %+v ok=%v", src, ok)
+	}
+}
+
+func TestMemoryDefaults(t *testing.T) {
+	// Use a scratch HOME so we don't touch the real ~/.shannon/config.yaml.
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	if _, err := Load(); err != nil {
+		t.Fatal(err)
+	}
+	if v := viper.GetString("memory.provider"); v != "disabled" {
+		t.Fatalf("memory.provider=%q want disabled", v)
+	}
+	if v := viper.GetInt("memory.sidecar_restart_max"); v != 3 {
+		t.Fatalf("sidecar_restart_max=%d want 3", v)
+	}
+	if v := viper.GetDuration("memory.bundle_pull_interval"); v.Hours() != 24 {
+		t.Fatalf("bundle_pull_interval=%v want 24h", v)
 	}
 }

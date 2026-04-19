@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
@@ -24,6 +25,7 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/cwdctx"
 	"github.com/Kocoro-lab/ShanClaw/internal/hooks"
 	mcppkg "github.com/Kocoro-lab/ShanClaw/internal/mcp"
+	"github.com/Kocoro-lab/ShanClaw/internal/memory"
 	"github.com/Kocoro-lab/ShanClaw/internal/runstatus"
 	"github.com/Kocoro-lab/ShanClaw/internal/session"
 	"github.com/Kocoro-lab/ShanClaw/internal/skills"
@@ -286,6 +288,25 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 	sessMgr := session.NewManager(sessDir)
 	defer sessMgr.Close()
 	tools.RegisterSessionSearch(reg, sessMgr)
+
+	// Memory feature (Phase 2.3) — CLI attach-only path. Probe the daemon's
+	// sidecar socket; if reachable, delegate via AttachedQuerier. If no
+	// sidecar is up (or memory is disabled), register with a typed-nil
+	// MemoryQuerier so the tool falls back to session_search + MEMORY.md.
+	var memQuerier tools.MemoryQuerier
+	memCfg := memory.LoadConfig(viper.GetViper())
+	memCfg.APIKey = memory.ResolveAPIKey(viper.GetViper())
+	memCfg.Endpoint = memory.ResolveEndpoint(viper.GetViper())
+	if memCfg.Provider != "" && memCfg.Provider != "disabled" {
+		probeCtx, probeCancel := context.WithTimeout(context.Background(), 1*time.Second)
+		ready, _ := memory.AttachPolicy(probeCtx, memCfg.SocketPath)
+		probeCancel()
+		if ready {
+			memQuerier = memory.NewAttachedQuerier(memCfg.SocketPath, memCfg.ClientRequestTimeout)
+		}
+	}
+	tools.RegisterMemoryTool(reg, memQuerier, &cliMemoryFallback{sessionMgr: sessMgr})
+
 	sess := sessMgr.NewSession()
 	sess.Title = sessionTitleFromQuery(query)
 	loop.SetSessionID(sess.ID)
@@ -361,6 +382,36 @@ func resolveOneShotCWD(agentOverride *agents.Agent) (string, error) {
 	}
 	home, _ := os.UserHomeDir()
 	return home, nil
+}
+
+// cliMemoryFallback adapts session.Manager to the tools.FallbackQuery
+// interface for the one-shot CLI and TUI memory paths. MemoryFileSnippet
+// returns empty for v1 — daemon path provides the richer fallback; CLI/TUI
+// stay lightweight.
+type cliMemoryFallback struct {
+	sessionMgr *session.Manager
+}
+
+// Compile-time check that *cliMemoryFallback satisfies tools.FallbackQuery.
+var _ tools.FallbackQuery = (*cliMemoryFallback)(nil)
+
+func (c *cliMemoryFallback) SessionKeyword(_ context.Context, query string, limit int) ([]any, error) {
+	if c.sessionMgr == nil {
+		return nil, nil
+	}
+	hits, err := c.sessionMgr.Search(query, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]any, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, h)
+	}
+	return out, nil
+}
+
+func (c *cliMemoryFallback) MemoryFileSnippet(_ context.Context, _ string) (string, error) {
+	return "", nil
 }
 
 // cliEventHandler prompts for approval on stdout/stdin in one-shot mode

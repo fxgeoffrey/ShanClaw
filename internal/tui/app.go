@@ -21,6 +21,7 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/spf13/viper"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/agent"
 	"github.com/Kocoro-lab/ShanClaw/internal/agents"
@@ -31,6 +32,7 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/cwdctx"
 	"github.com/Kocoro-lab/ShanClaw/internal/hooks"
 	"github.com/Kocoro-lab/ShanClaw/internal/instructions"
+	"github.com/Kocoro-lab/ShanClaw/internal/memory"
 	"github.com/Kocoro-lab/ShanClaw/internal/permissions"
 	"github.com/Kocoro-lab/ShanClaw/internal/runstatus"
 	"github.com/Kocoro-lab/ShanClaw/internal/session"
@@ -48,6 +50,36 @@ const (
 	stateApproval
 	stateSessionPicker
 )
+
+// tuiMemoryFallback adapts session.Manager to the tools.FallbackQuery
+// interface for the TUI memory_recall path. MemoryFileSnippet returns
+// empty for v1 — daemon path provides the richer fallback; TUI stays
+// lightweight.
+type tuiMemoryFallback struct {
+	sessionMgr *session.Manager
+}
+
+// Compile-time check that *tuiMemoryFallback satisfies tools.FallbackQuery.
+var _ tools.FallbackQuery = (*tuiMemoryFallback)(nil)
+
+func (t *tuiMemoryFallback) SessionKeyword(_ context.Context, query string, limit int) ([]any, error) {
+	if t.sessionMgr == nil {
+		return nil, nil
+	}
+	hits, err := t.sessionMgr.Search(query, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]any, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, h)
+	}
+	return out, nil
+}
+
+func (t *tuiMemoryFallback) MemoryFileSnippet(_ context.Context, _ string) (string, error) {
+	return "", nil
+}
 
 type agentDoneMsg struct {
 	result string
@@ -350,6 +382,24 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 	// Local tools only (fast, sync) — MCP + gateway loaded async in Init
 	reg, skillsPtr, toolCleanup := tools.RegisterLocalTools(runtimeCfg, nil)
 	tools.RegisterSessionSearch(reg, sessMgr)
+
+	// Memory feature (Phase 2.3) — TUI attach-only path. Probe the daemon's
+	// sidecar socket; if reachable, delegate via AttachedQuerier. Otherwise
+	// register with a typed-nil MemoryQuerier so the tool falls back to
+	// session_search + MEMORY.md.
+	var memQuerier tools.MemoryQuerier
+	memCfg := memory.LoadConfig(viper.GetViper())
+	memCfg.APIKey = memory.ResolveAPIKey(viper.GetViper())
+	memCfg.Endpoint = memory.ResolveEndpoint(viper.GetViper())
+	if memCfg.Provider != "" && memCfg.Provider != "disabled" {
+		probeCtx, probeCancel := context.WithTimeout(context.Background(), 1*time.Second)
+		ready, _ := memory.AttachPolicy(probeCtx, memCfg.SocketPath)
+		probeCancel()
+		if ready {
+			memQuerier = memory.NewAttachedQuerier(memCfg.SocketPath, memCfg.ClientRequestTimeout)
+		}
+	}
+	tools.RegisterMemoryTool(reg, memQuerier, &tuiMemoryFallback{sessionMgr: sessMgr})
 
 	hookRunner := hooks.NewHookRunner(runtimeCfg.Hooks)
 	loop := agent.NewAgentLoop(llmClient, reg, runtimeCfg.ModelTier, shannonDir, runtimeCfg.Agent.MaxIterations, runtimeCfg.Tools.ResultTruncation, runtimeCfg.Tools.ArgsTruncation, &runtimeCfg.Permissions, auditor, hookRunner)

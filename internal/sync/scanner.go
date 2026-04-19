@@ -33,15 +33,22 @@ type ScannerDeps struct {
 //     NextAttemptAt non-nil and now >= NextAttemptAt).
 //
 // Results are deduped by SessionID; freshest UpdatedAt wins on collision.
-func DiscoverCandidates(ctx context.Context, deps ScannerDeps, cfg Config, marker Marker, now time.Time) ([]Candidate, error) {
+//
+// The returned int is the count of session dirs that were skipped due to
+// OpenIndex or query failure (not "no index file present" — that is benign
+// and not counted). The caller surfaces it in the audit event so daemon-mode
+// operators can spot migration/permission failures from audit.log without
+// tailing stderr.
+func DiscoverCandidates(ctx context.Context, deps ScannerDeps, cfg Config, marker Marker, now time.Time) ([]Candidate, int, error) {
 	dirs, err := discoverSessionDirs(deps.HomeDir)
 	if err != nil {
-		return nil, fmt.Errorf("discover session dirs: %w", err)
+		return nil, 0, fmt.Errorf("discover session dirs: %w", err)
 	}
 
 	// Phase 1: SQL watermark query per dir.
 	// Index dedupe by ID; freshest UpdatedAt wins on collision.
 	byID := map[string]Candidate{}
+	skipped := 0
 	for _, sd := range dirs {
 		dbPath := filepath.Join(sd.Dir, "sessions.db")
 		if _, err := os.Stat(dbPath); err != nil {
@@ -56,12 +63,14 @@ func DiscoverCandidates(ctx context.Context, deps ScannerDeps, cfg Config, marke
 		idx, err := session.OpenIndex(sd.Dir)
 		if err != nil {
 			log.Printf("sync: skipping session dir %s: %v", sd.Dir, err)
+			skipped++
 			continue
 		}
 		rows, err := idx.ListUpdatedSince(ctx, marker.LastSyncAt)
 		idx.Close()
 		if err != nil {
 			log.Printf("sync: skipping session dir %s: %v", sd.Dir, err)
+			skipped++
 			continue
 		}
 		for _, r := range rows {
@@ -147,7 +156,7 @@ func DiscoverCandidates(ctx context.Context, deps ScannerDeps, cfg Config, marke
 		}
 		out = append(out, c)
 	}
-	return out, nil
+	return out, skipped, nil
 }
 
 func makeStringSet(ss []string) map[string]bool {

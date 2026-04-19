@@ -23,6 +23,7 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/agent"
 	"github.com/Kocoro-lab/ShanClaw/internal/agents"
 	"github.com/Kocoro-lab/ShanClaw/internal/audit"
+	"github.com/Kocoro-lab/ShanClaw/internal/client"
 	"github.com/Kocoro-lab/ShanClaw/internal/config"
 	ctxwin "github.com/Kocoro-lab/ShanClaw/internal/context"
 	"github.com/Kocoro-lab/ShanClaw/internal/mcp"
@@ -30,7 +31,9 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/schedule"
 	"github.com/Kocoro-lab/ShanClaw/internal/session"
 	"github.com/Kocoro-lab/ShanClaw/internal/skills"
+	syncpkg "github.com/Kocoro-lab/ShanClaw/internal/sync"
 	"github.com/Kocoro-lab/ShanClaw/internal/tools"
+	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 )
 
@@ -279,6 +282,10 @@ func (s *Server) Start(ctx context.Context) error {
 	s.listener = ln
 	s.listenerMu.Unlock()
 	s.server = &http.Server{Handler: mux}
+
+	// Spawn the gated session-sync ticker. It self-disables when sync is
+	// not enabled, so it's always safe to start unconditionally here.
+	go s.runSyncLoop(ctx)
 
 	go func() {
 		<-ctx.Done()
@@ -3270,4 +3277,125 @@ func (s *Server) handlePutInstructions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+// syncAuditAdapter bridges the daemon's *audit.AuditLogger (which writes
+// AuditEntry rows) to the sync.AuditLogger interface (which emits
+// event-name + structured fields). The sync package only ever calls Log;
+// we project the fields into AuditEntry.InputSummary so they land in
+// audit.log alongside tool-call entries.
+type syncAuditAdapter struct {
+	logger *audit.AuditLogger
+}
+
+func (a syncAuditAdapter) Log(event string, fields map[string]any) {
+	if a.logger == nil {
+		return
+	}
+	// Render fields as a stable, compact string. JSON gives us deterministic
+	// formatting and is already what the rest of audit.log uses.
+	var summary string
+	if data, err := json.Marshal(fields); err == nil {
+		summary = string(data)
+	} else {
+		summary = fmt.Sprintf("%v", fields)
+	}
+	a.logger.Log(audit.AuditEntry{
+		Timestamp:    time.Now(),
+		ToolName:     event,
+		InputSummary: summary,
+		Decision:     "logged",
+		Approved:     true,
+	})
+}
+
+// runSyncLoop runs sync.Run on a startup-delayed ticker until ctx is canceled.
+// Reads config + rebuilds deps on each tick so config changes (or a fixed
+// missing endpoint/api_key) take effect on the next iteration.
+func (s *Server) runSyncLoop(ctx context.Context) {
+	initialCfg := syncpkg.LoadConfig(viper.GetViper())
+	if !initialCfg.Enabled || initialCfg.DaemonInterval <= 0 {
+		return
+	}
+
+	// Wait for startup delay, but respect ctx.
+	if initialCfg.DaemonStartupDelay > 0 {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(initialCfg.DaemonStartupDelay):
+		}
+	}
+
+	tick := func() {
+		cfg := syncpkg.LoadConfig(viper.GetViper())
+		if !cfg.Enabled {
+			return // operator disabled mid-flight
+		}
+		deps, ok := s.buildSyncDeps(cfg)
+		if !ok {
+			return // config incomplete; buildSyncDeps already logged the reason
+		}
+		if err := syncpkg.Run(ctx, deps); err != nil {
+			log.Printf("daemon sync: run error: %v", err)
+		}
+	}
+
+	tick() // catch-up
+
+	t := time.NewTicker(initialCfg.DaemonInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			tick()
+		}
+	}
+}
+
+// buildSyncDeps returns ok=false if the config is incomplete (missing
+// endpoint or api_key in non-dry-run mode). Caller must skip this iteration
+// if !ok. This is re-evaluated every tick so a deferred secret load takes
+// effect on the next iteration without restarting the daemon.
+func (s *Server) buildSyncDeps(cfg syncpkg.Config) (syncpkg.Deps, bool) {
+	home, _ := os.UserHomeDir()
+	shannonHome := filepath.Join(home, ".shannon")
+
+	var uploader syncpkg.Uploader
+	if cfg.DryRun {
+		uploader = &syncpkg.DryRunUploader{
+			OutboxDir: filepath.Join(shannonHome, "sync_outbox"),
+			Now:       time.Now,
+		}
+	} else {
+		endpoint := syncpkg.ResolveEndpoint(cfg, viper.GetViper())
+		apiKey := viper.GetString("cloud.api_key")
+		if endpoint == "" || apiKey == "" {
+			log.Printf("daemon sync: missing endpoint (sync.endpoint or cloud.endpoint) or cloud.api_key; skipping until configured")
+			return syncpkg.Deps{}, false
+		}
+		gw := client.NewGatewayClient(endpoint, apiKey)
+		uploader = &syncpkg.CloudUploader{Client: gw}
+	}
+
+	loader := func(dir, id string) ([]byte, error) {
+		return os.ReadFile(filepath.Join(dir, id+".json"))
+	}
+
+	var auditSink syncpkg.AuditLogger
+	if s.deps != nil && s.deps.Auditor != nil {
+		auditSink = syncAuditAdapter{logger: s.deps.Auditor}
+	}
+
+	return syncpkg.Deps{
+		Cfg:       cfg,
+		HomeDir:   shannonHome,
+		ClientVer: "shanclaw/daemon",
+		Uploader:  uploader,
+		Loader:    loader,
+		Audit:     auditSink,
+		Now:       time.Now,
+	}, true
 }

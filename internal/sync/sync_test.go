@@ -395,6 +395,99 @@ func TestSyncRun_PermanentFailureDoesNotChurn(t *testing.T) {
 	}
 }
 
+// TestSyncRun_SentCountReflectsAttemptedBatchesOnly verifies the audit
+// "sent" field counts only sessions in batches the uploader actually saw,
+// not sessions queued behind a transport error. With BatchMaxSessions=1 and
+// 3 candidates, the uploader is called for batch #1 (success) and batch #2
+// (transport error); batch #3 is never attempted. "sent" must equal 2.
+func TestSyncRun_SentCountReflectsAttemptedBatchesOnly(t *testing.T) {
+	home := t.TempDir()
+	now := time.Now().UTC().Truncate(time.Second)
+	sd := filepath.Join(home, "sessions")
+	if err := os.MkdirAll(sd, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+
+	idx, err := session.OpenIndex(sd)
+	if err != nil {
+		t.Fatalf("OpenIndex: %v", err)
+	}
+	for _, id := range []string{"s1", "s2", "s3"} {
+		s := &session.Session{ID: id, CreatedAt: now.Add(-time.Minute), UpdatedAt: now.Add(-time.Minute)}
+		if err := idx.UpsertSession(s); err != nil {
+			t.Fatalf("UpsertSession %s: %v", id, err)
+		}
+		body, _ := json.Marshal(s)
+		if err := os.WriteFile(filepath.Join(sd, id+".json"), body, 0o644); err != nil {
+			t.Fatalf("write %s.json: %v", id, err)
+		}
+	}
+	idx.Close()
+
+	cfg := DefaultConfig()
+	cfg.Enabled = true
+	cfg.BatchMaxSessions = 1 // force three single-session batches
+
+	uploader := &stubUploader{
+		respFn: func(b client.SyncBatchRequest) (client.SyncBatchResponse, error) {
+			// First call: accept whatever ID it has. Subsequent calls: transport error.
+			// stubUploader.calls is incremented BEFORE respFn runs, so calls==1 is the first.
+			return client.SyncBatchResponse{}, nil // overridden below
+		},
+	}
+	uploader.respFn = func(b client.SyncBatchRequest) (client.SyncBatchResponse, error) {
+		if uploader.calls == 1 {
+			ids := make([]string, 0, len(b.Sessions))
+			for _, env := range b.Sessions {
+				var probe struct {
+					ID string `json:"id"`
+				}
+				_ = json.Unmarshal(env.Session, &probe)
+				ids = append(ids, probe.ID)
+			}
+			return client.SyncBatchResponse{Accepted: ids}, nil
+		}
+		return client.SyncBatchResponse{}, fmt.Errorf("network down")
+	}
+
+	auditSink := &stubAudit{}
+	deps := Deps{
+		Cfg: cfg, HomeDir: home, Uploader: uploader, Audit: auditSink,
+		Loader: func(dir, id string) ([]byte, error) {
+			return os.ReadFile(filepath.Join(dir, id+".json"))
+		},
+		Now: func() time.Time { return now },
+	}
+
+	if err := Run(context.Background(), deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if uploader.calls != 2 {
+		t.Fatalf("expected 2 uploader calls (1 success + 1 transport error, then break); got %d", uploader.calls)
+	}
+
+	// Find the main session_sync audit event (not the noop variants).
+	var mainEvent map[string]any
+	for _, e := range auditSink.events {
+		if e["_event"] == "session_sync" {
+			if _, hasSent := e["sent"]; hasSent {
+				mainEvent = e
+				break
+			}
+		}
+	}
+	if mainEvent == nil {
+		t.Fatalf("expected a session_sync audit event with 'sent' field; got %+v", auditSink.events)
+	}
+	gotSent, _ := mainEvent["sent"].(int)
+	if gotSent != 2 {
+		t.Errorf("audit 'sent': got %d, want 2 (only attempted batches: #1 succeeded, #2 errored, #3 never sent)", gotSent)
+	}
+	if mainEvent["outcome"] != OutcomeTransportError {
+		t.Errorf("outcome: got %v, want transport_error", mainEvent["outcome"])
+	}
+}
+
 func TestSyncRun_429SingleAttemptNoLoop(t *testing.T) {
 	home := t.TempDir()
 	now := time.Now().UTC().Truncate(time.Second)

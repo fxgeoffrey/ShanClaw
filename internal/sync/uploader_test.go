@@ -3,6 +3,8 @@ package sync
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -59,6 +61,24 @@ func TestNormalizeResponse_UnknownAcceptedIDDropped(t *testing.T) {
 	out := normalizeResponse(batch, raw)
 	if len(out.Accepted) != 1 || out.Accepted[0] != "a" {
 		t.Errorf("expected only [a]; got %v", out.Accepted)
+	}
+}
+
+func TestCloudUploader_EmptyResponseIsTransportError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	u := &CloudUploader{Client: client.NewGatewayClient(srv.URL, "k")}
+	_, err := u.Send(context.Background(), client.SyncBatchRequest{
+		Sessions: []client.SessionEnvelope{
+			{Session: json.RawMessage(`{"id":"a"}`)},
+		},
+	})
+	if err == nil {
+		t.Fatalf("empty 200 response with non-empty batch must be a transport error, got nil")
 	}
 }
 

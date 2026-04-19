@@ -48,8 +48,9 @@ func Run(ctx context.Context, deps Deps) error {
 	release, err := acquireFlock(lockPath, deps.Cfg.LockTimeout)
 	if err != nil {
 		audit(deps.Audit, "session_sync", map[string]any{
-			"outcome": OutcomeNoop,
-			"reason":  "lock_contention",
+			"outcome":      OutcomeNoop,
+			"reason":       "lock_contention",
+			"skipped_dirs": 0,
 		})
 		return nil // not an error; another caller is running
 	}
@@ -64,13 +65,14 @@ func Run(ctx context.Context, deps Deps) error {
 
 	if !deps.Cfg.Enabled {
 		audit(deps.Audit, "session_sync", map[string]any{
-			"outcome": OutcomeNoop,
-			"reason":  "sync.enabled=false",
+			"outcome":      OutcomeNoop,
+			"reason":       "sync.enabled=false",
+			"skipped_dirs": 0,
 		})
 		return nil
 	}
 
-	cands, err := DiscoverCandidates(ctx, ScannerDeps{HomeDir: deps.HomeDir}, deps.Cfg, marker, now)
+	cands, skipped, err := DiscoverCandidates(ctx, ScannerDeps{HomeDir: deps.HomeDir}, deps.Cfg, marker, now)
 	if err != nil {
 		return fmt.Errorf("discover candidates: %w", err)
 	}
@@ -82,8 +84,9 @@ func Run(ctx context.Context, deps Deps) error {
 			return fmt.Errorf("write marker (noop): %w", err)
 		}
 		audit(deps.Audit, "session_sync", map[string]any{
-			"outcome": OutcomeNoop,
-			"reason":  "no candidates",
+			"outcome":      OutcomeNoop,
+			"reason":       "no candidates",
+			"skipped_dirs": skipped,
 		})
 		return nil
 	}
@@ -96,6 +99,7 @@ func Run(ctx context.Context, deps Deps) error {
 	totalAccepted := 0
 	totalRejectedTransient := 0
 	totalRejectedPermanent := 0
+	sentCount := 0
 	outcome := OutcomeOK
 	transportErr := false
 
@@ -121,6 +125,7 @@ func Run(ctx context.Context, deps Deps) error {
 			})
 		}
 
+		sentCount += len(req.Sessions)
 		resp, err := deps.Uploader.Send(ctx, req)
 		if err != nil {
 			// Transport error: stop sending more batches, but keep advances from
@@ -161,13 +166,14 @@ func Run(ctx context.Context, deps Deps) error {
 	}
 
 	audit(deps.Audit, "session_sync", map[string]any{
-		"sent":               len(byID),
+		"sent":               sentCount,
 		"accepted":           totalAccepted,
 		"rejected_transient": totalRejectedTransient,
 		"rejected_permanent": totalRejectedPermanent,
 		"failed_carryover":   len(marker.Failed),
 		"outcome":            outcome,
 		"transport_error":    transportErr,
+		"skipped_dirs":       skipped,
 	})
 	return nil
 }

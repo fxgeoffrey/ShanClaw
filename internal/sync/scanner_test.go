@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"sort"
 	"testing"
@@ -54,7 +55,7 @@ func TestScanner_MultiDir_WatermarkOnly(t *testing.T) {
 	marker := emptyMarker()
 	marker.LastSyncAt = now.Add(-1 * time.Hour) // cutoff
 
-	cands, err := DiscoverCandidates(context.Background(), ScannerDeps{HomeDir: env.HomeDir}, cfg, marker, now)
+	cands, _, err := DiscoverCandidates(context.Background(), ScannerDeps{HomeDir: env.HomeDir}, cfg, marker, now)
 	if err != nil {
 		t.Fatalf("DiscoverCandidates: %v", err)
 	}
@@ -115,7 +116,7 @@ func TestScanner_RetryUnion_DueOnly(t *testing.T) {
 		},
 	}
 
-	cands, err := DiscoverCandidates(context.Background(), ScannerDeps{HomeDir: env.HomeDir}, cfg, marker, now)
+	cands, _, err := DiscoverCandidates(context.Background(), ScannerDeps{HomeDir: env.HomeDir}, cfg, marker, now)
 	if err != nil {
 		t.Fatalf("DiscoverCandidates: %v", err)
 	}
@@ -153,7 +154,7 @@ func TestScanner_DedupeOnIDCollision(t *testing.T) {
 		},
 	}
 
-	cands, err := DiscoverCandidates(context.Background(), ScannerDeps{HomeDir: env.HomeDir}, cfg, marker, now)
+	cands, _, err := DiscoverCandidates(context.Background(), ScannerDeps{HomeDir: env.HomeDir}, cfg, marker, now)
 	if err != nil {
 		t.Fatalf("DiscoverCandidates: %v", err)
 	}
@@ -184,7 +185,7 @@ func TestScanner_ExcludeAgents(t *testing.T) {
 	marker := emptyMarker()
 	marker.LastSyncAt = now.Add(-1 * time.Hour)
 
-	cands, err := DiscoverCandidates(context.Background(), ScannerDeps{HomeDir: env.HomeDir}, cfg, marker, now)
+	cands, _, err := DiscoverCandidates(context.Background(), ScannerDeps{HomeDir: env.HomeDir}, cfg, marker, now)
 	if err != nil {
 		t.Fatalf("DiscoverCandidates: %v", err)
 	}
@@ -221,7 +222,7 @@ func TestScanner_ExcludeSources_LegacyEmptyTreatedAsLocal(t *testing.T) {
 	marker := emptyMarker()
 	marker.LastSyncAt = now.Add(-1 * time.Hour)
 
-	cands, err := DiscoverCandidates(context.Background(), ScannerDeps{HomeDir: env.HomeDir}, cfg, marker, now)
+	cands, _, err := DiscoverCandidates(context.Background(), ScannerDeps{HomeDir: env.HomeDir}, cfg, marker, now)
 	if err != nil {
 		t.Fatalf("DiscoverCandidates: %v", err)
 	}
@@ -233,6 +234,50 @@ func TestScanner_ExcludeSources_LegacyEmptyTreatedAsLocal(t *testing.T) {
 	want := []string{"from-slack"}
 	if !equalStrings(gotIDs, want) {
 		t.Errorf("ExcludeSources (legacy empty == local): got %v, want %v", gotIDs, want)
+	}
+}
+
+// TestScanner_SkippedDirCount asserts the scanner returns a non-zero skipped
+// count when a session dir's index is unreadable, while still producing
+// candidates from working dirs (per-dir resilience).
+func TestScanner_SkippedDirCount(t *testing.T) {
+	env := newScannerEnv(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	newer := now.Add(-10 * time.Minute)
+
+	// Working agent dir produces a normal candidate.
+	env.seedSession(t, "ops-bot", &session.Session{ID: "ops-new", CreatedAt: newer, UpdatedAt: newer})
+
+	// Broken agent dir: create a "sessions.db" that is itself a directory,
+	// not a sqlite file. os.Stat succeeds (so the early-skip doesn't fire),
+	// but OpenIndex fails to read PRAGMA user_version.
+	badAgentDir := filepath.Join(env.HomeDir, "agents", "broken", "sessions")
+	if err := os.MkdirAll(filepath.Join(badAgentDir, "sessions.db"), 0o755); err != nil {
+		t.Fatalf("seed bad dir: %v", err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.Enabled = true
+	marker := emptyMarker()
+	marker.LastSyncAt = now.Add(-1 * time.Hour)
+
+	cands, skipped, err := DiscoverCandidates(context.Background(), ScannerDeps{HomeDir: env.HomeDir}, cfg, marker, now)
+	if err != nil {
+		t.Fatalf("DiscoverCandidates: %v", err)
+	}
+	if skipped < 1 {
+		t.Errorf("expected skipped >= 1 for unreadable sessions.db, got %d", skipped)
+	}
+
+	// Working dir still surfaces its candidate.
+	gotIDs := []string{}
+	for _, c := range cands {
+		gotIDs = append(gotIDs, c.SessionID)
+	}
+	sort.Strings(gotIDs)
+	want := []string{"ops-new"}
+	if !equalStrings(gotIDs, want) {
+		t.Errorf("working dirs must still produce candidates: got %v, want %v", gotIDs, want)
 	}
 }
 

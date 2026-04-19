@@ -31,6 +31,14 @@ func (u *CloudUploader) Send(ctx context.Context, batch client.SyncBatchRequest)
 	if err != nil {
 		return client.SyncBatchResponse{}, err
 	}
+	// Spec: missing accepted/rejected → treat as transport-level failure for the
+	// entire batch. Without this, an empty `{}` 200 response parses cleanly,
+	// the per-id loops produce no work, and the marker writes outcome="ok"
+	// even though nothing happened (silent failure mode). Defensive: only error
+	// when the batch itself was non-empty.
+	if len(batch.Sessions) > 0 && len(resp.Accepted)+len(resp.Rejected) == 0 {
+		return client.SyncBatchResponse{}, fmt.Errorf("cloud returned empty accepted/rejected for non-empty batch")
+	}
 	return normalizeResponse(batch, resp), nil
 }
 

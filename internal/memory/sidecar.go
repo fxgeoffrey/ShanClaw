@@ -172,3 +172,81 @@ func AttachPolicy(ctx context.Context, socket string) (bool, error) {
 	}
 	return h.Ready, nil
 }
+
+// Spawner is the lifecycle interface the supervisor needs. *Sidecar
+// already satisfies it; using an interface keeps the supervisor unit-testable
+// without spawning real processes.
+type Spawner interface {
+	Spawn(ctx context.Context) error
+	WaitReady(ctx context.Context, ceiling time.Duration) error
+	Wait() error
+}
+
+// Supervisor drives the spawn → wait-ready → wait → backoff → re-spawn loop
+// for a Spawner. Spec §3.6: cold-start failures are recoverable — a failed
+// first WaitReady is treated identically to a runtime crash (counted toward
+// the budget, retried with backoff). After SidecarRestartMax attempts are
+// exhausted the supervisor returns StateDegraded.
+type Supervisor struct {
+	sp           Spawner
+	maxAttempts  int
+	onReady      func()
+	readyTimeout time.Duration
+	testBackoff  func(int) time.Duration // override for tests; production uses backoffSec
+}
+
+// NewSupervisor builds a Supervisor with sane defaults (10s ready timeout).
+// Pass nil for onReady if the caller doesn't need a transition hook.
+func NewSupervisor(sp Spawner, maxAttempts int, onReady func()) *Supervisor {
+	return &Supervisor{
+		sp:           sp,
+		maxAttempts:  maxAttempts,
+		onReady:      onReady,
+		readyTimeout: 10 * time.Second,
+	}
+}
+
+func (s *Supervisor) backoff(n int) time.Duration {
+	if s.testBackoff != nil {
+		return s.testBackoff(n)
+	}
+	// Exponential: 1s, 2s, 4s, ...
+	return time.Duration(1<<n) * time.Second
+}
+
+// Run drives the lifecycle loop. Returns the terminal state:
+//   - StateDegraded if maxAttempts is exhausted without sustained readiness
+//   - StateStopped if ctx is canceled before exhaustion
+//
+// onReady is invoked each time WaitReady succeeds (so the caller can flip
+// service status to Ready and start the puller goroutine on first ready).
+// The restart counter resets to 0 if the sidecar stays Ready continuously
+// for ≥5 minutes (transient blip vs flapping — spec §4.3).
+func (s *Supervisor) Run(ctx context.Context) SidecarState {
+	attempt := 0
+	for attempt < s.maxAttempts {
+		if ctx.Err() != nil {
+			return StateStopped
+		}
+		spawnErr := s.sp.Spawn(ctx)
+		if spawnErr == nil {
+			if waitErr := s.sp.WaitReady(ctx, s.readyTimeout); waitErr == nil {
+				readyAt := time.Now()
+				if s.onReady != nil {
+					s.onReady()
+				}
+				_ = s.sp.Wait() // blocks until child exits
+				if time.Since(readyAt) >= 5*time.Minute {
+					attempt = 0
+				}
+			}
+		}
+		attempt++
+		select {
+		case <-ctx.Done():
+			return StateStopped
+		case <-time.After(s.backoff(attempt)):
+		}
+	}
+	return StateDegraded
+}

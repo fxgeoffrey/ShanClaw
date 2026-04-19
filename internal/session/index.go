@@ -24,7 +24,8 @@ import (
 //	0 — uninitialised.
 //	1 — porter+unicode61 (shipped default).
 //	2 — trigram tokenizer; native snippet() on original text.
-const indexSchemaVersion = 2
+//	3 — adds source column to sessions table for sync.exclude_sources.
+const indexSchemaVersion = 3
 
 const schema = `
 PRAGMA journal_mode=WAL;
@@ -36,7 +37,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     cwd        TEXT NOT NULL DEFAULT '',
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL,
-    msg_count  INTEGER NOT NULL DEFAULT 0
+    msg_count  INTEGER NOT NULL DEFAULT 0,
+    source     TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -119,12 +121,27 @@ func OpenIndex(dir string) (*Index, error) {
 				return nil, fmt.Errorf("drop stale table: %w", err)
 			}
 		}
-		// Only flag rebuild when there was actual prior data to migrate.
-		// For a truly fresh DB (stored==0, no sessions rows), NewStore's
-		// IsEmpty check will cover the no-op case.
-		var n int
-		if err := db.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&n); err == nil && n > 0 {
-			needsRebuild = true
+		// v2→v3: when the sessions table already exists from a prior version,
+		// CREATE TABLE IF NOT EXISTS won't add the new `source` column. ALTER
+		// it in. Skip silently when the table doesn't exist yet (fresh DB or
+		// stored==0 with no prior schema), and tolerate "duplicate column"
+		// for idempotency across partial migrations.
+		var sessionsExists int
+		_ = db.QueryRow(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions'`).Scan(&sessionsExists)
+		if sessionsExists == 1 {
+			if _, err := db.Exec(`ALTER TABLE sessions ADD COLUMN source TEXT NOT NULL DEFAULT ''`); err != nil {
+				if !strings.Contains(err.Error(), "duplicate column") {
+					db.Close()
+					return nil, fmt.Errorf("add source column: %w", err)
+				}
+			}
+			// Only flag rebuild when there was actual prior data to migrate.
+			// For a truly fresh DB (stored==0, no sessions rows), NewStore's
+			// IsEmpty check will cover the no-op case.
+			var n int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&n); err == nil && n > 0 {
+				needsRebuild = true
+			}
 		}
 	}
 
@@ -159,11 +176,12 @@ func (idx *Index) UpsertSession(sess *Session) error {
 	// Upsert session row first (FK parent for messages).
 	// msg_count is set to 0 initially and updated after indexing.
 	_, err = tx.Exec(
-		`INSERT OR REPLACE INTO sessions (id, title, cwd, created_at, updated_at, msg_count)
-		 VALUES (?, ?, ?, ?, ?, 0)`,
+		`INSERT OR REPLACE INTO sessions (id, title, cwd, created_at, updated_at, msg_count, source)
+		 VALUES (?, ?, ?, ?, ?, 0, ?)`,
 		sess.ID, sess.Title, sess.CWD,
 		sess.CreatedAt.Format(time.RFC3339Nano),
 		sess.UpdatedAt.Format(time.RFC3339Nano),
+		sess.Source,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert session: %w", err)
@@ -458,6 +476,7 @@ func (idx *Index) LatestUpdatedID() (string, error) {
 type CandidateRow struct {
 	ID        string
 	UpdatedAt time.Time
+	Source    string
 }
 
 // ListUpdatedSince returns all sessions whose updated_at strictly exceeds after.
@@ -467,7 +486,7 @@ type CandidateRow struct {
 // after.IsZero() returns every session in the index (the empty time formats
 // to "0001-01-01..." which sorts before any RFC3339 timestamp).
 func (idx *Index) ListUpdatedSince(ctx context.Context, after time.Time) ([]CandidateRow, error) {
-	const q = `SELECT id, updated_at FROM sessions WHERE updated_at > ? ORDER BY updated_at ASC`
+	const q = `SELECT id, updated_at, COALESCE(source, '') FROM sessions WHERE updated_at > ? ORDER BY updated_at ASC`
 	rows, err := idx.db.QueryContext(ctx, q, after.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return nil, fmt.Errorf("ListUpdatedSince query: %w", err)
@@ -479,11 +498,12 @@ func (idx *Index) ListUpdatedSince(ctx context.Context, after time.Time) ([]Cand
 		var (
 			id         string
 			updatedStr string
+			source     string
 		)
-		if err := rows.Scan(&id, &updatedStr); err != nil {
+		if err := rows.Scan(&id, &updatedStr, &source); err != nil {
 			return nil, fmt.Errorf("ListUpdatedSince scan: %w", err)
 		}
-		out = append(out, CandidateRow{ID: id, UpdatedAt: parseTime(updatedStr)})
+		out = append(out, CandidateRow{ID: id, UpdatedAt: parseTime(updatedStr), Source: source})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("ListUpdatedSince iter: %w", err)

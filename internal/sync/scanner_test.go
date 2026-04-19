@@ -168,6 +168,74 @@ func TestScanner_DedupeOnIDCollision(t *testing.T) {
 	}
 }
 
+func TestScanner_ExcludeAgents(t *testing.T) {
+	env := newScannerEnv(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	newer := now.Add(-10 * time.Minute)
+
+	env.seedSession(t, "", &session.Session{ID: "in-default", CreatedAt: newer, UpdatedAt: newer})
+	env.seedSession(t, "personal", &session.Session{ID: "in-personal", CreatedAt: newer, UpdatedAt: newer})
+	env.seedSession(t, "ops-bot", &session.Session{ID: "in-ops", CreatedAt: newer, UpdatedAt: newer})
+
+	cfg := DefaultConfig()
+	cfg.Enabled = true
+	cfg.ExcludeAgents = []string{"personal", "default"} // "default" excludes the root sessions dir
+
+	marker := emptyMarker()
+	marker.LastSyncAt = now.Add(-1 * time.Hour)
+
+	cands, err := DiscoverCandidates(context.Background(), ScannerDeps{HomeDir: env.HomeDir}, cfg, marker, now)
+	if err != nil {
+		t.Fatalf("DiscoverCandidates: %v", err)
+	}
+	gotIDs := []string{}
+	for _, c := range cands {
+		gotIDs = append(gotIDs, c.SessionID)
+	}
+	sort.Strings(gotIDs)
+	want := []string{"in-ops"}
+	if !equalStrings(gotIDs, want) {
+		t.Errorf("ExcludeAgents: got %v, want %v", gotIDs, want)
+	}
+}
+
+func TestScanner_ExcludeSources_LegacyEmptyTreatedAsLocal(t *testing.T) {
+	env := newScannerEnv(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	newer := now.Add(-10 * time.Minute)
+
+	env.seedSession(t, "", &session.Session{
+		ID: "legacy-no-source", CreatedAt: newer, UpdatedAt: newer, Source: "",
+	})
+	env.seedSession(t, "", &session.Session{
+		ID: "explicit-local", CreatedAt: newer, UpdatedAt: newer, Source: "local",
+	})
+	env.seedSession(t, "", &session.Session{
+		ID: "from-slack", CreatedAt: newer, UpdatedAt: newer, Source: "slack",
+	})
+
+	cfg := DefaultConfig()
+	cfg.Enabled = true
+	cfg.ExcludeSources = []string{"local"}
+
+	marker := emptyMarker()
+	marker.LastSyncAt = now.Add(-1 * time.Hour)
+
+	cands, err := DiscoverCandidates(context.Background(), ScannerDeps{HomeDir: env.HomeDir}, cfg, marker, now)
+	if err != nil {
+		t.Fatalf("DiscoverCandidates: %v", err)
+	}
+	gotIDs := []string{}
+	for _, c := range cands {
+		gotIDs = append(gotIDs, c.SessionID)
+	}
+	sort.Strings(gotIDs)
+	want := []string{"from-slack"}
+	if !equalStrings(gotIDs, want) {
+		t.Errorf("ExcludeSources (legacy empty == local): got %v, want %v", gotIDs, want)
+	}
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

@@ -55,8 +55,13 @@ func emptyMarker() Marker {
 	}
 }
 
-// ReadMarker loads the marker at path. A missing file returns emptyMarker() with no error.
-// (Version mismatch handling is added in Task 3.)
+// ReadMarker loads the marker at path. Returns emptyMarker() (no error) for any
+// of: missing file, corrupt JSON, unknown/future schema version. In the corrupt
+// or unknown-version cases, sidecars the offending file for operator triage:
+//   - corrupt: <path>.corrupt.bak
+//   - unknown version N: <path>.unknown-v<N>.bak
+// The original file is left in place; the next successful WriteMarkerAtomic
+// replaces it with a v1 marker.
 func ReadMarker(path string) (Marker, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -65,14 +70,42 @@ func ReadMarker(path string) (Marker, error) {
 		}
 		return Marker{}, fmt.Errorf("read marker: %w", err)
 	}
+
+	// Probe just the version field first so we can sidecar before full parse.
+	var probe struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(b, &probe); err != nil {
+		// Corrupt JSON entirely.
+		_ = sidecarMarker(path, b, ".corrupt.bak")
+		return emptyMarker(), nil
+	}
+	if probe.Version <= 0 {
+		// Missing or zero version field: treat as corrupt rather than
+		// "unknown-v0" — clearer for operators reading the sidecar name.
+		_ = sidecarMarker(path, b, ".corrupt.bak")
+		return emptyMarker(), nil
+	}
+	if probe.Version != MarkerVersion {
+		_ = sidecarMarker(path, b, fmt.Sprintf(".unknown-v%d.bak", probe.Version))
+		return emptyMarker(), nil
+	}
+
 	var m Marker
 	if err := json.Unmarshal(b, &m); err != nil {
-		return Marker{}, fmt.Errorf("parse marker: %w", err)
+		// Right version, malformed body. Treat same as corrupt.
+		_ = sidecarMarker(path, b, ".corrupt.bak")
+		return emptyMarker(), nil
 	}
 	if m.Failed == nil {
 		m.Failed = map[string]FailedEntry{}
 	}
 	return m, nil
+}
+
+func sidecarMarker(originalPath string, contents []byte, suffix string) error {
+	side := originalPath + suffix
+	return os.WriteFile(side, contents, 0o644)
 }
 
 // WriteMarkerAtomic writes m to path via write-temp + rename.

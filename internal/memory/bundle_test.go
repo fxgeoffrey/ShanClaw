@@ -132,3 +132,88 @@ func TestPuller_FlockContentionSkips(t *testing.T) {
 		t.Fatalf("contention should be silent: %v", err)
 	}
 }
+
+func TestPuller_RejectsUnsafePaths(t *testing.T) {
+	cases := []string{"/etc/passwd", "../escape", "x/../../y", "with\x00null", ""}
+	for _, bad := range cases {
+		root := t.TempDir()
+		WriteFingerprint(root, "k")
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/manifest") {
+				_ = json.NewEncoder(w).Encode(Manifest{
+					BundleTs:      "2026-04-19T04-00-00Z",
+					BundleVersion: "0.4.0",
+					Files:         []ManifestFile{{Path: bad, Size: 1, Sha256: "deadbeef"}},
+				})
+				return
+			}
+			t.Fatalf("file fetch must NOT be issued for unsafe path %q", bad)
+		}))
+		p := NewPuller(Config{Provider: "cloud", BundleRoot: root, Endpoint: srv.URL, APIKey: "k"}, nil, nil)
+		err := p.tick(context.Background())
+		srv.Close()
+		if err == nil || !strings.Contains(err.Error(), "unsafe") {
+			t.Fatalf("path=%q expected unsafe error, got %v", bad, err)
+		}
+	}
+}
+
+func TestPuller_HashMismatchAborts(t *testing.T) {
+	root := t.TempDir()
+	WriteFingerprint(root, "k")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/manifest") {
+			_ = json.NewEncoder(w).Encode(Manifest{
+				BundleTs:      "2026-04-19T04-00-00Z",
+				BundleVersion: "0.4.0",
+				Files: []ManifestFile{{
+					Path: "data.bin", Size: 4,
+					Sha256: "deadbeef00000000000000000000000000000000000000000000000000000000",
+				}},
+			})
+			return
+		}
+		_, _ = w.Write([]byte("xxxx"))
+	}))
+	defer srv.Close()
+	p := NewPuller(Config{Provider: "cloud", BundleRoot: root, Endpoint: srv.URL, APIKey: "k"}, nil, nil)
+	err := p.tick(context.Background())
+	if err == nil {
+		t.Fatal("expected sha mismatch error")
+	}
+	if _, e := os.Stat(filepath.Join(root, "bundles", "2026-04-19T04-00-00Z")); !os.IsNotExist(e) {
+		t.Fatal("bundle should not be installed on hash mismatch")
+	}
+	// Staging should be cleaned up.
+	if _, e := os.Stat(filepath.Join(root, "staging", "2026-04-19T04-00-00Z")); !os.IsNotExist(e) {
+		t.Fatal("staging dir should be removed on abort")
+	}
+}
+
+func TestPuller_AuditOnUnsafePath(t *testing.T) {
+	root := t.TempDir()
+	WriteFingerprint(root, "k")
+	captured := []string{}
+	a := AuditFunc(func(ev string, _ map[string]any) { captured = append(captured, ev) })
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/manifest") {
+			_ = json.NewEncoder(w).Encode(Manifest{
+				BundleTs:      "2026-04-19T04-00-00Z",
+				BundleVersion: "0.4.0",
+				Files:         []ManifestFile{{Path: "../escape", Size: 1, Sha256: "x"}},
+			})
+		}
+	}))
+	defer srv.Close()
+	p := NewPuller(Config{Provider: "cloud", BundleRoot: root, Endpoint: srv.URL, APIKey: "k"}, nil, a)
+	_ = p.tick(context.Background())
+	found := false
+	for _, e := range captured {
+		if e == "memory_bundle_unsafe_path" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected memory_bundle_unsafe_path audit, got %v", captured)
+	}
+}

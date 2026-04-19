@@ -1052,7 +1052,7 @@ func (c *GatewayClient) SyncSessions(ctx context.Context, batch SyncBatchRequest
 	if c.apiKey != "" {
 		httpReq.Header.Set("X-API-Key", c.apiKey)
 	}
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return SyncBatchResponse{}, fmt.Errorf("sync request: %w", err)
 	}

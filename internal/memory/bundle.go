@@ -27,13 +27,6 @@ type Manifest struct {
 	Files           []ManifestFile `json:"files"`
 }
 
-// AuditLogger is the minimal hook the puller (and other memory subsystems)
-// uses to emit structured audit events. Defined here so this package owns
-// the contract; the daemon adapter that satisfies it lives elsewhere.
-type AuditLogger interface {
-	Log(event string, fields map[string]any)
-}
-
 // Sidecar is the managed memory sidecar process handle. Its full definition
 // (lifecycle, supervision, UDS client wiring) lives in another file in this
 // package; the puller only needs the pointer to schedule a /bundle/reload

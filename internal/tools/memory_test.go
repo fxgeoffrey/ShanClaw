@@ -9,12 +9,21 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/memory"
 )
 
-type fakeFallback struct{ snippet string }
-
-func (f *fakeFallback) SessionKeyword(_ context.Context, _ string, _ int) ([]any, error) {
-	return nil, nil
+type fakeFallback struct {
+	snippet      string
+	hits         []any
+	gotQuery     string
+	gotLimit     int
+	snippetQuery string
 }
-func (f *fakeFallback) MemoryFileSnippet(_ context.Context, _ string) (string, error) {
+
+func (f *fakeFallback) SessionKeyword(_ context.Context, q string, limit int) ([]any, error) {
+	f.gotQuery = q
+	f.gotLimit = limit
+	return f.hits, nil
+}
+func (f *fakeFallback) MemoryFileSnippet(_ context.Context, q string) (string, error) {
+	f.snippetQuery = q
 	return f.snippet, nil
 }
 
@@ -225,5 +234,38 @@ func TestMemoryTool_Info(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("anchor_mentions must be in Required")
+	}
+}
+
+// TestMemoryTool_FallbackInvokesProvider locks the contract that fallback()
+// actually delegates to FallbackQuery.SessionKeyword + MemoryFileSnippet
+// (regression: earlier the fallback returned an empty envelope and the
+// provider plumbing was dead code).
+func TestMemoryTool_FallbackInvokesProvider(t *testing.T) {
+	fb := &fakeFallback{
+		snippet: "MEMORY.md hit line",
+		hits:    []any{map[string]any{"id": "sess1", "snippet": "from session_search"}},
+	}
+	tool := &MemoryTool{Fallback: fb}
+	res, _ := tool.Run(context.Background(), `{"anchor_mentions":["foo","bar"],"result_limit":7}`)
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", res.Content)
+	}
+	if fb.gotQuery != "foo bar" {
+		t.Fatalf("session keyword query = %q want %q", fb.gotQuery, "foo bar")
+	}
+	if fb.gotLimit != 7 {
+		t.Fatalf("session keyword limit = %d want 7", fb.gotLimit)
+	}
+	if fb.snippetQuery != "foo bar" {
+		t.Fatalf("memory snippet query = %q want %q", fb.snippetQuery, "foo bar")
+	}
+	var body map[string]any
+	if err := json.Unmarshal([]byte(res.Content), &body); err != nil {
+		t.Fatal(err)
+	}
+	cands, _ := body["candidates"].([]any)
+	if len(cands) != 2 {
+		t.Fatalf("expected 2 fallback candidates (1 session hit + 1 MEMORY.md snippet), got %d: %+v", len(cands), cands)
 	}
 }

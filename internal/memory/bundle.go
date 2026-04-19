@@ -256,7 +256,7 @@ func (p *Puller) downloadFile(ctx context.Context, ts string, f ManifestFile, st
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("file %s status %d", f.Path, resp.StatusCode)
 	}
-	out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}

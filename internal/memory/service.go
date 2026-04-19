@@ -130,6 +130,7 @@ func (s *Service) Start(ctx context.Context) error {
 	}
 
 	sup := NewSupervisor(s.sidecar, s.cfg.SidecarRestartMax, onReady)
+	sup.SetReadyTimeout(s.cfg.SidecarReadyTimeout)
 	go func() {
 		final := sup.Run(supCtx)
 		// Map supervisor's terminal state into service status.

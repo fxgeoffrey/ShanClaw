@@ -196,13 +196,23 @@ type Supervisor struct {
 }
 
 // NewSupervisor builds a Supervisor with sane defaults (10s ready timeout).
-// Pass nil for onReady if the caller doesn't need a transition hook.
+// Pass nil for onReady if the caller doesn't need a transition hook. Use
+// SetReadyTimeout to honor a configured memory.sidecar_ready_timeout.
 func NewSupervisor(sp Spawner, maxAttempts int, onReady func()) *Supervisor {
 	return &Supervisor{
 		sp:           sp,
 		maxAttempts:  maxAttempts,
 		onReady:      onReady,
 		readyTimeout: 10 * time.Second,
+	}
+}
+
+// SetReadyTimeout overrides the default 10s WaitReady ceiling. Service.Start
+// calls this with cfg.SidecarReadyTimeout so operator-tuned values from
+// memory.sidecar_ready_timeout actually flow through.
+func (s *Supervisor) SetReadyTimeout(d time.Duration) {
+	if d > 0 {
+		s.readyTimeout = d
 	}
 }
 

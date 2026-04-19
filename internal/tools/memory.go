@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/agent"
@@ -113,22 +114,22 @@ func (t *MemoryTool) Run(ctx context.Context, argsJSON string) (agent.ToolResult
 // any transport error fall back via the legacy keyword path.
 func (t *MemoryTool) run(ctx context.Context, intent memory.QueryIntent) (agent.ToolResult, error) {
 	if t.Service == nil || t.Service.Status() != memory.StatusReady {
-		return t.fallback("service_unavailable", "fallback")
+		return t.fallback(ctx, intent, "service_unavailable", "fallback")
 	}
 	env, class, err := t.Service.Query(ctx, intent)
 	if err != nil || class == memory.ClassUnavailable {
-		return t.fallback("service_unavailable", "fallback")
+		return t.fallback(ctx, intent, "service_unavailable", "fallback")
 	}
 	if class == memory.ClassRetryable {
 		// Spec §5.3: one inline retry after 500ms.
 		select {
 		case <-ctx.Done():
-			return t.fallback("service_unavailable", "fallback")
+			return t.fallback(ctx, intent, "service_unavailable", "fallback")
 		case <-time.After(500 * time.Millisecond):
 		}
 		env, class, err = t.Service.Query(ctx, intent)
 		if err != nil || class == memory.ClassUnavailable || class == memory.ClassRetryable {
-			return t.fallback("retryable_failed", "fallback_after_retry")
+			return t.fallback(ctx, intent, "retryable_failed", "fallback_after_retry")
 		}
 	}
 	if class == memory.ClassPermanent {
@@ -206,16 +207,52 @@ func envelopeWarnings(env *memory.ResponseEnvelope) []map[string]any {
 	return out
 }
 
-// fallback returns the JSON-shaped fallback envelope per spec §5.4. Task 16
-// will route ClassRetryable failures to source="fallback_after_retry" via
-// this same function with different args.
-func (t *MemoryTool) fallback(reason, source string) (agent.ToolResult, error) {
+// fallback returns the JSON-shaped fallback envelope per spec §5.4. Delegates
+// to FallbackQuery so when the structured sidecar is unavailable the agent
+// still gets keyword session_search hits + MEMORY.md snippets shaped into
+// the same envelope (with evidence_quality="text_search" so downstream
+// reasoning can weight them lower).
+func (t *MemoryTool) fallback(ctx context.Context, intent memory.QueryIntent, reason, source string) (agent.ToolResult, error) {
+	candidates := []map[string]any{}
+	warnings := []map[string]any{}
+	if t.Fallback != nil {
+		query := strings.TrimSpace(strings.Join(intent.AnchorMentions, " "))
+		limit := intent.ResultLimit
+		if limit <= 0 {
+			limit = 10
+		}
+		if hits, err := t.Fallback.SessionKeyword(ctx, query, limit); err == nil {
+			for _, h := range hits {
+				b, mErr := json.Marshal(h)
+				if mErr != nil {
+					continue
+				}
+				candidates = append(candidates, map[string]any{
+					"value":    string(b),
+					"evidence": "text_search",
+				})
+			}
+		} else {
+			warnings = append(warnings, map[string]any{
+				"code":    "fallback_session_search_failed",
+				"message": err.Error(),
+			})
+		}
+		if snippet, err := t.Fallback.MemoryFileSnippet(ctx, query); err == nil && snippet != "" {
+			scope := "memory_md"
+			candidates = append(candidates, map[string]any{
+				"value":    snippet,
+				"evidence": "text_search",
+				"scope":    scope,
+			})
+		}
+	}
 	out := map[string]any{
 		"source":           source,
 		"evidence_quality": "text_search",
 		"bundle_version":   nil,
-		"candidates":       []any{},
-		"warnings":         []any{},
+		"candidates":       candidates,
+		"warnings":         warnings,
 		"fallback_reason":  reason,
 	}
 	body, _ := json.Marshal(out)

@@ -38,7 +38,6 @@ func ClassifyHTTP(status int, env *ResponseEnvelope) ErrorClass {
 		sub = env.Error.SubCode()
 		code = env.Error.Code
 	}
-	_ = sub
 	switch status {
 	case 400:
 		return ClassPermanent

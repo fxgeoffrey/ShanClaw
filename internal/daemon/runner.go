@@ -24,6 +24,7 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/cwdctx"
 	"github.com/Kocoro-lab/ShanClaw/internal/hooks"
 	"github.com/Kocoro-lab/ShanClaw/internal/mcp"
+	"github.com/Kocoro-lab/ShanClaw/internal/memory"
 	"github.com/Kocoro-lab/ShanClaw/internal/runstatus"
 	"github.com/Kocoro-lab/ShanClaw/internal/schedule"
 	"github.com/Kocoro-lab/ShanClaw/internal/session"
@@ -419,6 +420,7 @@ type ServerDeps struct {
 	ScheduleManager *schedule.Manager
 	WSClient        *Client              // WebSocket client for proactive messages
 	SecretsStore    *skills.SecretsStore // skill secrets for env injection
+	MemSvc          *memory.Service      // structured memory orchestrator (Phase 2.3)
 }
 
 // Snapshot returns current Config, Registry, and Supervisor under read lock.
@@ -880,6 +882,16 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 	// Always expose local session search for daemon-served agents.
 	// Use the per-agent manager so searches are scoped to that agent's sessions.
 	tools.RegisterSessionSearch(reg, sessMgr)
+
+	// memory_recall — talks to the structured memory sidecar when ready and
+	// falls back to session keyword search + MEMORY.md grep otherwise. Always
+	// register; the tool itself decides whether to use the service or fallback
+	// based on the service's Status().
+	var memSvc tools.MemoryQuerier
+	if deps.MemSvc != nil {
+		memSvc = deps.MemSvc
+	}
+	tools.RegisterMemoryTool(reg, memSvc, &daemonFallback{sessionMgr: sessMgr})
 
 	loop := agent.NewAgentLoop(deps.GW, reg, runCfg.ModelTier, deps.ShannonDir,
 		runCfg.Agent.MaxIterations, runCfg.Tools.ResultTruncation, runCfg.Tools.ArgsTruncation,

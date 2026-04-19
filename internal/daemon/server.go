@@ -27,6 +27,7 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/config"
 	ctxwin "github.com/Kocoro-lab/ShanClaw/internal/context"
 	"github.com/Kocoro-lab/ShanClaw/internal/mcp"
+	"github.com/Kocoro-lab/ShanClaw/internal/memory"
 	"github.com/Kocoro-lab/ShanClaw/internal/permissions"
 	"github.com/Kocoro-lab/ShanClaw/internal/schedule"
 	"github.com/Kocoro-lab/ShanClaw/internal/session"
@@ -58,6 +59,7 @@ type Server struct {
 	marketplace  *skills.MarketplaceClient
 	slugLocks    *skills.SlugLocks
 	secretsStore *skills.SecretsStore
+	memSvc       *memory.Service
 }
 
 // requireDeps returns true if s.deps is non-nil, otherwise writes a 500
@@ -287,8 +289,34 @@ func (s *Server) Start(ctx context.Context) error {
 	// not enabled, so it's always safe to start unconditionally here.
 	go s.runSyncLoop(ctx)
 
+	// Memory feature (Phase 2.3). Service is constructed once and Start runs
+	// the cold-path gates synchronously then spawns the supervisor goroutine.
+	// Failure modes (provider=disabled, tlm missing, cloud misconfigured) all
+	// resolve to Status=Disabled/Unavailable; the memory tool falls back.
+	memCfg := memory.LoadConfig(viper.GetViper())
+	memCfg.APIKey = memory.ResolveAPIKey(viper.GetViper())
+	memCfg.Endpoint = memory.ResolveEndpoint(viper.GetViper())
+	var memAudit memory.AuditLogger
+	if s.deps != nil && s.deps.Auditor != nil {
+		memAudit = memoryAuditAdapter{logger: s.deps.Auditor}
+	}
+	s.memSvc = memory.NewService(memCfg, memAudit)
+	if s.deps != nil {
+		s.deps.MemSvc = s.memSvc
+	}
+	go func() {
+		if err := s.memSvc.Start(ctx); err != nil {
+			log.Printf("daemon memory: start error: %v", err)
+		}
+	}()
+
 	go func() {
 		<-ctx.Done()
+		// Stop the memory sidecar before HTTP shutdown so SIGTERM reaches the
+		// child process while the daemon is still alive to drain its exit.
+		if s.memSvc != nil {
+			_ = s.memSvc.Stop()
+		}
 		shutCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		s.server.Shutdown(shutCtx)

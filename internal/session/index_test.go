@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -8,6 +9,15 @@ import (
 
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
 )
+
+// mustUpsert wraps UpsertSession with t.Fatal on error, used by tests that
+// only care about seeding rows (not about exercising the upsert path itself).
+func mustUpsert(t *testing.T, idx *Index, s *Session) {
+	t.Helper()
+	if err := idx.UpsertSession(s); err != nil {
+		t.Fatalf("UpsertSession(%s): %v", s.ID, err)
+	}
+}
 
 func TestIndex_OpenClose(t *testing.T) {
 	dir := t.TempDir()
@@ -626,5 +636,43 @@ func TestIndex_IsEmpty(t *testing.T) {
 	}
 	if empty {
 		t.Error("expected non-empty index after insert")
+	}
+}
+
+func TestIndex_ListUpdatedSince(t *testing.T) {
+	dir := t.TempDir()
+	idx, err := OpenIndex(dir)
+	if err != nil {
+		t.Fatalf("OpenIndex: %v", err)
+	}
+	defer idx.Close()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	older := now.Add(-2 * time.Hour)
+	newer := now.Add(-30 * time.Minute)
+	newest := now.Add(-1 * time.Minute)
+
+	mustUpsert(t, idx, &Session{ID: "old", CreatedAt: older, UpdatedAt: older})
+	mustUpsert(t, idx, &Session{ID: "mid", CreatedAt: newer, UpdatedAt: newer})
+	mustUpsert(t, idx, &Session{ID: "new", CreatedAt: newest, UpdatedAt: newest})
+
+	cutoff := now.Add(-1 * time.Hour)
+	rows, err := idx.ListUpdatedSince(context.Background(), cutoff)
+	if err != nil {
+		t.Fatalf("ListUpdatedSince: %v", err)
+	}
+
+	gotIDs := map[string]bool{}
+	for _, r := range rows {
+		gotIDs[r.ID] = true
+	}
+	if gotIDs["old"] {
+		t.Errorf("ListUpdatedSince should exclude sessions with updated_at <= cutoff")
+	}
+	if !gotIDs["mid"] || !gotIDs["new"] {
+		t.Errorf("ListUpdatedSince should include sessions with updated_at > cutoff; got %v", gotIDs)
+	}
+	if len(rows) != 2 {
+		t.Errorf("expected 2 rows, got %d: %+v", len(rows), rows)
 	}
 }

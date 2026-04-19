@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -449,6 +450,45 @@ func (idx *Index) LatestUpdatedID() (string, error) {
 		return "", fmt.Errorf("latest updated: %w", err)
 	}
 	return id, nil
+}
+
+// CandidateRow is the minimum payload needed by sync to enumerate sessions
+// modified since a watermark. Keep it lean — full Session objects are loaded
+// separately via Store.Load only for sessions that actually need to be uploaded.
+type CandidateRow struct {
+	ID        string
+	UpdatedAt time.Time
+}
+
+// ListUpdatedSince returns all sessions whose updated_at strictly exceeds after.
+// Rows are returned in ascending updated_at order so the caller can stream
+// them with a monotonic watermark.
+//
+// after.IsZero() returns every session in the index (the empty time formats
+// to "0001-01-01..." which sorts before any RFC3339 timestamp).
+func (idx *Index) ListUpdatedSince(ctx context.Context, after time.Time) ([]CandidateRow, error) {
+	const q = `SELECT id, updated_at FROM sessions WHERE updated_at > ? ORDER BY updated_at ASC`
+	rows, err := idx.db.QueryContext(ctx, q, after.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, fmt.Errorf("ListUpdatedSince query: %w", err)
+	}
+	defer rows.Close()
+
+	var out []CandidateRow
+	for rows.Next() {
+		var (
+			id         string
+			updatedStr string
+		)
+		if err := rows.Scan(&id, &updatedStr); err != nil {
+			return nil, fmt.Errorf("ListUpdatedSince scan: %w", err)
+		}
+		out = append(out, CandidateRow{ID: id, UpdatedAt: parseTime(updatedStr)})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ListUpdatedSince iter: %w", err)
+	}
+	return out, nil
 }
 
 func (idx *Index) IsEmpty() (bool, error) {

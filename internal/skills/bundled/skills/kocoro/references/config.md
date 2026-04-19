@@ -61,6 +61,25 @@ Global settings control how Shannon behaves across all agents — which AI model
 1. GET /config → look at `effective.agent.model`
 2. `sources.agent.model` shows whether it came from global, project, or local config.
 
+## memory.* (Phase 2.3 — Kocoro Cloud memory feature)
+
+| Key | Default | Notes |
+|---|---|---|
+| `memory.provider` | `disabled` | `disabled` / `cloud` / `local` |
+| `memory.endpoint` | `""` | Falls back to `cloud.endpoint` |
+| `memory.api_key` | `""` | Falls back to `cloud.api_key`; never logged |
+| `memory.socket_path` | `$HOME/.shannon/memory.sock` | UDS for sidecar HTTP |
+| `memory.bundle_root` | `$HOME/.shannon/memory` | Bundle cache root |
+| `memory.tlm_path` | `""` | Empty = `PATH` lookup; missing = silent disable |
+| `memory.bundle_pull_interval` | `24h` | Cloud refresh cadence |
+| `memory.bundle_pull_startup_delay` | `60s` | First pull delay on daemon boot |
+| `memory.sidecar_ready_timeout` | `10s` | /health probe ceiling per spawn |
+| `memory.sidecar_shutdown_grace` | `5s` | SIGTERM → SIGKILL grace |
+| `memory.sidecar_restart_max` | `3` | Crashes tolerated before degraded |
+| `memory.client_request_timeout` | `5s` | Per-request UDS timeout |
+
+See `references/memory.md` for the full mode breakdown, diagnostics, and audit events.
+
 ## Safety Notes
 
 - **Protected fields**: `endpoint`, `api_key`, and `daemon.auto_approve` are protected. Attempting to modify them returns HTTP 409. These fields cannot be changed through this skill — the user must edit `~/.shannon/config.yaml` directly.

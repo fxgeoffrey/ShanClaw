@@ -187,6 +187,22 @@ func Load() (*Config, error) {
 	viper.SetDefault("sync.failed_max_attempts_transient", 5)
 	viper.SetDefault("sync.lock_timeout", "30s")
 
+	// Memory feature (Phase 2.3). Single source of truth for memory.* defaults;
+	// internal/memory/config.go reads these via typed accessors but never
+	// registers defaults itself.
+	viper.SetDefault("memory.provider", "disabled")
+	viper.SetDefault("memory.endpoint", "")
+	viper.SetDefault("memory.api_key", "")
+	viper.SetDefault("memory.socket_path", "$HOME/.shannon/memory.sock")
+	viper.SetDefault("memory.bundle_root", "$HOME/.shannon/memory")
+	viper.SetDefault("memory.tlm_path", "")
+	viper.SetDefault("memory.bundle_pull_interval", "24h")
+	viper.SetDefault("memory.bundle_pull_startup_delay", "60s")
+	viper.SetDefault("memory.sidecar_ready_timeout", "10s")
+	viper.SetDefault("memory.sidecar_shutdown_grace", "5s")
+	viper.SetDefault("memory.sidecar_restart_max", 3)
+	viper.SetDefault("memory.client_request_timeout", "5s")
+
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
 			configPath := filepath.Join(dir, "config.yaml")

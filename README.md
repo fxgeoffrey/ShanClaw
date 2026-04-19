@@ -971,6 +971,63 @@ curl -X POST http://localhost:7533/message \
 
 **Bridging a messaging platform (Discord, Matrix, custom webhook, etc.) to the daemon?** See the [Channel Integration Guide](examples/channel-integration-guide.md) for the full `POST /message` + SSE + interactive approval workflow, plus a community reference Discord bot. Official Slack/LINE/Feishu/Lark integrations go through Shannon Cloud for multi-tenant OAuth and audit — the local HTTP path here is for personal/dev deployments.
 
+## Memory (Kocoro Cloud feature)
+
+ShanClaw includes a `memory_recall` tool that lets the agent look up facts
+learned from prior sessions before asking the user. The structured memory
+runs as a local sidecar over a Unix socket; the daemon manages spawn,
+readiness, restart, and bundle pull. Three modes:
+
+- `memory.provider: "disabled"` (default) — no sidecar, `memory_recall` falls
+  back to keyword session search and MEMORY.md.
+- `memory.provider: "cloud"` — daemon pulls fresh memory bundles from Kocoro
+  Cloud every 24h and runs the sidecar against them. Requires `cloud.api_key`
+  (or override via `memory.api_key`) and `cloud.endpoint`.
+- `memory.provider: "local"` — daemon runs the sidecar against bundles you
+  build locally; no Cloud calls. Useful for self-hosted setups.
+
+### Quickstart (cloud mode)
+
+1. Install the `tlm` binary somewhere on `$PATH` (or set `memory.tlm_path`).
+2. Configure your Cloud API key (already used for Phase 2.0 session sync):
+
+   ```yaml
+   cloud:
+     endpoint: https://api.shannon.run
+     api_key: <your key>
+   memory:
+     provider: cloud
+   ```
+
+3. Restart the daemon. First bundle download starts ~60s after boot, then
+   re-pulls every 24h. The agent's `memory_recall` tool delegates to the
+   sidecar once it's ready.
+
+### Configuration
+
+| Key | Default | Notes |
+|---|---|---|
+| `memory.provider` | `disabled` | `disabled` / `cloud` / `local` |
+| `memory.endpoint` | `""` | Falls back to `cloud.endpoint` |
+| `memory.api_key` | `""` | Falls back to `cloud.api_key` |
+| `memory.socket_path` | `$HOME/.shannon/memory.sock` | UDS path |
+| `memory.bundle_root` | `$HOME/.shannon/memory` | Where bundles + symlink live |
+| `memory.tlm_path` | `""` | Empty = `PATH` lookup; missing = silent disable |
+| `memory.bundle_pull_interval` | `24h` | Cloud bundle refresh cadence |
+| `memory.bundle_pull_startup_delay` | `60s` | Wait before first pull on daemon boot |
+| `memory.sidecar_ready_timeout` | `10s` | Spawn → /health probe ceiling |
+| `memory.sidecar_shutdown_grace` | `5s` | SIGTERM → SIGKILL grace |
+| `memory.sidecar_restart_max` | `3` | Crashes before degraded |
+| `memory.client_request_timeout` | `5s` | Per-request UDS timeout |
+
+### Privacy
+
+Memory bundles are local files. The daemon never sends queries or
+inferred candidates back to Cloud — only the nightly session sync (Phase
+2.0, opt-in via `sync.enabled`) ships data outward, and that path predates
+this feature. Switching the configured API key triggers a wipe + fresh
+bundle pull so cached recall from a previous tenant does not leak.
+
 ## Session sync to Cloud (opt-in)
 
 ShanClaw can upload your local session JSON to Shannon Cloud once per day. This is **opt-in and disabled by default**. When enabled, it powers Cloud-side analytics, replay, and per-user memory training.

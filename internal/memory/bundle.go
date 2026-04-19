@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -193,9 +194,15 @@ func (p *Puller) installBundle(ctx context.Context, mf *Manifest) error {
 		}
 	}
 
-	// Atomic install lives in Task 11. Until that lands this is a no-op so
-	// the sandbox/stage/sha256 paths are testable end-to-end.
-	return p.atomicInstall(staging, mf.BundleTs)
+	if err := p.atomicInstall(staging, mf.BundleTs); err != nil {
+		cleanup()
+		return err
+	}
+	if err := p.reloadSidecar(ctx); err != nil && p.audit != nil {
+		p.audit.Log("memory_reload_failed", map[string]any{"reason": err.Error()})
+	}
+	p.retain(3)
+	return nil
 }
 
 // validateManifestPath enforces the path-sandboxing rules from spec §4.2:
@@ -271,8 +278,81 @@ func (p *Puller) downloadFile(ctx context.Context, ts string, f ManifestFile, st
 	return nil
 }
 
-// atomicInstall is implemented in Task 11 (rename staging→bundles, symlink
-// swap). Currently a no-op so Task 10 can ship sandbox+stage in isolation.
+// atomicInstall renames the staging dir into bundles/<ts> and atomically
+// swaps the `current` symlink. Both rename + symlink-swap are POSIX-atomic
+// on the same filesystem.
 func (p *Puller) atomicInstall(stagingDir, ts string) error {
+	bundlesDir := filepath.Join(p.cfg.BundleRoot, "bundles")
+	if err := os.MkdirAll(bundlesDir, 0o755); err != nil {
+		return err
+	}
+	finalDir := filepath.Join(bundlesDir, ts)
+	if err := os.Rename(stagingDir, finalDir); err != nil {
+		return fmt.Errorf("rename staging→bundle: %w", err)
+	}
+	tmpLink := filepath.Join(p.cfg.BundleRoot, "current.tmp")
+	_ = os.Remove(tmpLink)
+	if err := os.Symlink(finalDir, tmpLink); err != nil {
+		return fmt.Errorf("symlink current.tmp: %w", err)
+	}
+	if err := os.Rename(tmpLink, filepath.Join(p.cfg.BundleRoot, "current")); err != nil {
+		return fmt.Errorf("swap current symlink: %w", err)
+	}
 	return nil
+}
+
+// reloadSidecar pings the sidecar's /bundle/reload endpoint via UDS so it
+// picks up the new symlink target immediately. On 409 (reload_in_progress)
+// retries once after 1s. Other failures are non-fatal — the sidecar's own
+// poller will pick up the new bundle eventually.
+func (p *Puller) reloadSidecar(ctx context.Context) error {
+	if p.sidecar == nil {
+		return nil
+	}
+	c := NewClient(p.cfg.SocketPath, 5*time.Second)
+	_, err := c.Reload(ctx)
+	if err != nil && strings.Contains(err.Error(), "reload_in_progress") {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(1 * time.Second):
+		}
+		_, err = c.Reload(ctx)
+	}
+	return err
+}
+
+// retain keeps the newest `keep` bundle dirs by ts plus the current symlink
+// target (defensive). Best-effort — failures logged but not fatal.
+func (p *Puller) retain(keep int) {
+	bundlesDir := filepath.Join(p.cfg.BundleRoot, "bundles")
+	entries, err := os.ReadDir(bundlesDir)
+	if err != nil {
+		return
+	}
+	var dirs []string
+	for _, e := range entries {
+		if e.IsDir() {
+			dirs = append(dirs, e.Name())
+		}
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(dirs)))
+	if len(dirs) <= keep {
+		return
+	}
+	currentTarget := p.currentTs()
+	keepSet := map[string]bool{}
+	for i, d := range dirs {
+		if i < keep {
+			keepSet[d] = true
+		}
+	}
+	if currentTarget != "" {
+		keepSet[currentTarget] = true
+	}
+	for _, d := range dirs {
+		if !keepSet[d] {
+			_ = os.RemoveAll(filepath.Join(bundlesDir, d))
+		}
+	}
 }

@@ -116,3 +116,90 @@ func batchSizes(bs []Batch) []int {
 	}
 	return out
 }
+
+func TestBatcher_RejectsOversizedSession(t *testing.T) {
+	cands := []Candidate{
+		{SessionID: "ok", UpdatedAt: time.Date(2026, 4, 19, 1, 0, 0, 0, time.UTC)},
+		{SessionID: "huge", UpdatedAt: time.Date(2026, 4, 19, 2, 0, 0, 0, time.UTC)},
+	}
+	loader := fakeLoader(map[string]int{
+		"ok":   100,
+		"huge": 5000,
+	})
+
+	cfg := DefaultConfig()
+	cfg.BatchMaxSessions = 25
+	cfg.BatchMaxBytes = 1024 * 1024
+	cfg.SingleSessionMaxBytes = 1000 // huge will exceed this
+
+	marker := emptyMarker()
+	now := time.Now().UTC()
+
+	batches, err := BuildBatches(context.Background(), cands, loader, cfg, &marker, now)
+	if err != nil {
+		t.Fatalf("BuildBatches: %v", err)
+	}
+
+	// huge must NOT appear in any batch.
+	for _, b := range batches {
+		for _, s := range b.Sessions {
+			if s.SessionID == "huge" {
+				t.Errorf("huge session must not appear in any batch")
+			}
+		}
+	}
+
+	fe, ok := marker.Failed["huge"]
+	if !ok {
+		t.Fatalf("expected marker.Failed[huge] to be recorded")
+	}
+	if fe.Reason != "size_limit_exceeded" {
+		t.Errorf("Reason: got %q, want size_limit_exceeded", fe.Reason)
+	}
+	if fe.Category != CategoryPermanent {
+		t.Errorf("Category: got %q, want permanent", fe.Category)
+	}
+	if fe.NextAttemptAt != nil {
+		t.Errorf("NextAttemptAt: got %v, want nil (permanent)", fe.NextAttemptAt)
+	}
+	if fe.SizeBytes == 0 {
+		t.Errorf("SizeBytes should be populated, got 0")
+	}
+	if fe.Attempts != 1 {
+		t.Errorf("Attempts: got %d, want 1 (first observation)", fe.Attempts)
+	}
+	if !fe.LastObservedUpdatedAt.Equal(cands[1].UpdatedAt) {
+		t.Errorf("LastObservedUpdatedAt: got %v, want %v", fe.LastObservedUpdatedAt, cands[1].UpdatedAt)
+	}
+}
+
+func TestBatcher_RejectsOnLoadError(t *testing.T) {
+	cands := []Candidate{{SessionID: "missing", UpdatedAt: time.Date(2026, 4, 19, 3, 0, 0, 0, time.UTC)}}
+	loader := fakeLoader(map[string]int{}) // missing returns ErrNotExist
+
+	cfg := DefaultConfig()
+	cfg.BatchMaxSessions = 25
+	cfg.BatchMaxBytes = 1024 * 1024
+	cfg.SingleSessionMaxBytes = 1024 * 1024
+
+	marker := emptyMarker()
+	now := time.Now().UTC()
+
+	batches, err := BuildBatches(context.Background(), cands, loader, cfg, &marker, now)
+	if err != nil {
+		t.Fatalf("BuildBatches: %v", err)
+	}
+	if len(batches) != 0 {
+		t.Errorf("expected 0 batches when only candidate fails to load, got %d", len(batches))
+	}
+	fe, ok := marker.Failed["missing"]
+	if !ok {
+		t.Fatalf("expected marker.Failed[missing] for load_error")
+	}
+	if fe.Reason != "load_error" || fe.Category != CategoryPermanent {
+		t.Errorf("got Reason=%q Category=%q; want load_error/permanent", fe.Reason, fe.Category)
+	}
+	if !fe.LastObservedUpdatedAt.Equal(cands[0].UpdatedAt) {
+		t.Errorf("LastObservedUpdatedAt: got %v, want %v", fe.LastObservedUpdatedAt, cands[0].UpdatedAt)
+	}
+}

@@ -168,20 +168,38 @@ var readVerbs = map[string]bool{
 }
 
 var writeVerbs = map[string]bool{
+	// Destructive/creative verbs.
 	"create":  true,
 	"delete":  true,
 	"update":  true,
 	"remove":  true,
-	"send":    true,
 	"insert":  true,
 	"append":  true,
 	"archive": true,
-	"move":    true,
-	"upload":  true,
-	"execute": true,
-	"run":     true,
 	"modify":  true,
 	"rename":  true,
+	"replace": true,
+	"drop":    true,
+	"prune":   true,
+	"clear":   true,
+	// Data transfer / mutation verbs.
+	"send":    true,
+	"move":    true,
+	"upload":  true,
+	"write":   true,
+	"push":    true,
+	"publish": true,
+	"submit":  true,
+	"post":    true,
+	// Key-value / property verbs (common in GitHub/Linear/Notion/Slack
+	// MCP servers for compound names like get_and_set_properties).
+	"add":   true,
+	"set":   true,
+	"patch": true,
+	"put":   true,
+	// Ambiguous execution verbs (could SELECT or INSERT — fail-closed).
+	"execute": true,
+	"run":     true,
 }
 
 // isReadMCPName reports whether an MCP tool name looks like a read-only

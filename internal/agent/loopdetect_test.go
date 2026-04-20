@@ -989,10 +989,26 @@ func TestIsReadMCPName(t *testing.T) {
 		// three tokens must return false — the write blacklist dominates.
 		// This is the defensive half of the heuristic: destructive suffixes
 		// must not sneak through on a position-0 read-verb match.
-		{"lookup_and_delete_all_records", false}, // lookup + delete → write
-		{"get_or_create_item", false},            // get + create → write
-		{"find_and_remove_entry", false},         // find + remove → write
-		{"list-and-archive", false},              // list + archive → write
+		{"lookup_and_delete_all_records", false}, // lookup + delete
+		{"get_or_create_item", false},            // get + create
+		{"find_and_remove_entry", false},         // find + remove
+		{"list-and-archive", false},              // list + archive
+		// Data-transfer / property-mutation verbs (GitHub/Linear/Notion/
+		// Slack MCP patterns). Each pairs a position-0 read with a
+		// write verb that earlier versions of writeVerbs missed.
+		{"get_and_add_member", false},        // get + add
+		{"list_and_set_properties", false},   // list + set
+		{"search_and_replace", false},        // search + replace
+		{"get_and_write_cache", false},       // get + write
+		{"find_and_patch_record", false},     // find + patch
+		{"query_and_put_result", false},      // query + put
+		{"list_and_clear_flags", false},      // list + clear
+		{"get_and_post_update", false},       // get + post
+		{"list_and_push_changes", false},     // list + push
+		{"fetch_and_publish_item", false},    // fetch + publish
+		{"get_and_submit_form", false},       // get + submit
+		{"list_and_drop_table", false},       // list + drop
+		{"find_and_prune_entries", false},    // find + prune
 		// "run"/"execute" are in writeVerbs (fail-closed on ambiguous
 		// action verbs). Snowflake/ClickHouse "run_query" used to be
 		// accepted as SELECT convention, but a Medium review finding

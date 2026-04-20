@@ -142,6 +142,15 @@ func Load() (*Config, error) {
 	viper.SetConfigType("yaml")
 	viper.AddConfigPath(dir)
 
+	// Aliases so code that reads cloud.* resolves to the canonical top-level
+	// keys. Top-level `endpoint` / `api_key` are the source of truth (see
+	// migrateOldConfig + Save); the sync CLI and other newer callers read
+	// `cloud.endpoint` / `cloud.api_key` for naming consistency. RegisterAlias
+	// must run before ReadInConfig so the lookup redirect is in place when
+	// callers query these keys.
+	viper.RegisterAlias("cloud.endpoint", "endpoint")
+	viper.RegisterAlias("cloud.api_key", "api_key")
+
 	viper.SetDefault("provider", "gateway")
 	viper.SetDefault("endpoint", "https://api-dev.shannon.run")
 	viper.SetDefault("ollama.endpoint", "http://localhost:11434")

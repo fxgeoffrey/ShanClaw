@@ -1332,19 +1332,6 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	// the model returns empty text, so callers never see a blank bubble.
 	// Tools are intentionally omitted to force a text-only response.
 	runForceStopTurn := func(reason string, fallback string) (string, error) {
-		// Emit a force_stop audit event so post-merge observation can
-		// count detector-driven stops with a simple `grep "event":"force_stop"`.
-		// Reason is truncated by the audit layer's RedactSecrets+truncate.
-		if a.auditor != nil {
-			a.auditor.Log(audit.AuditEntry{
-				Timestamp:     time.Now(),
-				SessionID:     a.sessionID,
-				Event:         "force_stop",
-				InputSummary:  reason,
-				OutputSummary: fmt.Sprintf("iteration=%d tools=%s", iterationCount, topTools(toolsUsed, 5)),
-			})
-		}
-
 		messages = append(messages, client.Message{
 			Role:    "user",
 			Content: client.NewTextContent("[system] " + reason),
@@ -1461,6 +1448,25 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				"tool results, just answer it directly — skip the structure.",
 			detectorNote, iterationCount, topTools(toolsUsed, 5), lastToolName,
 		)
+	}
+
+	// auditDetectorForceStop emits a single `event:"force_stop"` audit
+	// entry so post-merge observation can count detector-driven stops with
+	// `grep '"event":"force_stop"' ~/.shannon/logs/audit.log | wc -l`.
+	// Intentionally NOT called from the maxIter synthesis path
+	// (runForceStopTurn is shared but maxIter is a distinct failure class
+	// — conflating them would make the grep over-count detector stops).
+	auditDetectorForceStop := func(detectorNote string) {
+		if a.auditor == nil {
+			return
+		}
+		a.auditor.Log(audit.AuditEntry{
+			Timestamp:     time.Now(),
+			SessionID:     a.sessionID,
+			Event:         "force_stop",
+			InputSummary:  detectorNote,
+			OutputSummary: fmt.Sprintf("iteration=%d tools=%s", iterationCount, topTools(toolsUsed, 5)),
+		})
 	}
 
 	boundaryText := func(boundary MetaBoundary) string {
@@ -2745,6 +2751,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			iterationCount,
 		)
 		if worstAction == LoopForceStop {
+			auditDetectorForceStop(worstMsg)
 			text, err := runForceStopTurn(buildForceStopReason(worstMsg), forceStopFallback)
 			if err != nil {
 				return "", usage, err
@@ -2755,8 +2762,10 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			nudgeCount++
 			if nudgeCount >= maxNudges {
 				// Escalate: too many nudges without behavior change → force stop
+				const escalationNote = "multiple approaches failed — nudges exceeded"
+				auditDetectorForceStop(escalationNote)
 				text, err := runForceStopTurn(
-					buildForceStopReason("multiple approaches failed — nudges exceeded"),
+					buildForceStopReason(escalationNote),
 					forceStopFallback,
 				)
 				if err != nil {

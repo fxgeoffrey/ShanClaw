@@ -8,12 +8,15 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/Kocoro-lab/ShanClaw/internal/audit"
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
 	"github.com/Kocoro-lab/ShanClaw/internal/permissions"
 	"github.com/Kocoro-lab/ShanClaw/internal/runstatus"
@@ -3903,4 +3906,128 @@ func truncateForLog(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// readAuditLines reads the audit.log in the given temp dir and returns
+// one deserialized map per line. Used by the force_stop audit tests.
+func readAuditLines(t *testing.T, logDir string) []map[string]any {
+	t.Helper()
+	path := filepath.Join(logDir, "audit.log")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read audit log %s: %v", path, err)
+	}
+	var entries []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("parse audit line %q: %v", line, err)
+		}
+		entries = append(entries, m)
+	}
+	return entries
+}
+
+// TestForceStopExit_DetectorPath_EmitsForceStopAudit covers the
+// greppable observation signal: when the loop detector force-stops a
+// run, a single `event:"force_stop"` audit entry must be written.
+func TestForceStopExit_DetectorPath_EmitsForceStopAudit(t *testing.T) {
+	llmCallCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		llmCallCount++
+		if llmCallCount <= 3 {
+			json.NewEncoder(w).Encode(nativeResponseWithID("", "tool_use",
+				toolCallWithID("mock_tool", `{"same":"args"}`, fmt.Sprintf("t%d", llmCallCount)), 10, 5))
+			return
+		}
+		json.NewEncoder(w).Encode(nativeResponse("final synthesis", "end_turn", nil, 10, 5))
+	}))
+	defer server.Close()
+
+	logDir := t.TempDir()
+	auditor, err := audit.NewAuditLogger(logDir)
+	if err != nil {
+		t.Fatalf("NewAuditLogger: %v", err)
+	}
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&mockTool{name: "mock_tool"})
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, auditor, nil)
+	loop.SetEnableStreaming(false)
+	loop.SetHandler(&mockHandler{approveResult: true})
+
+	if _, _, err := loop.Run(context.Background(), "do a thing", nil, nil); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	entries := readAuditLines(t, logDir)
+	forceStops := 0
+	for _, e := range entries {
+		if e["event"] == "force_stop" {
+			forceStops++
+			// Sanity: output_summary should carry iteration + tools so
+			// post-merge observation can disambiguate different stops.
+			if os, _ := e["output_summary"].(string); !strings.Contains(os, "iteration=") {
+				t.Errorf("force_stop entry missing iteration marker: %v", e)
+			}
+		}
+	}
+	if forceStops != 1 {
+		t.Fatalf("expected exactly 1 force_stop audit entry for detector stop, got %d (all entries: %v)", forceStops, entries)
+	}
+}
+
+// TestForceStopExit_MaxIter_DoesNotEmitForceStopAudit locks the
+// separation between detector-driven stops and maxIter exits. Both
+// share runForceStopTurn for synthesis UX, but they are distinct
+// failure classes; conflating them in audit telemetry would make the
+// `grep "event":"force_stop"` observation signal over-count detector
+// stops. maxIter path must NOT emit the force_stop event.
+func TestForceStopExit_MaxIter_DoesNotEmitForceStopAudit(t *testing.T) {
+	llmCallCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		llmCallCount++
+		// Each turn: return a tool call with DISTINCT args so no detector
+		// fires (no ConsecutiveDup, no ExactDup, no SameToolError —
+		// mock_tool never errors). The loop runs to maxIter=5 and the
+		// maxIter synthesis path takes over.
+		if llmCallCount <= 5 {
+			json.NewEncoder(w).Encode(nativeResponseWithID("", "tool_use",
+				toolCallWithID("mock_tool", fmt.Sprintf(`{"step":%d}`, llmCallCount), fmt.Sprintf("t%d", llmCallCount)), 10, 5))
+			return
+		}
+		// Synthesis turn.
+		json.NewEncoder(w).Encode(nativeResponse("maxiter synthesis", "end_turn", nil, 10, 5))
+	}))
+	defer server.Close()
+
+	logDir := t.TempDir()
+	auditor, err := audit.NewAuditLogger(logDir)
+	if err != nil {
+		t.Fatalf("NewAuditLogger: %v", err)
+	}
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&mockTool{name: "mock_tool"})
+	loop := NewAgentLoop(gw, reg, "medium", "", 5, 2000, 200, nil, auditor, nil) // maxIter=5
+	loop.SetEnableStreaming(false)
+	loop.SetHandler(&mockHandler{approveResult: true})
+
+	_, _, err = loop.Run(context.Background(), "long-running task", nil, nil)
+	// maxIter returns ErrMaxIterReached — that is the success signal for this test.
+	if err != nil && !errors.Is(err, ErrMaxIterReached) {
+		t.Fatalf("expected ErrMaxIterReached or nil, got %v", err)
+	}
+
+	entries := readAuditLines(t, logDir)
+	for _, e := range entries {
+		if e["event"] == "force_stop" {
+			t.Errorf("maxIter exit must NOT emit force_stop audit event; got entry: %v", e)
+		}
+	}
 }

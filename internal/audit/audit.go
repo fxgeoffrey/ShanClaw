@@ -14,6 +14,13 @@ import (
 // describe tool calls (ToolName populated); non-tool entries (e.g.
 // "force_stop" stops, run-level boundaries) set Event instead and leave
 // ToolName empty.
+//
+// NOTE: Approved intentionally does NOT use omitempty. `approved:false`
+// is the explicit marker for a tool call that was denied or rejected —
+// security tooling that greps the audit log distinguishes permitted vs
+// denied calls by that field, and omitempty would drop the denial signal.
+// Non-tool events (Event != "") serialize with approved:false too, which
+// is cosmetic noise only — the Event tag disambiguates them.
 type AuditEntry struct {
 	Timestamp     time.Time `json:"timestamp"`
 	SessionID     string    `json:"session_id"`
@@ -22,7 +29,7 @@ type AuditEntry struct {
 	InputSummary  string    `json:"input_summary,omitempty"`
 	OutputSummary string    `json:"output_summary,omitempty"`
 	Decision      string    `json:"decision,omitempty"`
-	Approved      bool      `json:"approved,omitempty"`
+	Approved      bool      `json:"approved"`
 	DurationMs    int64     `json:"duration_ms,omitempty"`
 	// Cost fields (populated when tool reports usage, e.g. gateway tools that
 	// call xAI Grok / SerpAPI). Omitted when the tool does not return usage.

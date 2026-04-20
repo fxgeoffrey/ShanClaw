@@ -2827,22 +2827,63 @@ func TestCoreRules_EmptyResultRule_KeepsSearchCase(t *testing.T) {
 	}
 }
 
-// TestCoreRules_EmptyResultRule_AddsScopeCase verifies the narrowed rule
-// adds the configured-API case: empty on the default scope may be a
-// scope artifact, so ONE focused diversification (e.g. list_calendars
-// after a blank get_events) is permitted before concluding "not found".
-// This is the Task 3 vs Task 5 benchmark split the plan calls out.
-func TestCoreRules_EmptyResultRule_AddsScopeCase(t *testing.T) {
+// TestCoreRules_EmptyResultRule_AddsDiversificationCase verifies the
+// narrowed rule adds the list-and-enumerate case (Calendar/Drive/Notion/mail
+// with default scope). Empty on the default scope may be a scope artifact,
+// so ONE focused diversification (e.g. list_calendars after a blank
+// get_events) is permitted before concluding "not found". This is the
+// Task 3 vs Task 5 benchmark split the plan calls out.
+func TestCoreRules_EmptyResultRule_AddsDiversificationCase(t *testing.T) {
 	wantSubstrings := []string{
-		"scoped API",               // names the new case
-		"scope artifact",           // the framing used to distinguish from real empty
-		"list_calendars",           // concrete diversification example (Task 3→5)
-		"ONE",                      // permits exactly one diversification, not N
+		"list-and-enumerate semantics", // names the new case
+		"scope artifact",               // distinguishes from real empty
+		"list_calendars",               // concrete example (Task 3 → Task 5)
+		"ONE",                          // permits exactly one diversification
+		"Google Calendar",              // explicit integration list (no broad "external APIs")
+		"Notion",
 	}
 	for _, s := range wantSubstrings {
 		if !strings.Contains(coreOperationalRules, s) {
-			t.Errorf("empty-result rule missing scope-case substring %q", s)
+			t.Errorf("empty-result rule missing substring %q", s)
 		}
+	}
+}
+
+// TestCoreRules_EmptyResultRule_ProtectsUserSpecifiedScope pins the
+// Codex review finding: when the user explicitly names a scope (mailbox,
+// calendar, folder, specific resource), an empty result MUST be
+// respected as the answer. The diversification rule must NOT encourage
+// the model to cross-account/folder-hunt past the user's contract.
+func TestCoreRules_EmptyResultRule_ProtectsUserSpecifiedScope(t *testing.T) {
+	wantSubstrings := []string{
+		"user explicitly named",     // names the protected case
+		"user-specified contract",   // frames the boundary
+	}
+	for _, s := range wantSubstrings {
+		if !strings.Contains(coreOperationalRules, s) {
+			t.Errorf("empty-result rule missing user-scope-protection substring %q", s)
+		}
+	}
+}
+
+// TestCoreRules_EmptyResultRule_ExcludesHTTPTool pins the Codex review
+// finding: the http tool legitimately returns [] / {} / 204 for the
+// exact endpoint the user asked about. The rule must explicitly
+// restrict diversification to integrations with list-and-enumerate
+// semantics AND must name the http tool as an empty-is-the-answer case,
+// so the model does not repurpose scope-hunting for arbitrary HTTP.
+func TestCoreRules_EmptyResultRule_ExcludesHTTPTool(t *testing.T) {
+	// Must name http explicitly in the "empty IS the answer" column.
+	if !strings.Contains(coreOperationalRules, "arbitrary HTTP endpoints") {
+		t.Error("empty-result rule should explicitly name 'arbitrary HTTP endpoints' as an empty-is-the-answer case")
+	}
+	if !strings.Contains(coreOperationalRules, "http tool") {
+		t.Error("empty-result rule should name the http tool by tool identifier")
+	}
+	// Must NOT contain the over-broad "external APIs" framing the
+	// previous draft used — that phrasing sweeps http in.
+	if strings.Contains(coreOperationalRules, "external APIs") {
+		t.Errorf("empty-result rule still contains the over-broad 'external APIs' phrasing; should be replaced with named integrations")
 	}
 }
 

@@ -946,3 +946,204 @@ func TestLoopDetector_BrowserSameToolStillDetected(t *testing.T) {
 		t.Errorf("2 consecutive identical browser_click calls should nudge, got %v", action)
 	}
 }
+
+// TestIsReadMCPName locks the read-verb whitelist used to populate
+// the loop detector's batchTolerant set. Read-only MCP tools must match
+// (eligible for uniqueness-gated NoProgress relief); write-capable tools
+// must NOT match (stay under the count-based guard), because the
+// permission engine does not gate MCP calls and a write loop with
+// unique arguments could otherwise create many remote records.
+func TestIsReadMCPName(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		// Direct read-verb prefix.
+		{"list_calendars", true},
+		{"get_events", true},
+		{"search_gmail_messages", true},
+		{"query_database", true},
+		{"fetch_profile", true},
+		{"describe_table", true},
+		{"find_files", true},
+		// Namespaced read-verbs (vendor prefix + separator + verb).
+		{"API-query-data-source", true},
+		{"google_gmail_search_messages", true},
+		{"notion_list_pages", true},
+		{"Notion_Search_Databases", true}, // case-insensitive
+		// Write verbs must stay OUT.
+		{"create_notion_page", false},
+		{"update_page_properties", false},
+		{"delete_event", false},
+		{"send_gmail_message", false},
+		{"modify_permissions", false},
+		{"remove_label", false},
+		{"insert_row", false},
+		{"append_content_to_page", false},
+		{"archive_thread", false},
+		// Namespaced writes must also stay out.
+		{"google_calendar_create_event", false},
+		{"notion_create_comment", false},
+		{"drive_upload_file", false},
+		// Compound-verb names: a read verb AND a write verb in the first
+		// three tokens must return false — the write blacklist dominates.
+		// This is the defensive half of the heuristic: destructive suffixes
+		// must not sneak through on a position-0 read-verb match.
+		{"lookup_and_delete_all_records", false}, // lookup + delete
+		{"get_or_create_item", false},            // get + create
+		{"find_and_remove_entry", false},         // find + remove
+		{"list-and-archive", false},              // list + archive
+		// Data-transfer / property-mutation verbs (GitHub/Linear/Notion/
+		// Slack MCP patterns). Each pairs a position-0 read with a
+		// write verb that earlier versions of writeVerbs missed.
+		{"get_and_add_member", false},        // get + add
+		{"list_and_set_properties", false},   // list + set
+		{"search_and_replace", false},        // search + replace
+		{"get_and_write_cache", false},       // get + write
+		{"find_and_patch_record", false},     // find + patch
+		{"query_and_put_result", false},      // query + put
+		{"list_and_clear_flags", false},      // list + clear
+		{"get_and_post_update", false},       // get + post
+		{"list_and_push_changes", false},     // list + push
+		{"fetch_and_publish_item", false},    // fetch + publish
+		{"get_and_submit_form", false},       // get + submit
+		{"list_and_drop_table", false},       // list + drop
+		{"find_and_prune_entries", false},    // find + prune
+		// "run"/"execute" are in writeVerbs (fail-closed on ambiguous
+		// action verbs). Snowflake/ClickHouse "run_query" used to be
+		// accepted as SELECT convention, but a Medium review finding
+		// pointed out that ambiguity should fall on the safe side —
+		// the server is free to rename to "query_database" if it wants
+		// NoProgress relief.
+		{"run_query", false},       // run is a write verb (fail closed)
+		{"execute_script", false},  // execute is a write verb (fail closed)
+		{"transform_data", false},  // no read verb
+		{"process_batch", false},   // no read verb
+		// Pathological: write name with a read-verb at position 4+ must
+		// NOT match (token scan stops at position 3).
+		{"request_write_access_and_get_token_afterwards", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isReadMCPName(tt.name); got != tt.want {
+				t.Errorf("isReadMCPName(%q) = %v, want %v", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestLoopDetector_NoProgress_BashUniqueArgs_NoNudge covers the Task 5
+// benchmark pattern: ~15 bash calls during a multi-step investigation, each
+// with distinct argsJSON. Pre-gate, this force-stops via maxNudges escalation.
+// With bash in the batchTolerant set and ≥50% unique argsHashes, NoProgress
+// must treat this as a legitimate batch and stay Continue.
+func TestLoopDetector_NoProgress_BashUniqueArgs_NoNudge(t *testing.T) {
+	ld := NewLoopDetector()
+	ld.batchTolerant = map[string]bool{"bash": true}
+
+	for i := range 15 {
+		ld.Record("bash", fmt.Sprintf(`{"cmd":"step_%d"}`, i), false, "", "", false)
+		action, msg := ld.Check("bash")
+		if action != LoopContinue {
+			t.Fatalf("call %d: unique-args bash on a batch-tolerant tool should stay Continue, got %v (%s)", i+1, action, msg)
+		}
+	}
+}
+
+// TestLoopDetector_NoProgress_MCPUniqueArgs_NoNudge covers the Task 6
+// benchmark pattern: 16 MCP-tool calls each querying a distinct UUID during a
+// legitimate Notion database enumeration. Pre-gate, this hit the generic
+// NoProgress threshold at count=8. With the MCP tool registered in
+// batchTolerant, unique-args enumeration stays Continue.
+func TestLoopDetector_NoProgress_MCPUniqueArgs_NoNudge(t *testing.T) {
+	ld := NewLoopDetector()
+	ld.batchTolerant = map[string]bool{"API-query-data-source": true}
+
+	for i := range 16 {
+		ld.Record("API-query-data-source", fmt.Sprintf(`{"id":"uuid-%d"}`, i), false, "", "", false)
+		action, msg := ld.Check("API-query-data-source")
+		if action != LoopContinue {
+			t.Fatalf("call %d: unique-args MCP tool on batch-tolerant list should stay Continue, got %v (%s)", i+1, action, msg)
+		}
+	}
+}
+
+// TestLoopDetector_NoProgress_MCPIdenticalArgs_StillStops locks the invariant
+// that batch-tolerance does NOT relax the identical-args case. Regardless of
+// which layered detector catches it (ConsecutiveDup fires earliest at 2
+// consecutive identical calls; ExactDup at 3 spread out; NoProgress at 8),
+// the outcome must be "not Continue" — identical-args spin is always caught.
+func TestLoopDetector_NoProgress_MCPIdenticalArgs_StillStops(t *testing.T) {
+	ld := NewLoopDetector()
+	ld.batchTolerant = map[string]bool{"API-query-data-source": true}
+
+	for range 8 {
+		ld.Record("API-query-data-source", `{"id":"same-uuid"}`, false, "", "", false)
+	}
+	action, msg := ld.Check("API-query-data-source")
+	if action == LoopContinue {
+		t.Fatalf("identical-args calls must be stopped by some detector despite batch-tolerance, got Continue (%s)", msg)
+	}
+}
+
+// TestLoopDetector_NoProgress_GenericToolUniqueArgs_StillNudges_Regression
+// pins the core constraint of Phase 1: the uniqueness gate must NOT relax
+// generic NoProgress detection for tools outside the batchTolerant set.
+// `think` (not in batchTolerant, not semi-repeatable) called 8 times with
+// distinct argsJSON must still nudge — catching "spinning on thought
+// variations without progress" is the generic path's load-bearing role.
+func TestLoopDetector_NoProgress_GenericToolUniqueArgs_StillNudges_Regression(t *testing.T) {
+	ld := NewLoopDetector()
+	// Explicitly NOT populating batchTolerant — this test must behave the
+	// same whether the field is nil or empty.
+
+	for i := range 8 {
+		ld.Record("think", fmt.Sprintf(`{"thought":"idea%d"}`, i), false, "", "", false)
+	}
+	action, msg := ld.Check("think")
+	if action != LoopNudge {
+		t.Fatalf("8 unique-args think calls must still nudge (generic path unchanged), got %v (%s)", action, msg)
+	}
+}
+
+// TestLoopDetector_NoProgress_BashMixedArgsRatio_GateIsolated exercises the
+// NoProgress uniqueness gate without letting ConsecutiveDup / ExactDup fire
+// first. The sequence uses 8 distinct argsHashes each appearing exactly twice
+// (16 calls, 50% unique) interleaved so no hash runs ≥3 times in a row and
+// ExactDup's "same-arg 3 times in window" threshold is not tripped.
+//
+// On a batch-tolerant bash, the gate suppresses the nudge at count≥12.
+// Without batch-tolerance (Generic path), the same stream must nudge — this
+// sub-test covers the non-relaxation invariant at the threshold boundary.
+func TestLoopDetector_NoProgress_BashMixedArgsRatio_GateIsolated(t *testing.T) {
+	// Build a non-consecutive pattern to keep ConsecutiveDup (need ≥2 back-to-back)
+	// and ExactDup (need ≥3 of the same argsHash in the window) quiet.
+	// Pattern: 1,2,3,4,5,6,7,8,1,2,3,4,5,6,7,8 — each hash appears twice,
+	// separated by 7 others. ExactDup threshold is 3 so two appearances is
+	// safe; ConsecutiveDup needs adjacency so interleaving avoids it.
+	pattern := []int{0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7}
+
+	t.Run("gated_when_batch_tolerant", func(t *testing.T) {
+		ld := NewLoopDetector()
+		ld.batchTolerant = map[string]bool{"bash": true}
+		for _, i := range pattern {
+			ld.Record("bash", fmt.Sprintf(`{"cmd":"script_%d"}`, i), false, "", "", false)
+		}
+		action, msg := ld.Check("bash")
+		if action != LoopContinue {
+			t.Fatalf("50%% unique on batch-tolerant bash should be gated (Continue), got %v (%s)", action, msg)
+		}
+	})
+
+	t.Run("not_gated_when_not_batch_tolerant", func(t *testing.T) {
+		ld := NewLoopDetector()
+		// Explicitly empty batchTolerant — same sequence, no gate.
+		for _, i := range pattern {
+			ld.Record("bash", fmt.Sprintf(`{"cmd":"script_%d"}`, i), false, "", "", false)
+		}
+		action, msg := ld.Check("bash")
+		if action != LoopNudge {
+			t.Fatalf("same sequence without batch-tolerance should nudge at count≥12, got %v (%s)", action, msg)
+		}
+	})
+}

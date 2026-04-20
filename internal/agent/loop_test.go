@@ -8,12 +8,15 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/Kocoro-lab/ShanClaw/internal/audit"
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
 	"github.com/Kocoro-lab/ShanClaw/internal/permissions"
 	"github.com/Kocoro-lab/ShanClaw/internal/runstatus"
@@ -2809,6 +2812,101 @@ func TestAgentLoop_CloudDelegateLock(t *testing.T) {
 	})
 }
 
+// TestCoreRules_EmptyResultRule_KeepsSearchCase verifies that the
+// narrowed empty-result rule keeps the canonical case intact: grep/glob
+// and similar search-family queries returning zero matches are "the
+// answer" and must not be retried. This is load-bearing for codebase
+// exploration where most queries naturally return zero on misses.
+func TestCoreRules_EmptyResultRule_KeepsSearchCase(t *testing.T) {
+	wantSubstrings := []string{
+		"search/filesystem",        // names the preserved case
+		"IS the answer",            // the canonical outcome for search
+		"grep", "glob",             // concrete tool examples reach the agent
+	}
+	for _, s := range wantSubstrings {
+		if !strings.Contains(coreOperationalRules, s) {
+			t.Errorf("empty-result rule missing search-case substring %q", s)
+		}
+	}
+}
+
+// TestCoreRules_EmptyResultRule_AddsDiversificationCase verifies the
+// narrowed rule adds the list-and-enumerate case (Calendar/Drive/Notion/mail
+// with default scope). Empty on the default scope may be a scope artifact,
+// so ONE focused diversification (e.g. list_calendars after a blank
+// get_events) is permitted before concluding "not found". This is the
+// Task 3 vs Task 5 benchmark split the plan calls out.
+func TestCoreRules_EmptyResultRule_AddsDiversificationCase(t *testing.T) {
+	wantSubstrings := []string{
+		"list-and-enumerate semantics", // names the new case
+		"scope artifact",               // distinguishes from real empty
+		"list_calendars",               // concrete example (Task 3 → Task 5)
+		"ONE",                          // permits exactly one diversification
+		"Google Calendar",              // explicit integration list (no broad "external APIs")
+		"Notion",
+	}
+	for _, s := range wantSubstrings {
+		if !strings.Contains(coreOperationalRules, s) {
+			t.Errorf("empty-result rule missing substring %q", s)
+		}
+	}
+}
+
+// TestCoreRules_EmptyResultRule_ProtectsUserSpecifiedScope pins the
+// Codex review finding: when the user explicitly names a scope (mailbox,
+// calendar, folder, specific resource), an empty result MUST be
+// respected as the answer. The diversification rule must NOT encourage
+// the model to cross-account/folder-hunt past the user's contract.
+func TestCoreRules_EmptyResultRule_ProtectsUserSpecifiedScope(t *testing.T) {
+	wantSubstrings := []string{
+		"user explicitly named",     // names the protected case
+		"user-specified contract",   // frames the boundary
+	}
+	for _, s := range wantSubstrings {
+		if !strings.Contains(coreOperationalRules, s) {
+			t.Errorf("empty-result rule missing user-scope-protection substring %q", s)
+		}
+	}
+}
+
+// TestCoreRules_EmptyResultRule_ExcludesHTTPTool pins the Codex review
+// finding: the http tool legitimately returns [] / {} / 204 for the
+// exact endpoint the user asked about. The rule must explicitly
+// restrict diversification to integrations with list-and-enumerate
+// semantics AND must name the http tool as an empty-is-the-answer case,
+// so the model does not repurpose scope-hunting for arbitrary HTTP.
+func TestCoreRules_EmptyResultRule_ExcludesHTTPTool(t *testing.T) {
+	// Must name http explicitly in the "empty IS the answer" column.
+	if !strings.Contains(coreOperationalRules, "arbitrary HTTP endpoints") {
+		t.Error("empty-result rule should explicitly name 'arbitrary HTTP endpoints' as an empty-is-the-answer case")
+	}
+	if !strings.Contains(coreOperationalRules, "http tool") {
+		t.Error("empty-result rule should name the http tool by tool identifier")
+	}
+	// Must NOT contain the over-broad "external APIs" framing the
+	// previous draft used — that phrasing sweeps http in.
+	if strings.Contains(coreOperationalRules, "external APIs") {
+		t.Errorf("empty-result rule still contains the over-broad 'external APIs' phrasing; should be replaced with named integrations")
+	}
+}
+
+// TestCoreRules_EmptyResultRule_NoContradictoryOldPhrasing verifies that
+// the old unqualified "do NOT retry. The absence of results IS the answer."
+// does NOT appear verbatim anywhere in the composed prompt. That wording
+// was over-general and conflicts with the new retry-vs-diversify rule for
+// scoped APIs. The new rule is the sole source of truth on empty results.
+func TestCoreRules_EmptyResultRule_NoContradictoryOldPhrasing(t *testing.T) {
+	forbidden := `do NOT retry. The absence of results IS the answer.`
+	if strings.Contains(coreOperationalRules, forbidden) {
+		t.Errorf("found old unqualified phrasing in coreOperationalRules — the new rule must replace it, not live alongside it")
+	}
+	// Also check the default-composed system prompt.
+	defaultComposed := defaultPersona + coreOperationalRules
+	if strings.Contains(defaultComposed, forbidden) {
+		t.Errorf("found old unqualified phrasing in defaultComposed system prompt")
+	}
+}
+
 func TestNamedAgentPromptIncludesCoreRules(t *testing.T) {
 	// coreOperationalRules must contain key behavioral constraints.
 	// If any of these are missing, named agents lose critical guardrails.
@@ -2971,8 +3069,13 @@ func TestForceStop_EmptyResponseFallback(t *testing.T) {
 	if strings.TrimSpace(result) == "" {
 		t.Fatal("expected non-empty fallback, got blank result")
 	}
-	if !strings.Contains(result, "loop limit") {
-		t.Errorf("expected fallback mentioning loop limit, got %q", result)
+	// Fallback string now honestly names what happened (synthesis turn
+	// produced no output) instead of the old "loop limit after repeated
+	// failed attempts" copy, which sounded like a system crash. The new
+	// wording stays consistent with the buildForceStopReason framing the
+	// synthesis prompt uses.
+	if !strings.Contains(result, "synthesis produced no output") {
+		t.Errorf("expected fallback to name the empty-synthesis case, got %q", result)
 	}
 	status := loop.LastRunStatus()
 	if status.FailureCode != runstatus.CodeIterationLimit {
@@ -3647,5 +3750,379 @@ func TestAgentLoop_SkillListingPreservesMultimodal(t *testing.T) {
 	}
 	if !hasImage {
 		t.Error("image block was dropped from multimodal message")
+	}
+}
+
+// TestForceStopExit_PersistenceBaseline pins the existing behavior of
+// runForceStopTurn with respect to the run transcript. When the loop
+// detector force-stops a run with several tool rounds already executed,
+// the full transcript — every tool_use + matching tool_result + the
+// synthesis user prompt + the synthesis assistant response — must all be
+// visible in RunMessages(). This is a BEHAVIOR PIN, not a TDD driver:
+// it asserts what the code currently does, so a Phase 2 framing that says
+// "the change is UX-only" can be trusted.
+//
+// The test drives the agent through three identical tool calls so the
+// ConsecutiveDup detector fires LoopForceStop (consecDupThreshold+1=3),
+// then verifies RunMessages() against the expected shape.
+func TestForceStopExit_PersistenceBaseline(t *testing.T) {
+	llmCallCount := 0
+	var synthesisText = "Partial: completed step 1 of 3; stopped before step 2."
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		llmCallCount++
+		switch llmCallCount {
+		case 1, 2, 3:
+			// Return the SAME tool call with identical args each turn so
+			// the detector sees ConsecutiveDup at count=2 (LoopNudge) and
+			// count=3 (LoopForceStop).
+			json.NewEncoder(w).Encode(nativeResponseWithID("", "tool_use",
+				toolCallWithID("mock_tool", `{"same":"args"}`, fmt.Sprintf("toolu_%d", llmCallCount)), 10, 5))
+		default:
+			// Synthesis turn after runForceStopTurn injects "[system] <reason>".
+			json.NewEncoder(w).Encode(nativeResponse(synthesisText, "end_turn", nil, 10, 5))
+		}
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&mockTool{name: "mock_tool"})
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+	loop.SetEnableStreaming(false)
+	loop.SetHandler(&mockHandler{approveResult: true})
+
+	result, _, err := loop.Run(context.Background(), "do the work", nil, nil)
+	if err != nil {
+		t.Fatalf("force-stop path should complete without error, got: %v", err)
+	}
+	if result != synthesisText {
+		t.Fatalf("final text should be synthesis output, got %q", result)
+	}
+
+	// Snapshot: capture what persistence callers (session.Save,
+	// daemon.runner's captureTurnBaseline+applyTurnMessages) see.
+	msgs := loop.RunMessages()
+
+	// Shape assertions. The transcript must contain:
+	// - the original user prompt
+	// - at least one tool_use + matching tool_result (≥3 rounds happened)
+	// - the synthesis assistant message at the end (role=assistant, text=synthesisText)
+	if len(msgs) < 5 {
+		t.Fatalf("RunMessages too short for a 3-round force-stop + synthesis: got %d, want ≥5", len(msgs))
+	}
+
+	// Message.Content can carry plain text (scaffolded user prompt, synthesis
+	// assistant reply, [system] nudges/reasons) OR block content (tool_use,
+	// tool_result). Content.Text() unifies the two.
+	firstUserText := msgs[0].Content.Text()
+	if msgs[0].Role != "user" || !strings.Contains(firstUserText, "do the work") {
+		t.Fatalf("first message should be original user prompt, got role=%q text=%q", msgs[0].Role, firstUserText)
+	}
+
+	// Count tool_use and tool_result blocks across the whole transcript.
+	// Every tool_use must have a matching tool_result (no orphaned ids).
+	toolUseIDs := map[string]int{}
+	toolResultIDs := map[string]int{}
+	for _, msg := range msgs {
+		if !msg.Content.HasBlocks() {
+			continue
+		}
+		for _, b := range msg.Content.Blocks() {
+			switch b.Type {
+			case "tool_use":
+				toolUseIDs[b.ID]++
+			case "tool_result":
+				toolResultIDs[b.ToolUseID]++
+			}
+		}
+	}
+	if len(toolUseIDs) < 3 {
+		t.Fatalf("expected ≥3 tool_use rounds before force-stop, saw %d distinct ids: %v", len(toolUseIDs), toolUseIDs)
+	}
+	for id := range toolUseIDs {
+		if toolResultIDs[id] == 0 {
+			t.Errorf("tool_use id=%q has no matching tool_result — transcript has an orphan", id)
+		}
+	}
+
+	// Last message: synthesis assistant response.
+	last := msgs[len(msgs)-1]
+	if last.Role != "assistant" || last.Content.Text() != synthesisText {
+		t.Fatalf("last message must be the synthesis assistant reply, got role=%q text=%q", last.Role, last.Content.Text())
+	}
+
+	// Somewhere before the synthesis there must be a "[system]" reason
+	// message (the runForceStopTurn-injected reason). This proves the
+	// synthesis turn actually ran through runForceStopTurn and was saved.
+	sawSystemReason := false
+	for _, msg := range msgs[:len(msgs)-1] {
+		if msg.Role == "user" && strings.HasPrefix(msg.Content.Text(), "[system] ") {
+			sawSystemReason = true
+			break
+		}
+	}
+	if !sawSystemReason {
+		t.Error("expected a [system] reason message injected by runForceStopTurn, none found")
+	}
+}
+
+// TestForceStopExit_DetectorPath_SynthesisPromptShape verifies that the
+// direct LoopForceStop path (3 identical-args tool calls → ConsecutiveDup
+// force-stop) feeds the synthesis turn a structured Task/Done/Pending
+// report prompt that names the detector verdict, matching the PR #81 shape
+// previously reserved for the maxIter path.
+func TestForceStopExit_DetectorPath_SynthesisPromptShape(t *testing.T) {
+	var synthRequestMu sync.Mutex
+	var synthRequestBody string // captured body of the synthesis LLM call
+
+	llmCallCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		llmCallCount++
+		if llmCallCount == 4 {
+			// Synthesis turn — capture the outbound request body so the
+			// test can assert the prompt shape injected by buildForceStopReason.
+			body, _ := io.ReadAll(r.Body)
+			synthRequestMu.Lock()
+			synthRequestBody = string(body)
+			synthRequestMu.Unlock()
+			json.NewEncoder(w).Encode(nativeResponse("**Task** — X\n**Done** — Y", "end_turn", nil, 10, 5))
+			return
+		}
+		// Turns 1-3: same tool + same args each time. Detector fires
+		// ConsecutiveDup LoopForceStop after the 3rd identical call.
+		json.NewEncoder(w).Encode(nativeResponseWithID("", "tool_use",
+			toolCallWithID("mock_tool", `{"same":"args"}`, fmt.Sprintf("t%d", llmCallCount)), 10, 5))
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&mockTool{name: "mock_tool"})
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+	loop.SetEnableStreaming(false)
+	loop.SetHandler(&mockHandler{approveResult: true})
+
+	_, _, err := loop.Run(context.Background(), "do a thing", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	synthRequestMu.Lock()
+	body := synthRequestBody
+	synthRequestMu.Unlock()
+	if body == "" {
+		t.Fatalf("synthesis request body was not captured (expected 4 LLM calls, got %d)", llmCallCount)
+	}
+
+	// The synthesis request must carry the structured report prompt
+	// AND the detector verdict (escaped in JSON, so check a plain substring).
+	wantMarkers := []string{
+		`**Task**`,
+		`**Done**`,
+		`**Pending**`,
+		`**Partial answer**`,
+		`Do not request any more tools.`,
+		`identical arguments`, // from ConsecutiveDup's message
+	}
+	for _, marker := range wantMarkers {
+		if !strings.Contains(body, marker) {
+			t.Errorf("synthesis prompt missing marker %q (excerpt = %s)", marker, truncateForLog(body, 400))
+		}
+	}
+}
+
+// TestForceStopExit_MaxNudgesPath_SynthesisPromptShape verifies the second
+// force-stop entry point (maxNudges=3 accumulated → escalation). 6 error
+// calls with distinct args trip SameToolError LoopNudge 3 times, the
+// nudge budget is exhausted, runForceStopTurn fires with the
+// "multiple approaches failed — nudges exceeded" detector note. The
+// synthesis prompt must carry the same structured report shape.
+func TestForceStopExit_MaxNudgesPath_SynthesisPromptShape(t *testing.T) {
+	var synthRequestMu sync.Mutex
+	var synthRequestBody string
+
+	llmCallCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		llmCallCount++
+		if llmCallCount <= 6 {
+			// 6 failing-tool calls trigger SameToolError nudges at 4,5,6 →
+			// nudgeCount reaches maxNudges=3 → runForceStopTurn escalation.
+			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
+				toolCall("failing_tool", fmt.Sprintf(`{"attempt":%d}`, llmCallCount)), 10, 5))
+			return
+		}
+		// 7th LLM call = synthesis turn. Capture body.
+		body, _ := io.ReadAll(r.Body)
+		synthRequestMu.Lock()
+		synthRequestBody = string(body)
+		synthRequestMu.Unlock()
+		json.NewEncoder(w).Encode(nativeResponse("**Task** — retry failed\n**Done** — tried 6 attempts", "end_turn", nil, 10, 5))
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&mockErrorTool{name: "failing_tool"})
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+	loop.SetEnableStreaming(false)
+	loop.SetHandler(&mockHandler{approveResult: true})
+
+	_, _, err := loop.Run(context.Background(), "keep trying", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	synthRequestMu.Lock()
+	body := synthRequestBody
+	synthRequestMu.Unlock()
+	if body == "" {
+		t.Fatalf("synthesis body not captured; llmCallCount=%d", llmCallCount)
+	}
+
+	wantMarkers := []string{
+		`**Task**`,
+		`**Done**`,
+		`**Pending**`,
+		`**Partial answer**`,
+		`nudges exceeded`, // from the escalation path's detector note
+	}
+	for _, marker := range wantMarkers {
+		if !strings.Contains(body, marker) {
+			t.Errorf("synthesis prompt missing marker %q (excerpt = %s)", marker, truncateForLog(body, 400))
+		}
+	}
+}
+
+// truncateForLog returns a short, JSON-safe excerpt for test failure
+// messages. Long LLM request bodies are unreadable in t.Errorf output;
+// 400 chars is enough to locate the marker or its absence.
+func truncateForLog(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
+// readAuditLines reads the audit.log in the given temp dir and returns
+// one deserialized map per line. Used by the force_stop audit tests.
+func readAuditLines(t *testing.T, logDir string) []map[string]any {
+	t.Helper()
+	path := filepath.Join(logDir, "audit.log")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read audit log %s: %v", path, err)
+	}
+	var entries []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("parse audit line %q: %v", line, err)
+		}
+		entries = append(entries, m)
+	}
+	return entries
+}
+
+// TestForceStopExit_DetectorPath_EmitsForceStopAudit covers the
+// greppable observation signal: when the loop detector force-stops a
+// run, a single `event:"force_stop"` audit entry must be written.
+func TestForceStopExit_DetectorPath_EmitsForceStopAudit(t *testing.T) {
+	llmCallCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		llmCallCount++
+		if llmCallCount <= 3 {
+			json.NewEncoder(w).Encode(nativeResponseWithID("", "tool_use",
+				toolCallWithID("mock_tool", `{"same":"args"}`, fmt.Sprintf("t%d", llmCallCount)), 10, 5))
+			return
+		}
+		json.NewEncoder(w).Encode(nativeResponse("final synthesis", "end_turn", nil, 10, 5))
+	}))
+	defer server.Close()
+
+	logDir := t.TempDir()
+	auditor, err := audit.NewAuditLogger(logDir)
+	if err != nil {
+		t.Fatalf("NewAuditLogger: %v", err)
+	}
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&mockTool{name: "mock_tool"})
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, auditor, nil)
+	loop.SetEnableStreaming(false)
+	loop.SetHandler(&mockHandler{approveResult: true})
+
+	if _, _, err := loop.Run(context.Background(), "do a thing", nil, nil); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	entries := readAuditLines(t, logDir)
+	forceStops := 0
+	for _, e := range entries {
+		if e["event"] == "force_stop" {
+			forceStops++
+			// Sanity: output_summary should carry iteration + tools so
+			// post-merge observation can disambiguate different stops.
+			if os, _ := e["output_summary"].(string); !strings.Contains(os, "iteration=") {
+				t.Errorf("force_stop entry missing iteration marker: %v", e)
+			}
+		}
+	}
+	if forceStops != 1 {
+		t.Fatalf("expected exactly 1 force_stop audit entry for detector stop, got %d (all entries: %v)", forceStops, entries)
+	}
+}
+
+// TestForceStopExit_MaxIter_DoesNotEmitForceStopAudit locks the
+// separation between detector-driven stops and maxIter exits. Both
+// share runForceStopTurn for synthesis UX, but they are distinct
+// failure classes; conflating them in audit telemetry would make the
+// `grep "event":"force_stop"` observation signal over-count detector
+// stops. maxIter path must NOT emit the force_stop event.
+func TestForceStopExit_MaxIter_DoesNotEmitForceStopAudit(t *testing.T) {
+	llmCallCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		llmCallCount++
+		// Each turn: return a tool call with DISTINCT args so no detector
+		// fires (no ConsecutiveDup, no ExactDup, no SameToolError —
+		// mock_tool never errors). The loop runs to maxIter=5 and the
+		// maxIter synthesis path takes over.
+		if llmCallCount <= 5 {
+			json.NewEncoder(w).Encode(nativeResponseWithID("", "tool_use",
+				toolCallWithID("mock_tool", fmt.Sprintf(`{"step":%d}`, llmCallCount), fmt.Sprintf("t%d", llmCallCount)), 10, 5))
+			return
+		}
+		// Synthesis turn.
+		json.NewEncoder(w).Encode(nativeResponse("maxiter synthesis", "end_turn", nil, 10, 5))
+	}))
+	defer server.Close()
+
+	logDir := t.TempDir()
+	auditor, err := audit.NewAuditLogger(logDir)
+	if err != nil {
+		t.Fatalf("NewAuditLogger: %v", err)
+	}
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&mockTool{name: "mock_tool"})
+	loop := NewAgentLoop(gw, reg, "medium", "", 5, 2000, 200, nil, auditor, nil) // maxIter=5
+	loop.SetEnableStreaming(false)
+	loop.SetHandler(&mockHandler{approveResult: true})
+
+	_, _, err = loop.Run(context.Background(), "long-running task", nil, nil)
+	// maxIter returns ErrMaxIterReached — that is the success signal for this test.
+	if err != nil && !errors.Is(err, ErrMaxIterReached) {
+		t.Fatalf("expected ErrMaxIterReached or nil, got %v", err)
+	}
+
+	entries := readAuditLines(t, logDir)
+	for _, e := range entries {
+		if e["event"] == "force_stop" {
+			t.Errorf("maxIter exit must NOT emit force_stop audit event; got entry: %v", e)
+		}
 	}
 }

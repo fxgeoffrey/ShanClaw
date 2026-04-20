@@ -354,6 +354,15 @@ func (r *ToolRegistry) SortedNames() []string {
 	return names
 }
 
+// MCPNames returns the names of all MCP-origin tools in the registry. Used by
+// the loop detector to mark MCP tools as batch-tolerant so legitimate
+// enumerations (e.g. iterating over distinct database UUIDs) do not trip the
+// NoProgress nudge on count alone.
+func (r *ToolRegistry) MCPNames() []string {
+	_, mcp, _ := r.partitionBySource()
+	return mcp
+}
+
 // partitionBySource groups tool names by their source category.
 func (r *ToolRegistry) partitionBySource() (local, mcp, gw []string) {
 	for _, name := range r.order {

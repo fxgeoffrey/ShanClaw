@@ -175,7 +175,11 @@ When a tool returns an error, use the prefix to decide your response:
 - **[permission error]**: Access was denied. Escalate to the user — they may need to grant permissions or provide credentials.
 - **No prefix**: Treat as non-retryable unless the error message clearly suggests transience (e.g., "connection reset").
 
-When a tool returns no results but IsError is false (e.g., "no files matched", "no matches found"), this is a valid empty result — do NOT retry. The absence of results IS the answer.
+When a tool returns no results but IsError is false, distinguish "empty = the answer" from "empty = wrong implicit scope":
+- For search/filesystem queries (grep, glob, directory_list, file_read on a literal path), an empty result IS the answer. Do not retry.
+- For arbitrary HTTP endpoints (the http tool) or any specific resource the user explicitly named (e.g. "my work calendar", "this Notion database", "folder X"), an empty result IS the answer — the user-specified contract is the boundary. Do not broaden filters or query adjacent endpoints.
+- ONLY for integrations with list-and-enumerate semantics (Google Calendar, Google Drive, Gmail/mail, Notion) AND when the user did NOT name a specific scope, an empty result on the default or first-queried scope is often a scope artifact, not a definitive "no data" answer. In that case try ONE focused diversification: list sub-resources (e.g., list_calendars after get_events returns empty on the default calendar), broaden a filter that was implicitly narrow, or query an adjacent endpoint. If that also returns empty, conclude "not found" and state explicitly what you tried so the search boundary is verifiable.
+- Never retry the identical call with identical arguments on an empty result — that is superstition, not diagnosis.
 
 ## Tool Selection
 
@@ -1257,6 +1261,22 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 
 	const maxContinuations = 3 // cap max_tokens continuation attempts
 
+	// batch-tolerant set: bash + READ-verb MCP tool names only. On these
+	// tools, the NoProgress detector applies a uniqueness gate so
+	// legitimate batch enumerations (Task 5 / Task 6 benchmarks) are not
+	// force-stopped by name-count alone. Write-capable MCP tools
+	// (create_*, update_*, delete_*, send_*, …) deliberately STAY under
+	// the count-based guard — MCPTool.RequiresApproval() is always false
+	// and the permission engine does not gate MCP calls, so NoProgress
+	// is the only defense against write loops with unique arguments.
+	batchTolerant := map[string]bool{"bash": true}
+	if a.tools != nil {
+		for _, n := range a.tools.MCPNames() {
+			if isReadMCPName(n) {
+				batchTolerant[n] = true
+			}
+		}
+	}
 	var (
 		detector             = NewLoopDetector()
 		toolsUsed            = make(map[string]int)
@@ -1310,6 +1330,8 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		stickySkillSnippet  string
 		stickyInjectPending bool
 	)
+
+	detector.batchTolerant = batchTolerant
 
 	// Skill tool filter: activeSkillFilter is checked at execution time
 	// (before running each tool) rather than filtering toolSchemas. This
@@ -1423,6 +1445,50 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				"tool results, just answer it directly — skip the structure.",
 			iterationCount, topTools(toolsUsed, 5), lastToolName,
 		)
+	}
+
+	// buildForceStopReason produces the same structured report prompt as
+	// buildMaxIterReason but names the specific detector verdict that
+	// triggered the stop. Two call sites feed it: the direct LoopForceStop
+	// path (line ~2700) and the maxNudges escalation path (line ~2710).
+	// Both paths previously passed a terse detector note to runForceStopTurn
+	// and got only a generic "I hit the loop limit…" fallback when the
+	// synthesis LLM call returned empty text — users never saw a summary of
+	// what the agent had already accomplished. This closure restores the
+	// same UX shape PR #81 added for maxIter.
+	buildForceStopReason := func(detectorNote string) string {
+		return fmt.Sprintf(
+			"The loop detector stopped further tool calls because: %s\n"+
+				"Iteration count: %d. Tools used: %s. Last tool: %s.\n"+
+				"Do not request any more tools.\n\n"+
+				"Report in this structure. Skip sections if not applicable:\n\n"+
+				"**Task** — What the user asked (1 line).\n"+
+				"**Done** — What you accomplished so far (bullets, with concrete findings).\n"+
+				"**Pending** — What's still missing (bullets).\n"+
+				"**Partial answer** — Your best-effort response given what you've gathered.\n\n"+
+				"If the user's question is simple and you already have the answer from "+
+				"tool results, just answer it directly — skip the structure.",
+			detectorNote, iterationCount, topTools(toolsUsed, 5), lastToolName,
+		)
+	}
+
+	// auditDetectorForceStop emits a single `event:"force_stop"` audit
+	// entry so post-merge observation can count detector-driven stops with
+	// `grep '"event":"force_stop"' ~/.shannon/logs/audit.log | wc -l`.
+	// Intentionally NOT called from the maxIter synthesis path
+	// (runForceStopTurn is shared but maxIter is a distinct failure class
+	// — conflating them would make the grep over-count detector stops).
+	auditDetectorForceStop := func(detectorNote string) {
+		if a.auditor == nil {
+			return
+		}
+		a.auditor.Log(audit.AuditEntry{
+			Timestamp:     time.Now(),
+			SessionID:     a.sessionID,
+			Event:         "force_stop",
+			InputSummary:  detectorNote,
+			OutputSummary: fmt.Sprintf("iteration=%d tools=%s", iterationCount, topTools(toolsUsed, 5)),
+		})
 	}
 
 	boundaryText := func(boundary MetaBoundary) string {
@@ -2693,9 +2759,22 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		}
 		cloudResultContent = "" // reset if mixed with other tools
 
-		// Handle loop detection results
+		// Handle loop detection results. Both the direct force-stop and
+		// the maxNudges escalation now pass the detector verdict through
+		// buildForceStopReason so the synthesis turn produces a
+		// Task/Done/Pending/Partial-answer report instead of generic
+		// "give final answer now" prose — matching the UX shape PR #81
+		// introduced for the maxIter path. Fallback text (used when the
+		// synthesis LLM call itself returns empty) honestly names what
+		// happened ("synthesis produced no output") instead of claiming a
+		// specific failure mode.
+		forceStopFallback := fmt.Sprintf(
+			"The loop detector stopped the run after %d turns; synthesis produced no output.",
+			iterationCount,
+		)
 		if worstAction == LoopForceStop {
-			text, err := runForceStopTurn(worstMsg, "I hit the loop limit after repeated failed attempts and couldn't produce a final answer.")
+			auditDetectorForceStop(worstMsg)
+			text, err := runForceStopTurn(buildForceStopReason(worstMsg), forceStopFallback)
 			if err != nil {
 				return "", usage, err
 			}
@@ -2705,7 +2784,12 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			nudgeCount++
 			if nudgeCount >= maxNudges {
 				// Escalate: too many nudges without behavior change → force stop
-				text, err := runForceStopTurn("Multiple approaches have failed. Provide your final answer now with what you have.", "I hit the loop limit after repeated failed attempts and couldn't produce a final answer.")
+				const escalationNote = "multiple approaches failed — nudges exceeded"
+				auditDetectorForceStop(escalationNote)
+				text, err := runForceStopTurn(
+					buildForceStopReason(escalationNote),
+					forceStopFallback,
+				)
 				if err != nil {
 					return "", usage, err
 				}

@@ -335,3 +335,49 @@ func TestTruncate(t *testing.T) {
 		})
 	}
 }
+
+// TestAuditEntry_ApprovedAlwaysPresent locks the invariant that
+// `approved` is always present in the JSON output — including when the
+// tool call was denied (Approved=false). Security tooling that greps
+// the audit log distinguishes permitted from denied calls by this
+// field; dropping it under omitempty would make denial entries
+// indistinguishable from non-tool events (force_stop, etc.).
+func TestAuditEntry_ApprovedAlwaysPresent(t *testing.T) {
+	tests := []struct {
+		name  string
+		entry AuditEntry
+	}{
+		{
+			"approved true",
+			AuditEntry{
+				Timestamp: time.Unix(0, 0).UTC(),
+				SessionID: "s", ToolName: "bash", Approved: true,
+			},
+		},
+		{
+			"approved false (denied)",
+			AuditEntry{
+				Timestamp: time.Unix(0, 0).UTC(),
+				SessionID: "s", ToolName: "bash", Approved: false,
+			},
+		},
+		{
+			"non-tool event (force_stop)",
+			AuditEntry{
+				Timestamp: time.Unix(0, 0).UTC(),
+				SessionID: "s", Event: "force_stop", Approved: false,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := json.Marshal(tt.entry)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if !strings.Contains(string(data), `"approved":`) {
+				t.Errorf("approved field missing from JSON output: %s", data)
+			}
+		})
+	}
+}

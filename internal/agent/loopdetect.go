@@ -65,6 +65,15 @@ type LoopDetector struct {
 	// tools. The nudge budget escalation (maxNudges in loop.go) is the
 	// backstop that converts accumulated nudges into a force-stop.
 
+	// batchTolerant lists tools whose NoProgress nudge is gated on an
+	// args-uniqueness ratio. When ≥50% of same-name calls in the window
+	// carry distinct argsHash, the detector treats the stream as a
+	// legitimate batch/enumeration rather than a stuck loop. Populated at
+	// construction time from bash + the runtime's MCP tool names. Only
+	// this set gets the relaxation; the generic NoProgress path for
+	// think/http/file_*/grep/glob stays fully active.
+	batchTolerant map[string]bool
+
 	// ToolModeSwitch detector state
 	lastNonGUISuccess bool
 	lastNonGUITool    string
@@ -127,6 +136,104 @@ func isRepeatableToolName(set map[string]bool, name string) bool {
 // detectors still catch genuine stuck loops at their existing thresholds.
 var semiRepeatableProdTools = map[string]bool{
 	"bash": true,
+}
+
+// readVerbs and writeVerbs classify MCP tool names by the conventional
+// verb word. Only tools whose primary verb (position 0, 1, or 2 after
+// tokenizing on _ or -) is in readVerbs AND whose first three tokens
+// contain NO writeVerb are eligible for batch-tolerance. The write
+// blacklist is the defensive half of the heuristic: names like
+// lookup_and_delete_all_records, get_or_create_item,
+// find_and_remove_entry would otherwise sneak through on the position-0
+// read-verb match, despite an obvious destructive suffix. Anything
+// unmatched stays under the count-based NoProgress guard because a loop
+// of write calls with unique arguments is exactly what NoProgress
+// defends against (the permission engine does not gate MCP calls, and
+// MCPTool.RequiresApproval() is always false).
+var readVerbs = map[string]bool{
+	"get":      true,
+	"list":     true,
+	"search":   true,
+	"query":    true,
+	"fetch":    true,
+	"read":     true,
+	"describe": true,
+	"find":     true,
+	"count":    true,
+	"head":     true,
+	"show":     true,
+	"resolve":  true,
+	"lookup":   true,
+	"inspect":  true,
+}
+
+var writeVerbs = map[string]bool{
+	// Destructive/creative verbs.
+	"create":  true,
+	"delete":  true,
+	"update":  true,
+	"remove":  true,
+	"insert":  true,
+	"append":  true,
+	"archive": true,
+	"modify":  true,
+	"rename":  true,
+	"replace": true,
+	"drop":    true,
+	"prune":   true,
+	"clear":   true,
+	// Data transfer / mutation verbs.
+	"send":    true,
+	"move":    true,
+	"upload":  true,
+	"write":   true,
+	"push":    true,
+	"publish": true,
+	"submit":  true,
+	"post":    true,
+	// Key-value / property verbs (common in GitHub/Linear/Notion/Slack
+	// MCP servers for compound names like get_and_set_properties).
+	"add":   true,
+	"set":   true,
+	"patch": true,
+	"put":   true,
+	// Ambiguous execution verbs (could SELECT or INSERT — fail-closed).
+	"execute": true,
+	"run":     true,
+}
+
+// isReadMCPName reports whether an MCP tool name looks like a read-only
+// operation. Tokenizes on both '_' and '-', then checks the first three
+// tokens: accepts iff ≥1 read verb is present AND 0 write verbs are
+// present. Matching is case-insensitive. Handles:
+//
+//   - direct prefix:          list_calendars, get_events
+//   - 2-token namespaced:     notion_list_pages, API-query-data-source
+//   - 3-token namespaced:     google_gmail_search_messages
+//   - compound-verb rejects:  lookup_and_delete_all_records,
+//     get_or_create_item, find_and_remove_entry
+//
+// Fail-closed: ambiguous names (run_* / execute_* — could be SELECT or
+// INSERT) go through writeVerbs so the count-based guard stays engaged.
+// Names whose verb sits at position 3 or later are treated as writes.
+func isReadMCPName(name string) bool {
+	tokens := strings.FieldsFunc(strings.ToLower(name), func(r rune) bool {
+		return r == '_' || r == '-'
+	})
+	limit := len(tokens)
+	if limit > 3 {
+		limit = 3
+	}
+	hasRead := false
+	for i := 0; i < limit; i++ {
+		if writeVerbs[tokens[i]] {
+			return false
+		}
+		if readVerbs[tokens[i]] {
+			hasRead = true
+		}
+	}
+	return hasRead
 }
 
 // NewLoopDetector creates a detector with production defaults.
@@ -406,24 +513,36 @@ func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 	// legitimate multi-step scripting uses many distinct calls, but they
 	// are NOT fully exempt — the exact-dup, same-error, and sleep
 	// detectors still catch real loops at their own thresholds.
+	//
+	// Batch-tolerant tools (bash + MCP tool names) additionally get a
+	// uniqueness gate: when ≥50% of same-name calls carry distinct
+	// argsHash, treat the stream as legitimate enumeration and fall
+	// through to the remaining detectors. Generic NoProgress for
+	// think/http/file_*/grep/glob stays fully active — those tools still
+	// need "called repeatedly with unique args" caught as a spin signal.
 	if !isRepeatableToolName(ld.repeatableTools, name) && family != "search" {
 		count := 0
+		seen := make(map[string]struct{}, ld.historySize)
 		for _, rec := range ld.history {
 			if rec.Name == name {
 				count++
+				seen[rec.ArgsHash] = struct{}{}
 			}
 		}
 		threshold := ld.noProgressThreshold
 		if ld.semiRepeatableTools[name] {
 			threshold = ld.semiRepeatableThreshold
 		}
-		if count >= threshold*2 {
-			return LoopForceStop, fmt.Sprintf(
-				"You have called %s %d times without meaningful progress. Provide your answer now.", name, count)
-		}
-		if count >= threshold {
-			return LoopNudge, fmt.Sprintf(
-				"You've called %s %d times. Summarize what you've learned and try a different approach.", name, count)
+		batchGated := ld.batchTolerant[name] && count > 0 && len(seen)*2 >= count
+		if !batchGated {
+			if count >= threshold*2 {
+				return LoopForceStop, fmt.Sprintf(
+					"You have called %s %d times without meaningful progress. Provide your answer now.", name, count)
+			}
+			if count >= threshold {
+				return LoopNudge, fmt.Sprintf(
+					"You've called %s %d times. Summarize what you've learned and try a different approach.", name, count)
+			}
 		}
 	}
 

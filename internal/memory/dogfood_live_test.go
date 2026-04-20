@@ -75,6 +75,11 @@ func TestDogfoodLive(t *testing.T) {
 
 	waitReady(t, svc, tStart)
 	waitBundle(t, cfg, tStart)
+
+	// If the puller's first tick finds a newer ts on the server, give it
+	// time to install and reload before we reconcile + query. Harmless if
+	// we're already current; just polls the symlink for up to 30s.
+	upgradeSettle(t, cfg, tStart)
 	reconcileBundle(t, cfg)
 
 	// Direct /bundle/reload probe — proves endpoint reachable + returns a
@@ -127,6 +132,25 @@ func waitReady(t *testing.T, svc *Service, tStart time.Time) {
 		time.Sleep(200 * time.Millisecond)
 	}
 	t.Fatalf("timeout waiting for Ready (last=%s)", svc.Status())
+}
+
+// upgradeSettle waits for the puller to finish any in-flight bundle
+// upgrade. It watches the `current` symlink target; if it changes within
+// the window we log both the old and new ts. Silent no-op when nothing
+// upgrades (typical case: already current).
+func upgradeSettle(t *testing.T, cfg Config, tStart time.Time) {
+	link := filepath.Join(cfg.BundleRoot, "current")
+	initial, _ := os.Readlink(link)
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		cur, err := os.Readlink(link)
+		if err == nil && cur != initial && cur != "" {
+			t.Logf("T+%s BUNDLE_UPGRADED old→%s  new→%s", dur(tStart),
+				filepath.Base(initial), filepath.Base(cur))
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 func waitBundle(t *testing.T, cfg Config, tStart time.Time) {

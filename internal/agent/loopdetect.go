@@ -65,6 +65,15 @@ type LoopDetector struct {
 	// tools. The nudge budget escalation (maxNudges in loop.go) is the
 	// backstop that converts accumulated nudges into a force-stop.
 
+	// batchTolerant lists tools whose NoProgress nudge is gated on an
+	// args-uniqueness ratio. When ≥50% of same-name calls in the window
+	// carry distinct argsHash, the detector treats the stream as a
+	// legitimate batch/enumeration rather than a stuck loop. Populated at
+	// construction time from bash + the runtime's MCP tool names. Only
+	// this set gets the relaxation; the generic NoProgress path for
+	// think/http/file_*/grep/glob stays fully active.
+	batchTolerant map[string]bool
+
 	// ToolModeSwitch detector state
 	lastNonGUISuccess bool
 	lastNonGUITool    string
@@ -406,24 +415,36 @@ func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 	// legitimate multi-step scripting uses many distinct calls, but they
 	// are NOT fully exempt — the exact-dup, same-error, and sleep
 	// detectors still catch real loops at their own thresholds.
+	//
+	// Batch-tolerant tools (bash + MCP tool names) additionally get a
+	// uniqueness gate: when ≥50% of same-name calls carry distinct
+	// argsHash, treat the stream as legitimate enumeration and fall
+	// through to the remaining detectors. Generic NoProgress for
+	// think/http/file_*/grep/glob stays fully active — those tools still
+	// need "called repeatedly with unique args" caught as a spin signal.
 	if !isRepeatableToolName(ld.repeatableTools, name) && family != "search" {
 		count := 0
+		seen := make(map[string]struct{}, ld.historySize)
 		for _, rec := range ld.history {
 			if rec.Name == name {
 				count++
+				seen[rec.ArgsHash] = struct{}{}
 			}
 		}
 		threshold := ld.noProgressThreshold
 		if ld.semiRepeatableTools[name] {
 			threshold = ld.semiRepeatableThreshold
 		}
-		if count >= threshold*2 {
-			return LoopForceStop, fmt.Sprintf(
-				"You have called %s %d times without meaningful progress. Provide your answer now.", name, count)
-		}
-		if count >= threshold {
-			return LoopNudge, fmt.Sprintf(
-				"You've called %s %d times. Summarize what you've learned and try a different approach.", name, count)
+		batchGated := ld.batchTolerant[name] && count > 0 && len(seen)*2 >= count
+		if !batchGated {
+			if count >= threshold*2 {
+				return LoopForceStop, fmt.Sprintf(
+					"You have called %s %d times without meaningful progress. Provide your answer now.", name, count)
+			}
+			if count >= threshold {
+				return LoopNudge, fmt.Sprintf(
+					"You've called %s %d times. Summarize what you've learned and try a different approach.", name, count)
+			}
 		}
 	}
 

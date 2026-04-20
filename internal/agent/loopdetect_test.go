@@ -946,3 +946,119 @@ func TestLoopDetector_BrowserSameToolStillDetected(t *testing.T) {
 		t.Errorf("2 consecutive identical browser_click calls should nudge, got %v", action)
 	}
 }
+
+// TestLoopDetector_NoProgress_BashUniqueArgs_NoNudge covers the Task 5
+// benchmark pattern: ~15 bash calls during a multi-step investigation, each
+// with distinct argsJSON. Pre-gate, this force-stops via maxNudges escalation.
+// With bash in the batchTolerant set and ≥50% unique argsHashes, NoProgress
+// must treat this as a legitimate batch and stay Continue.
+func TestLoopDetector_NoProgress_BashUniqueArgs_NoNudge(t *testing.T) {
+	ld := NewLoopDetector()
+	ld.batchTolerant = map[string]bool{"bash": true}
+
+	for i := range 15 {
+		ld.Record("bash", fmt.Sprintf(`{"cmd":"step_%d"}`, i), false, "", "", false)
+		action, msg := ld.Check("bash")
+		if action != LoopContinue {
+			t.Fatalf("call %d: unique-args bash on a batch-tolerant tool should stay Continue, got %v (%s)", i+1, action, msg)
+		}
+	}
+}
+
+// TestLoopDetector_NoProgress_MCPUniqueArgs_NoNudge covers the Task 6
+// benchmark pattern: 16 MCP-tool calls each querying a distinct UUID during a
+// legitimate Notion database enumeration. Pre-gate, this hit the generic
+// NoProgress threshold at count=8. With the MCP tool registered in
+// batchTolerant, unique-args enumeration stays Continue.
+func TestLoopDetector_NoProgress_MCPUniqueArgs_NoNudge(t *testing.T) {
+	ld := NewLoopDetector()
+	ld.batchTolerant = map[string]bool{"API-query-data-source": true}
+
+	for i := range 16 {
+		ld.Record("API-query-data-source", fmt.Sprintf(`{"id":"uuid-%d"}`, i), false, "", "", false)
+		action, msg := ld.Check("API-query-data-source")
+		if action != LoopContinue {
+			t.Fatalf("call %d: unique-args MCP tool on batch-tolerant list should stay Continue, got %v (%s)", i+1, action, msg)
+		}
+	}
+}
+
+// TestLoopDetector_NoProgress_MCPIdenticalArgs_StillStops locks the invariant
+// that batch-tolerance does NOT relax the identical-args case. Regardless of
+// which layered detector catches it (ConsecutiveDup fires earliest at 2
+// consecutive identical calls; ExactDup at 3 spread out; NoProgress at 8),
+// the outcome must be "not Continue" — identical-args spin is always caught.
+func TestLoopDetector_NoProgress_MCPIdenticalArgs_StillStops(t *testing.T) {
+	ld := NewLoopDetector()
+	ld.batchTolerant = map[string]bool{"API-query-data-source": true}
+
+	for range 8 {
+		ld.Record("API-query-data-source", `{"id":"same-uuid"}`, false, "", "", false)
+	}
+	action, msg := ld.Check("API-query-data-source")
+	if action == LoopContinue {
+		t.Fatalf("identical-args calls must be stopped by some detector despite batch-tolerance, got Continue (%s)", msg)
+	}
+}
+
+// TestLoopDetector_NoProgress_GenericToolUniqueArgs_StillNudges_Regression
+// pins the core constraint of Phase 1: the uniqueness gate must NOT relax
+// generic NoProgress detection for tools outside the batchTolerant set.
+// `think` (not in batchTolerant, not semi-repeatable) called 8 times with
+// distinct argsJSON must still nudge — catching "spinning on thought
+// variations without progress" is the generic path's load-bearing role.
+func TestLoopDetector_NoProgress_GenericToolUniqueArgs_StillNudges_Regression(t *testing.T) {
+	ld := NewLoopDetector()
+	// Explicitly NOT populating batchTolerant — this test must behave the
+	// same whether the field is nil or empty.
+
+	for i := range 8 {
+		ld.Record("think", fmt.Sprintf(`{"thought":"idea%d"}`, i), false, "", "", false)
+	}
+	action, msg := ld.Check("think")
+	if action != LoopNudge {
+		t.Fatalf("8 unique-args think calls must still nudge (generic path unchanged), got %v (%s)", action, msg)
+	}
+}
+
+// TestLoopDetector_NoProgress_BashMixedArgsRatio_GateIsolated exercises the
+// NoProgress uniqueness gate without letting ConsecutiveDup / ExactDup fire
+// first. The sequence uses 8 distinct argsHashes each appearing exactly twice
+// (16 calls, 50% unique) interleaved so no hash runs ≥3 times in a row and
+// ExactDup's "same-arg 3 times in window" threshold is not tripped.
+//
+// On a batch-tolerant bash, the gate suppresses the nudge at count≥12.
+// Without batch-tolerance (Generic path), the same stream must nudge — this
+// sub-test covers the non-relaxation invariant at the threshold boundary.
+func TestLoopDetector_NoProgress_BashMixedArgsRatio_GateIsolated(t *testing.T) {
+	// Build a non-consecutive pattern to keep ConsecutiveDup (need ≥2 back-to-back)
+	// and ExactDup (need ≥3 of the same argsHash in the window) quiet.
+	// Pattern: 1,2,3,4,5,6,7,8,1,2,3,4,5,6,7,8 — each hash appears twice,
+	// separated by 7 others. ExactDup threshold is 3 so two appearances is
+	// safe; ConsecutiveDup needs adjacency so interleaving avoids it.
+	pattern := []int{0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7}
+
+	t.Run("gated_when_batch_tolerant", func(t *testing.T) {
+		ld := NewLoopDetector()
+		ld.batchTolerant = map[string]bool{"bash": true}
+		for _, i := range pattern {
+			ld.Record("bash", fmt.Sprintf(`{"cmd":"script_%d"}`, i), false, "", "", false)
+		}
+		action, msg := ld.Check("bash")
+		if action != LoopContinue {
+			t.Fatalf("50%% unique on batch-tolerant bash should be gated (Continue), got %v (%s)", action, msg)
+		}
+	})
+
+	t.Run("not_gated_when_not_batch_tolerant", func(t *testing.T) {
+		ld := NewLoopDetector()
+		// Explicitly empty batchTolerant — same sequence, no gate.
+		for _, i := range pattern {
+			ld.Record("bash", fmt.Sprintf(`{"cmd":"script_%d"}`, i), false, "", "", false)
+		}
+		action, msg := ld.Check("bash")
+		if action != LoopNudge {
+			t.Fatalf("same sequence without batch-tolerance should nudge at count≥12, got %v (%s)", action, msg)
+		}
+	})
+}

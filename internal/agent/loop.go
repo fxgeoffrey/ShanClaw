@@ -1257,6 +1257,16 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 
 	const maxContinuations = 3 // cap max_tokens continuation attempts
 
+	// batch-tolerant set: bash + all MCP tool names. On these tools, the
+	// NoProgress detector applies a uniqueness gate so legitimate batch
+	// enumerations (Task 5 / Task 6 benchmarks) are not force-stopped by
+	// name-count alone.
+	batchTolerant := map[string]bool{"bash": true}
+	if a.tools != nil {
+		for _, n := range a.tools.MCPNames() {
+			batchTolerant[n] = true
+		}
+	}
 	var (
 		detector             = NewLoopDetector()
 		toolsUsed            = make(map[string]int)
@@ -1310,6 +1320,8 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		stickySkillSnippet  string
 		stickyInjectPending bool
 	)
+
+	detector.batchTolerant = batchTolerant
 
 	// Skill tool filter: activeSkillFilter is checked at execution time
 	// (before running each tool) rather than filtering toolSchemas. This

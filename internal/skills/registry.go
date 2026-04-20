@@ -20,6 +20,22 @@ type Skill struct {
 	// in loader.go for rationale.
 	Metadata        map[string]any `json:"metadata,omitempty"`
 	AllowedTools    []string       `json:"allowed_tools,omitempty"`
+	// StickyInstructions, when true, opts the skill into a short
+	// <system-reminder> reinjection on activation and on skill-filter
+	// drift. Set via frontmatter `sticky-instructions: true`. Intended for
+	// policy skills (e.g. kocoro) whose guidance must survive compaction.
+	StickyInstructions bool   `json:"sticky_instructions,omitempty"`
+	// StickySnippet is the RESOLVED reinjection body used at runtime. It
+	// comes from StickySnippetOverride when set, else from the heuristic
+	// body extractor, else from Description. Capped to 400 chars. Not
+	// persisted — recomputed on every load.
+	StickySnippet   string         `json:"-"`
+	// StickySnippetOverride is the author-pinned frontmatter value
+	// (`sticky-snippet:`). Separate from the resolved StickySnippet so the
+	// save path can round-trip author intent without accidentally freezing
+	// a heuristic choice into the SKILL.md file. Empty means "let the
+	// heuristic pick".
+	StickySnippetOverride string `json:"-"`
 	Source          string         `json:"-"`
 	InstallSource   string         `json:"-"`
 	MarketplaceSlug string         `json:"-"`

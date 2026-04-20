@@ -15,12 +15,13 @@ import (
 type AgentAPI struct {
 	Name       string             `json:"name"`
 	Prompt     string             `json:"prompt"`
-	Memory     *string            `json:"memory"`     // null if no MEMORY.md
-	Config     *AgentConfigAPI    `json:"config"`     // null if no config.yaml
-	Commands   map[string]string  `json:"commands"`   // null if no commands
-	Skills     []skills.SkillMeta `json:"skills"`     // null if no skills
-	Builtin    bool               `json:"builtin"`    // true if agent is a bundled builtin
-	Overridden bool               `json:"overridden"` // true if builtin has user override
+	Memory     *string            `json:"memory"`              // null if no MEMORY.md
+	Config     *AgentConfigAPI    `json:"config"`              // null if no config.yaml
+	Commands   map[string]string  `json:"commands"`            // null if no commands
+	Skills     []skills.SkillMeta `json:"skills"`              // null if no skills
+	Builtin    bool               `json:"builtin"`             // true if agent is a bundled builtin
+	Overridden bool               `json:"overridden"`          // true if builtin has user override
+	Warnings   []string           `json:"warnings,omitempty"`  // non-fatal config advisories (e.g. heartbeat⊕schedule double-fire)
 }
 
 // AgentConfigAPI is the JSON representation of agent config.

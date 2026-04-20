@@ -1686,6 +1686,18 @@ func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 	api.Builtin = hasBuiltin && !hasUser   // builtin-only, no user override
 	api.Overridden = hasBuiltin && hasUser // user override of a builtin
 
+	// Populate non-fatal trigger-conflict warnings (heartbeat ⊕ schedule).
+	// Best-effort — missing schedule manager or list errors yield no warnings.
+	if s.deps.ScheduleManager != nil {
+		if list, err := s.deps.ScheduleManager.List(); err == nil {
+			refs := make([]agents.ScheduleRef, 0, len(list))
+			for _, sc := range list {
+				refs = append(refs, agents.ScheduleRef{ID: sc.ID, Agent: sc.Agent, Enabled: sc.Enabled})
+			}
+			api.Warnings = agents.DetectTriggerConflicts(s.deps.AgentsDir, name, refs)
+		}
+	}
+
 	writeJSON(w, http.StatusOK, api)
 }
 
@@ -2474,15 +2486,17 @@ func (s *Server) handleGetSkill(w http.ResponseWriter, r *http.Request) {
 	for _, skill := range list {
 		if skill.Name == name {
 			detail := skills.SkillDetail{
-				Name:            skill.Name,
-				Description:     skill.Description,
-				Prompt:          skill.Prompt,
-				Source:          skill.Source,
-				InstallSource:   skill.InstallSource,
-				MarketplaceSlug: skill.MarketplaceSlug,
-				License:         skill.License,
-				Compatibility:   skill.Compatibility,
-				Metadata:        skill.Metadata,
+				Name:               skill.Name,
+				Description:        skill.Description,
+				Prompt:             skill.Prompt,
+				Source:             skill.Source,
+				InstallSource:      skill.InstallSource,
+				MarketplaceSlug:    skill.MarketplaceSlug,
+				License:            skill.License,
+				Compatibility:      skill.Compatibility,
+				Metadata:           skill.Metadata,
+				StickyInstructions: skill.StickyInstructions,
+				StickySnippet:      skill.StickySnippetOverride,
 			}
 			if len(skill.AllowedTools) > 0 {
 				detail.AllowedTools = skill.AllowedTools
@@ -2503,9 +2517,11 @@ func (s *Server) handlePutGlobalSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Description string `json:"description"`
-		Prompt      string `json:"prompt"`
-		License     string `json:"license"`
+		Description        string `json:"description"`
+		Prompt             string `json:"prompt"`
+		License            string `json:"license"`
+		StickyInstructions *bool  `json:"sticky_instructions,omitempty"`
+		StickySnippet      *string `json:"sticky_snippet,omitempty"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
@@ -2522,12 +2538,51 @@ func (s *Server) handlePutGlobalSkill(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "daemon deps not configured")
 		return
 	}
-	if err := skills.WriteGlobalSkill(s.deps.ShannonDir, &skills.Skill{
-		Name:        name,
-		Description: req.Description,
-		Prompt:      req.Prompt,
-		License:     req.License,
-	}); err != nil {
+	// Load the existing skill so we can preserve fields the PUT body doesn't
+	// carry (AllowedTools, Metadata, Compatibility). If the skill directory
+	// already exists but load fails, refuse the write rather than silently
+	// clobber those fields with zero values — kocoro's `allowed-tools:
+	// http file_read` is security-critical and must not be dropped on a
+	// transient FS error.
+	var skillToWrite skills.Skill
+	skillExistsOnDisk := false
+	if s.deps != nil && s.deps.ShannonDir != "" {
+		if _, statErr := os.Stat(filepath.Join(s.deps.ShannonDir, "skills", name, "SKILL.md")); statErr == nil {
+			skillExistsOnDisk = true
+		}
+	}
+	sources, err := s.skillSources()
+	if err != nil {
+		if skillExistsOnDisk {
+			writeError(w, http.StatusServiceUnavailable,
+				fmt.Sprintf("cannot resolve skill sources to preserve existing fields: %v", err))
+			return
+		}
+	} else {
+		list, loadErr := skills.LoadSkills(sources...)
+		if loadErr != nil && skillExistsOnDisk {
+			writeError(w, http.StatusServiceUnavailable,
+				fmt.Sprintf("cannot load existing skill %q (refusing to clobber AllowedTools/Metadata): %v", name, loadErr))
+			return
+		}
+		for _, existing := range list {
+			if existing.Name == name {
+				skillToWrite = *existing
+				break
+			}
+		}
+	}
+	skillToWrite.Name = name
+	skillToWrite.Description = req.Description
+	skillToWrite.Prompt = req.Prompt
+	skillToWrite.License = req.License
+	if req.StickyInstructions != nil {
+		skillToWrite.StickyInstructions = *req.StickyInstructions
+	}
+	if req.StickySnippet != nil {
+		skillToWrite.StickySnippetOverride = strings.TrimSpace(*req.StickySnippet)
+	}
+	if err := skills.WriteGlobalSkill(s.deps.ShannonDir, &skillToWrite); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

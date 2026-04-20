@@ -20,6 +20,10 @@ type BashTool struct {
 	ExtraSafeCommands []string
 	CWD               string // working directory for commands; if empty and no session CWD is set, bash runs in an isolated temp dir (NOT the process cwd)
 	MaxOutput         int    // max output chars; 0 = use default 30000
+	// DefaultTimeoutSecs is the fallback timeout (in seconds) when the
+	// per-call `timeout` arg is absent or zero. 0 = use built-in default 120.
+	// Wired from config.Tools.BashTimeout by register.go.
+	DefaultTimeoutSecs int
 	// SecretsStore, when set, supplies per-skill API keys as env vars
 	// for skills activated via use_skill in the current run. Values are
 	// fetched lazily at execution time and scoped to bash child processes
@@ -86,7 +90,11 @@ func (t *BashTool) Run(ctx context.Context, argsJSON string) (agent.ToolResult, 
 		return agent.ToolResult{Content: fmt.Sprintf("invalid arguments: %v", err), IsError: true}, nil
 	}
 
+	// Timeout precedence: per-call args > tool default (from config) > 120s fallback.
 	timeout := 120 * time.Second
+	if t.DefaultTimeoutSecs > 0 {
+		timeout = time.Duration(t.DefaultTimeoutSecs) * time.Second
+	}
 	if args.Timeout > 0 {
 		timeout = time.Duration(args.Timeout) * time.Second
 	}

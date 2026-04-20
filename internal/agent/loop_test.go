@@ -2809,6 +2809,60 @@ func TestAgentLoop_CloudDelegateLock(t *testing.T) {
 	})
 }
 
+// TestCoreRules_EmptyResultRule_KeepsSearchCase verifies that the
+// narrowed empty-result rule keeps the canonical case intact: grep/glob
+// and similar search-family queries returning zero matches are "the
+// answer" and must not be retried. This is load-bearing for codebase
+// exploration where most queries naturally return zero on misses.
+func TestCoreRules_EmptyResultRule_KeepsSearchCase(t *testing.T) {
+	wantSubstrings := []string{
+		"search/filesystem",        // names the preserved case
+		"IS the answer",            // the canonical outcome for search
+		"grep", "glob",             // concrete tool examples reach the agent
+	}
+	for _, s := range wantSubstrings {
+		if !strings.Contains(coreOperationalRules, s) {
+			t.Errorf("empty-result rule missing search-case substring %q", s)
+		}
+	}
+}
+
+// TestCoreRules_EmptyResultRule_AddsScopeCase verifies the narrowed rule
+// adds the configured-API case: empty on the default scope may be a
+// scope artifact, so ONE focused diversification (e.g. list_calendars
+// after a blank get_events) is permitted before concluding "not found".
+// This is the Task 3 vs Task 5 benchmark split the plan calls out.
+func TestCoreRules_EmptyResultRule_AddsScopeCase(t *testing.T) {
+	wantSubstrings := []string{
+		"scoped API",               // names the new case
+		"scope artifact",           // the framing used to distinguish from real empty
+		"list_calendars",           // concrete diversification example (Task 3→5)
+		"ONE",                      // permits exactly one diversification, not N
+	}
+	for _, s := range wantSubstrings {
+		if !strings.Contains(coreOperationalRules, s) {
+			t.Errorf("empty-result rule missing scope-case substring %q", s)
+		}
+	}
+}
+
+// TestCoreRules_EmptyResultRule_NoContradictoryOldPhrasing verifies that
+// the old unqualified "do NOT retry. The absence of results IS the answer."
+// does NOT appear verbatim anywhere in the composed prompt. That wording
+// was over-general and conflicts with the new retry-vs-diversify rule for
+// scoped APIs. The new rule is the sole source of truth on empty results.
+func TestCoreRules_EmptyResultRule_NoContradictoryOldPhrasing(t *testing.T) {
+	forbidden := `do NOT retry. The absence of results IS the answer.`
+	if strings.Contains(coreOperationalRules, forbidden) {
+		t.Errorf("found old unqualified phrasing in coreOperationalRules — the new rule must replace it, not live alongside it")
+	}
+	// Also check the default-composed system prompt.
+	defaultComposed := defaultPersona + coreOperationalRules
+	if strings.Contains(defaultComposed, forbidden) {
+		t.Errorf("found old unqualified phrasing in defaultComposed system prompt")
+	}
+}
+
 func TestNamedAgentPromptIncludesCoreRules(t *testing.T) {
 	// coreOperationalRules must contain key behavioral constraints.
 	// If any of these are missing, named agents lose critical guardrails.

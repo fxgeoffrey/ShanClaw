@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -108,6 +109,28 @@ func (s *Service) Start(ctx context.Context) error {
 		}
 	}
 	s.status.Store(int32(StatusInitializing))
+
+	// Cold-start bootstrap (cloud-mode only): if no bundle has ever been
+	// installed on this machine, pull one synchronously here BEFORE starting
+	// the supervisor. The tlm sidecar's /health returns ready=false until a
+	// bundle is loaded, and Supervisor.WaitReady only calls onReady once
+	// ready=true; without a pre-installed bundle the puller goroutine never
+	// starts and Service goes Degraded after the restart budget exhausts.
+	// Passing sidecar=nil to the bootstrap Puller makes reloadSidecar a
+	// no-op (bundle.go) — the sidecar we spawn next will see the installed
+	// bundle on its first /health probe. Failure is non-fatal: the sidecar
+	// will still try to spawn, likely go Degraded, and callers check
+	// Status() and fall back — no worse than pre-fix behavior.
+	if s.cfg.Provider == "cloud" {
+		if _, err := os.Readlink(filepath.Join(s.cfg.BundleRoot, "current")); err != nil {
+			boot := NewPuller(s.cfg, nil, s.audit)
+			if tickErr := boot.tick(ctx); tickErr != nil {
+				s.logAudit("memory_bootstrap_pull_failed", map[string]any{"reason": tickErr.Error()})
+			} else {
+				s.logAudit("memory_bootstrap_pull_ok", map[string]any{})
+			}
+		}
+	}
 
 	// Spawn the supervisor goroutine. It owns the full spawn →
 	// wait-ready → wait → backoff loop. Cold-start failures (failed first

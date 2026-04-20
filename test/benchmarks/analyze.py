@@ -13,16 +13,25 @@ def main(session_id, task_num, task_name):
         return
     sess = json.loads(sess_file.read_text())
 
-    # tool calls for this session, in time order
+    # Audit rows for this session, partitioned into tool calls vs non-tool
+    # events (e.g. {"event":"force_stop"}). Non-tool events are tracked
+    # separately so they don't pollute tool_calls/tool_dist/streaks.
     tool_calls = []
+    events = []
     with audit.open() as f:
         for line in f:
             try:
                 r = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if r.get("session_id") == session_id:
+            if r.get("session_id") != session_id:
+                continue
+            if r.get("tool_name"):
                 tool_calls.append(r)
+            elif r.get("event"):
+                events.append(r)
+
+    detector_force_stop = any(e.get("event") == "force_stop" for e in events)
 
     tools = [t.get("tool_name", "?") for t in tool_calls]
     tool_counts = Counter(tools)
@@ -74,8 +83,18 @@ def main(session_id, task_num, task_name):
                         break
             break
 
-    # Detect maxIter synthesis by the structured report format in the final message.
-    looks_synthesized = "**Task**" in last_assistant and "**Done**" in last_assistant
+    # Final-message heuristic: both the maxIter path and the new
+    # detector-driven force-stop path emit the same Task/Done/Pending/
+    # Partial-answer shape (PR #86 unified them for UX). Disambiguate
+    # with the audit-log event tag: a force_stop event means detector
+    # path; its absence when the report shape is present means maxIter.
+    looks_structured = "**Task**" in last_assistant and "**Done**" in last_assistant
+    if looks_structured and detector_force_stop:
+        synthesis_reason = "detector_force_stop"
+    elif looks_structured:
+        synthesis_reason = "maxiter"
+    else:
+        synthesis_reason = None
 
     report = {
         "task": task_num,
@@ -90,9 +109,10 @@ def main(session_id, task_num, task_name):
         "total_tokens": usage.get("total_tokens", 0),
         "cost_usd": usage.get("cost_usd", 0),
         "cache_read_tokens": usage.get("cache_read_tokens", 0),
-        "maxiter_synthesis_detected": looks_synthesized,
+        "detector_force_stop": detector_force_stop,
+        "synthesis_reason": synthesis_reason,
         "last_assistant_preview": last_assistant[:400],
-        "tool_sequence": [f"{i+1}. {t['tool_name']}: {(t.get('input_summary') or '')[:80]}" for i, t in enumerate(tool_calls)][:40],
+        "tool_sequence": [f"{i+1}. {t.get('tool_name', '?')}: {(t.get('input_summary') or '')[:80]}" for i, t in enumerate(tool_calls)][:40],
     }
     print(json.dumps(report, ensure_ascii=False, indent=2))
 

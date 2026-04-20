@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/Kocoro-lab/ShanClaw/internal/audit"
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
+	"github.com/Kocoro-lab/ShanClaw/internal/config"
 	"github.com/Kocoro-lab/ShanClaw/internal/sync"
 )
 
@@ -26,6 +29,9 @@ var sessionsSyncCmd = &cobra.Command{
 	Use:   "sync",
 	Short: "Upload modified sessions to Shannon Cloud (opt-in via sync.enabled)",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if _, err := config.Load(); err != nil {
+			return fmt.Errorf("config: %w", err)
+		}
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return fmt.Errorf("locate home dir: %w", err)
@@ -70,7 +76,7 @@ var sessionsSyncCmd = &cobra.Command{
 			ClientVer: ver,
 			Uploader:  uploader,
 			Loader:    loader,
-			Audit:     &auditAdapter{logger: auditLogger},
+			Audit:     &auditAdapter{logger: auditLogger, stdout: cmd.OutOrStdout()},
 			Now:       time.Now,
 		}
 		return sync.Run(context.Background(), deps)
@@ -80,13 +86,16 @@ var sessionsSyncCmd = &cobra.Command{
 // auditAdapter bridges *audit.AuditLogger (which logs structured AuditEntry
 // rows) to sync.AuditLogger (event + free-form fields). The fields map is
 // JSON-encoded into AuditEntry.InputSummary so the JSON-lines audit log keeps
-// a single shape.
+// a single shape. When stdout is non-nil, a human-readable one-line summary
+// of session_sync events is also printed so CLI users see progress on exit
+// (sync.Run itself is silent by design).
 type auditAdapter struct {
 	logger *audit.AuditLogger
+	stdout io.Writer
 }
 
 func (a *auditAdapter) Log(event string, fields map[string]any) {
-	if a == nil || a.logger == nil {
+	if a == nil {
 		return
 	}
 	summary := ""
@@ -95,12 +104,44 @@ func (a *auditAdapter) Log(event string, fields map[string]any) {
 			summary = string(b)
 		}
 	}
-	a.logger.Log(audit.AuditEntry{
-		Timestamp:    time.Now(),
-		ToolName:     event,
-		InputSummary: summary,
-		Decision:     "info",
-	})
+	if a.logger != nil {
+		a.logger.Log(audit.AuditEntry{
+			Timestamp:    time.Now(),
+			ToolName:     event,
+			InputSummary: summary,
+			Decision:     "info",
+		})
+	}
+	if a.stdout != nil && event == "session_sync" {
+		fmt.Fprintln(a.stdout, formatSyncSummary(fields))
+	}
+}
+
+// formatSyncSummary renders a single-line human-readable view of a
+// session_sync audit event. The field names mirror sync.Run's audit call so
+// any future fields added there will show up as "key=<value>" tail items.
+func formatSyncSummary(fields map[string]any) string {
+	outcome, _ := fields["outcome"].(string)
+	if outcome == "" {
+		outcome = "unknown"
+	}
+	sent, _ := fields["sent"].(int)
+	accepted, _ := fields["accepted"].(int)
+	rtx, _ := fields["rejected_transient"].(int)
+	rpm, _ := fields["rejected_permanent"].(int)
+	carry, _ := fields["failed_carryover"].(int)
+	reason, _ := fields["reason"].(string)
+	transport, _ := fields["transport_error"].(bool)
+
+	parts := []string{fmt.Sprintf("sync: outcome=%s sent=%d accepted=%d rejected_transient=%d rejected_permanent=%d failed_carryover=%d",
+		outcome, sent, accepted, rtx, rpm, carry)}
+	if reason != "" {
+		parts = append(parts, "reason="+reason)
+	}
+	if transport {
+		parts = append(parts, "transport_error=true")
+	}
+	return strings.Join(parts, " ")
 }
 
 func readBuildInfo() string {

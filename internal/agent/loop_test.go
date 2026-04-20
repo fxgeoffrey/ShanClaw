@@ -556,14 +556,27 @@ func TestAgentLoop_RepeatableToolsExempt(t *testing.T) {
 	}
 }
 
-// TestAgentLoop_GracefulMaxIterExit verifies graceful degradation on iteration limit.
+// TestAgentLoop_GracefulMaxIterExit verifies that on maxIter hit, the loop
+// issues a synthesis turn (no tools) to produce a structured partial report,
+// and that the run status reflects Partial=true.
 func TestAgentLoop_GracefulMaxIterExit(t *testing.T) {
-	callCount := 0
+	var (
+		toolCallCount int
+		synthCalled   bool
+	)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), "iteration safety cap") {
+			synthCalled = true
+			json.NewEncoder(w).Encode(nativeResponse(
+				"**Task** — complex task\n**Done** — 3 steps\n**Partial answer** — done what I could.",
+				"end_turn", nil, 20, 15))
+			return
+		}
+		toolCallCount++
 		json.NewEncoder(w).Encode(nativeResponse(
-			fmt.Sprintf("Step %d done.", callCount), "tool_use",
-			toolCall("mock_tool", fmt.Sprintf(`{"step":%d}`, callCount)), 10, 5))
+			fmt.Sprintf("Step %d done.", toolCallCount), "tool_use",
+			toolCall("mock_tool", fmt.Sprintf(`{"step":%d}`, toolCallCount)), 10, 5))
 	}))
 	defer server.Close()
 
@@ -573,12 +586,14 @@ func TestAgentLoop_GracefulMaxIterExit(t *testing.T) {
 	loop := NewAgentLoop(gw, reg, "medium", "", 3, 2000, 200, nil, nil, nil)
 
 	result, _, err := loop.Run(context.Background(), "complex task", nil, nil)
-	// Should return ErrMaxIterReached, not a generic error
 	if !errors.Is(err, ErrMaxIterReached) {
 		t.Fatalf("expected ErrMaxIterReached, got: %v", err)
 	}
-	if result != "Step 3 done." {
-		t.Errorf("expected last text from graceful exit, got %q", result)
+	if !synthCalled {
+		t.Fatal("expected synthesis turn to be invoked after maxIter hit")
+	}
+	if !strings.Contains(result, "**Partial answer**") {
+		t.Errorf("expected synthesis-style report in result, got %q", result)
 	}
 	status := loop.LastRunStatus()
 	if !status.Partial {
@@ -587,6 +602,163 @@ func TestAgentLoop_GracefulMaxIterExit(t *testing.T) {
 	if status.FailureCode != runstatus.CodeIterationLimit {
 		t.Errorf("expected iteration-limit failure code, got %q", status.FailureCode)
 	}
+}
+
+// TestMaxIterExit_EmptyLastText_StillSynthesizes: pure tool-use chain with no
+// text blocks in any turn. Without synthesis, the legacy path returned "".
+// With synthesis, the model still produces a partial report. Uses unique args
+// per call so the loop detector does not force-stop before maxIter is hit.
+func TestMaxIterExit_EmptyLastText_StillSynthesizes(t *testing.T) {
+	var toolCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), "iteration safety cap") {
+			json.NewEncoder(w).Encode(nativeResponse(
+				"**Task** — recon\n**Done** — ran 3 tools\n**Partial answer** — got partial data.",
+				"end_turn", nil, 15, 10))
+			return
+		}
+		toolCount++
+		// Pure tool_use: no text content; unique args to avoid loop-detector.
+		json.NewEncoder(w).Encode(nativeResponse(
+			"", "tool_use", toolCall("mock_tool", fmt.Sprintf(`{"i":%d}`, toolCount)), 10, 5))
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&mockTool{name: "mock_tool"})
+	loop := NewAgentLoop(gw, reg, "medium", "", 3, 2000, 200, nil, nil, nil)
+
+	result, _, err := loop.Run(context.Background(), "recon this host", nil, nil)
+	if !errors.Is(err, ErrMaxIterReached) {
+		t.Fatalf("expected ErrMaxIterReached, got: %v", err)
+	}
+	if result == "" {
+		t.Fatal("expected synthesis text even though no turn ever produced text")
+	}
+	if !strings.Contains(result, "**Partial answer**") {
+		t.Errorf("expected structured report, got %q", result)
+	}
+	status := loop.LastRunStatus()
+	if !status.Partial {
+		t.Error("expected Partial=true on synthesis success")
+	}
+}
+
+// TestMaxIterExit_SynthesisFailure_FallsBack: synthesis HTTP 500, verify we
+// fall back to legacy behavior — lastText when populated, empty+Partial=true
+// when not. Both cases must still return ErrMaxIterReached.
+func TestMaxIterExit_SynthesisFailure_FallsBack(t *testing.T) {
+	t.Run("lastText populated", func(t *testing.T) {
+		var toolCount int
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			if strings.Contains(string(body), "iteration safety cap") {
+				http.Error(w, "synthesis boom", http.StatusInternalServerError)
+				return
+			}
+			toolCount++
+			json.NewEncoder(w).Encode(nativeResponse(
+				fmt.Sprintf("Step %d.", toolCount), "tool_use",
+				toolCall("mock_tool", fmt.Sprintf(`{"i":%d}`, toolCount)), 10, 5))
+		}))
+		defer server.Close()
+
+		gw := client.NewGatewayClient(server.URL, "")
+		reg := NewToolRegistry()
+		reg.Register(&mockTool{name: "mock_tool"})
+		loop := NewAgentLoop(gw, reg, "medium", "", 3, 2000, 200, nil, nil, nil)
+		result, _, err := loop.Run(context.Background(), "task", nil, nil)
+		if !errors.Is(err, ErrMaxIterReached) {
+			t.Fatalf("expected ErrMaxIterReached, got: %v", err)
+		}
+		if result != "Step 3." {
+			t.Errorf("expected fallback to lastText 'Step 3.', got %q", result)
+		}
+		if !loop.LastRunStatus().Partial {
+			t.Error("expected Partial=true")
+		}
+	})
+
+	t.Run("no lastText", func(t *testing.T) {
+		var toolCount int
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			if strings.Contains(string(body), "iteration safety cap") {
+				http.Error(w, "synthesis boom", http.StatusInternalServerError)
+				return
+			}
+			toolCount++
+			// No text ever: pure tool_use; unique args avoid loop-detector.
+			json.NewEncoder(w).Encode(nativeResponse(
+				"", "tool_use", toolCall("mock_tool", fmt.Sprintf(`{"i":%d}`, toolCount)), 10, 5))
+		}))
+		defer server.Close()
+
+		gw := client.NewGatewayClient(server.URL, "")
+		reg := NewToolRegistry()
+		reg.Register(&mockTool{name: "mock_tool"})
+		loop := NewAgentLoop(gw, reg, "medium", "", 3, 2000, 200, nil, nil, nil)
+		result, _, err := loop.Run(context.Background(), "task", nil, nil)
+		if errors.Is(err, ErrMaxIterReached) {
+			t.Fatalf("expected generic exceeded error (synthesis + lastText both failed), got ErrMaxIterReached")
+		}
+		if err == nil {
+			t.Fatal("expected non-nil error")
+		}
+		if result != "" {
+			t.Errorf("expected empty result, got %q", result)
+		}
+		status := loop.LastRunStatus()
+		if !status.Partial {
+			t.Error("expected Partial=true even on empty-text path (Bug D fix)")
+		}
+		if status.FailureCode != runstatus.CodeIterationLimit {
+			t.Errorf("expected iteration-limit failure code, got %q", status.FailureCode)
+		}
+	})
+}
+
+func TestTopTools(t *testing.T) {
+	t.Run("nil map", func(t *testing.T) {
+		if got := topTools(nil, 5); got != "none" {
+			t.Errorf("expected 'none', got %q", got)
+		}
+	})
+	t.Run("empty map", func(t *testing.T) {
+		if got := topTools(map[string]int{}, 5); got != "none" {
+			t.Errorf("expected 'none', got %q", got)
+		}
+	})
+	t.Run("single entry", func(t *testing.T) {
+		if got := topTools(map[string]int{"bash": 3}, 5); got != "bash×3" {
+			t.Errorf("expected 'bash×3', got %q", got)
+		}
+	})
+	t.Run("descending by count", func(t *testing.T) {
+		got := topTools(map[string]int{"bash": 12, "http": 3, "browser_navigate": 8}, 5)
+		want := "bash×12, browser_navigate×8, http×3"
+		if got != want {
+			t.Errorf("want %q, got %q", want, got)
+		}
+	})
+	t.Run("tie-break name ascending", func(t *testing.T) {
+		got := topTools(map[string]int{"zebra": 2, "apple": 2, "mango": 2}, 5)
+		want := "apple×2, mango×2, zebra×2"
+		if got != want {
+			t.Errorf("want %q, got %q", want, got)
+		}
+	})
+	t.Run("truncation with remainder suffix", func(t *testing.T) {
+		got := topTools(map[string]int{
+			"a": 5, "b": 4, "c": 3, "d": 2, "e": 1, "f": 1, "g": 1,
+		}, 3)
+		want := "a×5, b×4, c×3 (+4 more)"
+		if got != want {
+			t.Errorf("want %q, got %q", want, got)
+		}
+	})
 }
 
 func TestEffectiveMaxIter(t *testing.T) {

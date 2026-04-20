@@ -1331,7 +1331,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	// Temperature, ReasoningEffort) and substitutes a neutral fallback when
 	// the model returns empty text, so callers never see a blank bubble.
 	// Tools are intentionally omitted to force a text-only response.
-	runForceStopTurn := func(reason string) (string, error) {
+	runForceStopTurn := func(reason string, fallback string) (string, error) {
 		messages = append(messages, client.Message{
 			Role:    "user",
 			Content: client.NewTextContent("[system] " + reason),
@@ -1385,7 +1385,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 
 		text := strings.TrimSpace(finalResp.OutputText)
 		if text == "" {
-			text = "I hit the loop limit after repeated failed attempts and couldn't produce a final answer."
+			text = fallback
 		}
 		messages = append(messages, client.Message{
 			Role:    "assistant",
@@ -1401,6 +1401,28 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			a.handler.OnText(text)
 		}
 		return text, nil
+	}
+
+	// buildMaxIterReason produces the report-style user message for the
+	// maxIter synthesis turn. Different shape from the loop-detector force
+	// stop: that asks the model to "give final answer now", this asks it to
+	// summarize what happened and output a partial best-effort response.
+	// Captures iterationCount/toolsUsed/lastToolName so values reflect the
+	// state at the moment the cap was hit, not when the closure was defined.
+	buildMaxIterReason := func() string {
+		return fmt.Sprintf(
+			"You've reached the iteration safety cap (N=%d turns).\n"+
+				"Tools used: %s. Last tool: %s.\n"+
+				"Do not request any more tools.\n\n"+
+				"Report in this structure. Skip sections if not applicable:\n\n"+
+				"**Task** — What the user asked (1 line).\n"+
+				"**Done** — What you accomplished so far (bullets, with concrete findings).\n"+
+				"**Pending** — What's still missing (bullets).\n"+
+				"**Partial answer** — Your best-effort response given what you've gathered.\n\n"+
+				"If the user's question is simple and you already have the answer from "+
+				"tool results, just answer it directly — skip the structure.",
+			iterationCount, topTools(toolsUsed, 5), lastToolName,
+		)
 	}
 
 	boundaryText := func(boundary MetaBoundary) string {
@@ -2673,7 +2695,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 
 		// Handle loop detection results
 		if worstAction == LoopForceStop {
-			text, err := runForceStopTurn(worstMsg)
+			text, err := runForceStopTurn(worstMsg, "I hit the loop limit after repeated failed attempts and couldn't produce a final answer.")
 			if err != nil {
 				return "", usage, err
 			}
@@ -2683,7 +2705,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			nudgeCount++
 			if nudgeCount >= maxNudges {
 				// Escalate: too many nudges without behavior change → force stop
-				text, err := runForceStopTurn("Multiple approaches have failed. Provide your final answer now with what you have.")
+				text, err := runForceStopTurn("Multiple approaches have failed. Provide your final answer now with what you have.", "I hit the loop limit after repeated failed attempts and couldn't produce a final answer.")
 				if err != nil {
 					return "", usage, err
 				}
@@ -2746,8 +2768,23 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		a.maybeCheckpoint(ctx)
 	}
 
-	// Graceful degradation: return last text with a sentinel error so the
-	// caller knows the loop was truncated (not a clean completion).
+	// Graceful degradation: give the model one final non-tool turn to
+	// synthesize a partial report from what it gathered. Pure tool-call
+	// chains (browser/research workflows) never update lastText, so without
+	// this synthesis users see either stale mid-reasoning or an empty
+	// string after many productive tool calls.
+	text, synthErr := runForceStopTurn(
+		buildMaxIterReason(),
+		fmt.Sprintf("I reached the iteration safety cap after %d turns and couldn't finalize a report.", iterationCount),
+	)
+	if synthErr == nil {
+		// runForceStopTurn already handled: status (CodeIterationLimit,
+		// Partial=true), message append, OnText handler, checkpoint.
+		return text, usage, ErrMaxIterReached
+	}
+
+	// Synthesis failed (LLM error, context cancel, etc.). Fall back to
+	// the legacy behavior: return whatever lastText we captured.
 	if lastText != "" {
 		messages = append(messages, client.Message{
 			Role:    "assistant",
@@ -2758,8 +2795,11 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		setRunStatus(runstatus.CodeIterationLimit, true)
 		return lastText, usage, ErrMaxIterReached
 	}
+
+	// Empty-text path: still a partial run, not a clean failure — N+ tool
+	// calls produced real state even if no synthesis landed.
 	captureRunMessages()
-	setRunStatus(runstatus.CodeIterationLimit, false)
+	setRunStatus(runstatus.CodeIterationLimit, true)
 	return "", usage, fmt.Errorf("agent loop exceeded %d iterations", a.effectiveMaxIter(toolsUsed))
 }
 
@@ -3803,4 +3843,40 @@ func (a *AgentLoop) ctxWithUsageEmit(ctx context.Context) context.Context {
 		return ctx
 	}
 	return WithUsageEmit(ctx, a.handler.OnUsage)
+}
+
+// topTools renders a tool-usage map as "name×count" entries sorted by count
+// descending (tie-break name ascending for determinism), capped at maxN with
+// a " (+K more)" suffix when truncated. Empty map returns "none".
+func topTools(counts map[string]int, maxN int) string {
+	if len(counts) == 0 {
+		return "none"
+	}
+	type entry struct {
+		name  string
+		count int
+	}
+	entries := make([]entry, 0, len(counts))
+	for name, c := range counts {
+		entries = append(entries, entry{name, c})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].count != entries[j].count {
+			return entries[i].count > entries[j].count
+		}
+		return entries[i].name < entries[j].name
+	})
+	n := len(entries)
+	if maxN > 0 && n > maxN {
+		n = maxN
+	}
+	parts := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		parts = append(parts, fmt.Sprintf("%s×%d", entries[i].name, entries[i].count))
+	}
+	out := strings.Join(parts, ", ")
+	if remaining := len(entries) - n; remaining > 0 {
+		out += fmt.Sprintf(" (+%d more)", remaining)
+	}
+	return out
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -108,6 +109,21 @@ func (s *Service) Start(ctx context.Context) error {
 		}
 	}
 	s.status.Store(int32(StatusInitializing))
+
+	// Cold-start bootstrap (cloud-mode only): sidecar reports ready=false
+	// until a bundle exists, but the puller only starts from onReady. Break
+	// the cycle by pulling synchronously here when `current` is missing or
+	// dangling. os.Stat (not Readlink) so a dangling link triggers bootstrap.
+	if s.cfg.Provider == "cloud" {
+		if _, err := os.Stat(filepath.Join(s.cfg.BundleRoot, "current")); err != nil {
+			boot := NewPuller(s.cfg, nil, s.audit)
+			if tickErr := boot.tick(ctx); tickErr != nil {
+				s.logAudit("memory_bootstrap_pull_failed", map[string]any{"reason": tickErr.Error()})
+			} else {
+				s.logAudit("memory_bootstrap_pull_ok", map[string]any{})
+			}
+		}
+	}
 
 	// Spawn the supervisor goroutine. It owns the full spawn →
 	// wait-ready → wait → backoff loop. Cold-start failures (failed first

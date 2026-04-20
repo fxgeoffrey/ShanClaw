@@ -2797,10 +2797,12 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	}
 
 	// Empty-text path: still a partial run, not a clean failure — N+ tool
-	// calls produced real state even if no synthesis landed.
+	// calls produced real state even if no synthesis landed. Wrap with the
+	// sentinel so callers' errors.Is(err, ErrMaxIterReached) catch this
+	// branch the same way they catch the other two maxIter exit paths.
 	captureRunMessages()
 	setRunStatus(runstatus.CodeIterationLimit, true)
-	return "", usage, fmt.Errorf("agent loop exceeded %d iterations", a.effectiveMaxIter(toolsUsed))
+	return "", usage, fmt.Errorf("agent loop exceeded %d iterations: %w", a.effectiveMaxIter(toolsUsed), ErrMaxIterReached)
 }
 
 // completeWithRetry calls client.Complete with retry+backoff for transient errors.

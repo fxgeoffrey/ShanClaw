@@ -701,11 +701,10 @@ func TestMaxIterExit_SynthesisFailure_FallsBack(t *testing.T) {
 		reg.Register(&mockTool{name: "mock_tool"})
 		loop := NewAgentLoop(gw, reg, "medium", "", 3, 2000, 200, nil, nil, nil)
 		result, _, err := loop.Run(context.Background(), "task", nil, nil)
-		if errors.Is(err, ErrMaxIterReached) {
-			t.Fatalf("expected generic exceeded error (synthesis + lastText both failed), got ErrMaxIterReached")
-		}
-		if err == nil {
-			t.Fatal("expected non-nil error")
+		// All three maxIter exit paths must wrap ErrMaxIterReached so callers
+		// can classify partial-cap outcomes consistently via errors.Is.
+		if !errors.Is(err, ErrMaxIterReached) {
+			t.Fatalf("expected err wrapping ErrMaxIterReached, got: %v", err)
 		}
 		if result != "" {
 			t.Errorf("expected empty result, got %q", result)

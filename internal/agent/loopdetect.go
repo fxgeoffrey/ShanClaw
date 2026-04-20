@@ -138,6 +138,59 @@ var semiRepeatableProdTools = map[string]bool{
 	"bash": true,
 }
 
+// readVerbs classifies MCP tool names by the conventional verb word.
+// Only tools whose primary verb (position 0, 1, or 2 after tokenizing on
+// _ or -) is in this set are eligible for batch-tolerance. Everything
+// else — create, update, modify, delete, remove, send, add, insert,
+// append, archive, move, copy, rename, upload, download, execute, run,
+// request, etc. — STAYS under the count-based NoProgress guard because
+// a loop of write calls with unique arguments is exactly what NoProgress
+// defends against (the permission engine does not gate MCP calls, and
+// MCPTool.RequiresApproval() is always false).
+var readVerbs = map[string]bool{
+	"get":      true,
+	"list":     true,
+	"search":   true,
+	"query":    true,
+	"fetch":    true,
+	"read":     true,
+	"describe": true,
+	"find":     true,
+	"count":    true,
+	"head":     true,
+	"show":     true,
+	"resolve":  true,
+	"lookup":   true,
+	"inspect":  true,
+}
+
+// isReadMCPName reports whether an MCP tool name looks like a read-only
+// operation. Tokenizes on both '_' and '-', then checks the first three
+// tokens for a known read verb. Matching is case-insensitive. Handles:
+//
+//   - direct prefix:        list_calendars, get_events
+//   - 2-token namespaced:   notion_list_pages, API-query-data-source
+//   - 3-token namespaced:   google_gmail_search_messages
+//
+// Fail-closed: names whose verb sits at position 3 or later (e.g.
+// `request_write_access_and_get_token`) are treated as writes so the
+// count-based guard stays engaged.
+func isReadMCPName(name string) bool {
+	tokens := strings.FieldsFunc(strings.ToLower(name), func(r rune) bool {
+		return r == '_' || r == '-'
+	})
+	limit := len(tokens)
+	if limit > 3 {
+		limit = 3
+	}
+	for i := 0; i < limit; i++ {
+		if readVerbs[tokens[i]] {
+			return true
+		}
+	}
+	return false
+}
+
 // NewLoopDetector creates a detector with production defaults.
 func NewLoopDetector() *LoopDetector {
 	return &LoopDetector{

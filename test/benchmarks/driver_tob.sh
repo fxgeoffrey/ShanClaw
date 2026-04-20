@@ -7,8 +7,8 @@ cd "$REPO_ROOT"
 RESULTS="${BENCHMARK_RESULTS_DIR:-/tmp/maxiter_tests/results_tob}"
 mkdir -p "$RESULTS"
 
-get_latest_session() {
-  ls -t ~/.shannon/sessions/*.json 2>/dev/null | head -1 | xargs -I{} basename {} .json
+session_set() {
+  ls ~/.shannon/sessions/*.json 2>/dev/null | xargs -I{} basename {} .json | sort
 }
 
 run_task() {
@@ -17,10 +17,24 @@ run_task() {
   date +"%Y-%m-%d %H:%M:%S" | tee -a "$RESULTS/driver.log"
 
   local stdout_file="$RESULTS/task${num}.stdout"
+  local before_file="$RESULTS/task${num}.sessions.before"
+  local after_file="$RESULTS/task${num}.sessions.after"
+  session_set > "$before_file"
+
   perl -e 'alarm shift; exec @ARGV' 480 shan -y "$prompt" >"$stdout_file" 2>&1
   local rc=$?
 
-  local sid=$(get_latest_session)
+  # New session attributable to this run = set-after minus set-before.
+  # Most-recent-by-mtime among the new ones avoids losing track under
+  # concurrent `shan` usage on the same machine.
+  session_set > "$after_file"
+  local sid
+  sid=$(comm -13 "$before_file" "$after_file" | while read -r s; do
+    printf '%s\t%s\n' "$(stat -f '%m' "$HOME/.shannon/sessions/$s.json" 2>/dev/null || echo 0)" "$s"
+  done | sort -n | tail -1 | awk '{print $2}')
+  if [ -z "$sid" ]; then
+    sid="NO_NEW_SESSION"
+  fi
   echo "session_id=$sid (exit=$rc)" | tee -a "$RESULTS/driver.log"
   echo "$sid" > "$RESULTS/task${num}.session_id"
   tail -5 "$stdout_file" | sed 's/^/  /' | tee -a "$RESULTS/driver.log"

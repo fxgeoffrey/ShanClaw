@@ -947,6 +947,67 @@ func TestLoopDetector_BrowserSameToolStillDetected(t *testing.T) {
 	}
 }
 
+// TestIsReadMCPName locks the read-verb whitelist used to populate
+// the loop detector's batchTolerant set. Read-only MCP tools must match
+// (eligible for uniqueness-gated NoProgress relief); write-capable tools
+// must NOT match (stay under the count-based guard), because the
+// permission engine does not gate MCP calls and a write loop with
+// unique arguments could otherwise create many remote records.
+func TestIsReadMCPName(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		// Direct read-verb prefix.
+		{"list_calendars", true},
+		{"get_events", true},
+		{"search_gmail_messages", true},
+		{"query_database", true},
+		{"fetch_profile", true},
+		{"describe_table", true},
+		{"find_files", true},
+		// Namespaced read-verbs (vendor prefix + separator + verb).
+		{"API-query-data-source", true},
+		{"google_gmail_search_messages", true},
+		{"notion_list_pages", true},
+		{"Notion_Search_Databases", true}, // case-insensitive
+		// Write verbs must stay OUT.
+		{"create_notion_page", false},
+		{"update_page_properties", false},
+		{"delete_event", false},
+		{"send_gmail_message", false},
+		{"modify_permissions", false},
+		{"remove_label", false},
+		{"insert_row", false},
+		{"append_content_to_page", false},
+		{"archive_thread", false},
+		// Namespaced writes must also stay out.
+		{"google_calendar_create_event", false},
+		{"notion_create_comment", false},
+		{"drive_upload_file", false},
+		// Ambiguous first-word cases where a read verb sits at position 1
+		// (the common "run <verb>" MCP pattern, e.g. Snowflake/ClickHouse
+		// `run_query` meaning SELECT). These count as read — if a server
+		// genuinely wants to flag writes, it should not embed a read-verb.
+		{"run_query", true}, // Snowflake/ClickHouse SELECT convention
+		// Ambiguous / unknown verbs with no read verb in first 3 tokens
+		// fail closed (stay out of batchTolerant).
+		{"execute_script", false},   // could modify state
+		{"transform_data", false},   // transforms imply change
+		{"process_batch", false},    // ambiguous
+		// Pathological: write name with a read-verb at position 4+ must
+		// NOT match (token scan stops at position 3).
+		{"request_write_access_and_get_token_afterwards", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isReadMCPName(tt.name); got != tt.want {
+				t.Errorf("isReadMCPName(%q) = %v, want %v", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestLoopDetector_NoProgress_BashUniqueArgs_NoNudge covers the Task 5
 // benchmark pattern: ~15 bash calls during a multi-step investigation, each
 // with distinct argsJSON. Pre-gate, this force-stops via maxNudges escalation.

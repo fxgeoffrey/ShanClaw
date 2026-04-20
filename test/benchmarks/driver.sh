@@ -8,9 +8,13 @@ cd "$REPO_ROOT"
 RESULTS="${BENCHMARK_RESULTS_DIR:-/tmp/maxiter_tests/results}"
 mkdir -p "$RESULTS"
 
-# capture session list before/after to identify the newly-created session
-get_latest_session() {
-  ls -t ~/.shannon/sessions/*.json 2>/dev/null | head -1 | xargs -I{} basename {} .json
+# session_set writes the basenames (without .json) of every session file
+# that currently exists to stdout, one per line, sorted. Used to diff
+# before/after so we can attribute the new session(s) to the current task
+# even when another `shan` process races us, or when the task exits
+# before persisting (in which case the diff is empty).
+session_set() {
+  ls ~/.shannon/sessions/*.json 2>/dev/null | xargs -I{} basename {} .json | sort
 }
 
 run_task() {
@@ -18,8 +22,10 @@ run_task() {
   echo "=== Task $num: $desc ===" | tee -a "$RESULTS/driver.log"
   date +"%Y-%m-%d %H:%M:%S" | tee -a "$RESULTS/driver.log"
 
-  local before=$(get_latest_session)
   local stdout_file="$RESULTS/task${num}.stdout"
+  local before_file="$RESULTS/task${num}.sessions.before"
+  local after_file="$RESULTS/task${num}.sessions.after"
+  session_set > "$before_file"
 
   if [ -n "$workdir" ]; then
     # modifying task: run in worktree
@@ -29,10 +35,19 @@ run_task() {
   fi
   local rc=$?
 
-  # Find the session_id created by this run (most recent after `before`)
-  local after=$(get_latest_session)
-  echo "session_id=$after (exit=$rc)" | tee -a "$RESULTS/driver.log"
-  echo "$after" > "$RESULTS/task${num}.session_id"
+  # New sessions attributable to this run = set-after minus set-before.
+  # Take the most recent by mtime among the new ones so concurrent `shan`
+  # processes on the same machine can't silently steal our session id.
+  session_set > "$after_file"
+  local new_session
+  new_session=$(comm -13 "$before_file" "$after_file" | while read -r sid; do
+    printf '%s\t%s\n' "$(stat -f '%m' "$HOME/.shannon/sessions/$sid.json" 2>/dev/null || echo 0)" "$sid"
+  done | sort -n | tail -1 | awk '{print $2}')
+  if [ -z "$new_session" ]; then
+    new_session="NO_NEW_SESSION"
+  fi
+  echo "session_id=$new_session (exit=$rc)" | tee -a "$RESULTS/driver.log"
+  echo "$new_session" > "$RESULTS/task${num}.session_id"
   tail -5 "$stdout_file" | sed 's/^/  /' | tee -a "$RESULTS/driver.log"
   echo "" | tee -a "$RESULTS/driver.log"
   sleep 2

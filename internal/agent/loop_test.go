@@ -2812,6 +2812,101 @@ func TestAgentLoop_CloudDelegateLock(t *testing.T) {
 	})
 }
 
+// TestCoreRules_EmptyResultRule_KeepsSearchCase verifies that the
+// narrowed empty-result rule keeps the canonical case intact: grep/glob
+// and similar search-family queries returning zero matches are "the
+// answer" and must not be retried. This is load-bearing for codebase
+// exploration where most queries naturally return zero on misses.
+func TestCoreRules_EmptyResultRule_KeepsSearchCase(t *testing.T) {
+	wantSubstrings := []string{
+		"search/filesystem",        // names the preserved case
+		"IS the answer",            // the canonical outcome for search
+		"grep", "glob",             // concrete tool examples reach the agent
+	}
+	for _, s := range wantSubstrings {
+		if !strings.Contains(coreOperationalRules, s) {
+			t.Errorf("empty-result rule missing search-case substring %q", s)
+		}
+	}
+}
+
+// TestCoreRules_EmptyResultRule_AddsDiversificationCase verifies the
+// narrowed rule adds the list-and-enumerate case (Calendar/Drive/Notion/mail
+// with default scope). Empty on the default scope may be a scope artifact,
+// so ONE focused diversification (e.g. list_calendars after a blank
+// get_events) is permitted before concluding "not found". This is the
+// Task 3 vs Task 5 benchmark split the plan calls out.
+func TestCoreRules_EmptyResultRule_AddsDiversificationCase(t *testing.T) {
+	wantSubstrings := []string{
+		"list-and-enumerate semantics", // names the new case
+		"scope artifact",               // distinguishes from real empty
+		"list_calendars",               // concrete example (Task 3 → Task 5)
+		"ONE",                          // permits exactly one diversification
+		"Google Calendar",              // explicit integration list (no broad "external APIs")
+		"Notion",
+	}
+	for _, s := range wantSubstrings {
+		if !strings.Contains(coreOperationalRules, s) {
+			t.Errorf("empty-result rule missing substring %q", s)
+		}
+	}
+}
+
+// TestCoreRules_EmptyResultRule_ProtectsUserSpecifiedScope pins the
+// Codex review finding: when the user explicitly names a scope (mailbox,
+// calendar, folder, specific resource), an empty result MUST be
+// respected as the answer. The diversification rule must NOT encourage
+// the model to cross-account/folder-hunt past the user's contract.
+func TestCoreRules_EmptyResultRule_ProtectsUserSpecifiedScope(t *testing.T) {
+	wantSubstrings := []string{
+		"user explicitly named",     // names the protected case
+		"user-specified contract",   // frames the boundary
+	}
+	for _, s := range wantSubstrings {
+		if !strings.Contains(coreOperationalRules, s) {
+			t.Errorf("empty-result rule missing user-scope-protection substring %q", s)
+		}
+	}
+}
+
+// TestCoreRules_EmptyResultRule_ExcludesHTTPTool pins the Codex review
+// finding: the http tool legitimately returns [] / {} / 204 for the
+// exact endpoint the user asked about. The rule must explicitly
+// restrict diversification to integrations with list-and-enumerate
+// semantics AND must name the http tool as an empty-is-the-answer case,
+// so the model does not repurpose scope-hunting for arbitrary HTTP.
+func TestCoreRules_EmptyResultRule_ExcludesHTTPTool(t *testing.T) {
+	// Must name http explicitly in the "empty IS the answer" column.
+	if !strings.Contains(coreOperationalRules, "arbitrary HTTP endpoints") {
+		t.Error("empty-result rule should explicitly name 'arbitrary HTTP endpoints' as an empty-is-the-answer case")
+	}
+	if !strings.Contains(coreOperationalRules, "http tool") {
+		t.Error("empty-result rule should name the http tool by tool identifier")
+	}
+	// Must NOT contain the over-broad "external APIs" framing the
+	// previous draft used — that phrasing sweeps http in.
+	if strings.Contains(coreOperationalRules, "external APIs") {
+		t.Errorf("empty-result rule still contains the over-broad 'external APIs' phrasing; should be replaced with named integrations")
+	}
+}
+
+// TestCoreRules_EmptyResultRule_NoContradictoryOldPhrasing verifies that
+// the old unqualified "do NOT retry. The absence of results IS the answer."
+// does NOT appear verbatim anywhere in the composed prompt. That wording
+// was over-general and conflicts with the new retry-vs-diversify rule for
+// scoped APIs. The new rule is the sole source of truth on empty results.
+func TestCoreRules_EmptyResultRule_NoContradictoryOldPhrasing(t *testing.T) {
+	forbidden := `do NOT retry. The absence of results IS the answer.`
+	if strings.Contains(coreOperationalRules, forbidden) {
+		t.Errorf("found old unqualified phrasing in coreOperationalRules — the new rule must replace it, not live alongside it")
+	}
+	// Also check the default-composed system prompt.
+	defaultComposed := defaultPersona + coreOperationalRules
+	if strings.Contains(defaultComposed, forbidden) {
+		t.Errorf("found old unqualified phrasing in defaultComposed system prompt")
+	}
+}
+
 func TestNamedAgentPromptIncludesCoreRules(t *testing.T) {
 	// coreOperationalRules must contain key behavioral constraints.
 	// If any of these are missing, named agents lose critical guardrails.

@@ -175,7 +175,11 @@ When a tool returns an error, use the prefix to decide your response:
 - **[permission error]**: Access was denied. Escalate to the user — they may need to grant permissions or provide credentials.
 - **No prefix**: Treat as non-retryable unless the error message clearly suggests transience (e.g., "connection reset").
 
-When a tool returns no results but IsError is false (e.g., "no files matched", "no matches found"), this is a valid empty result — do NOT retry. The absence of results IS the answer.
+When a tool returns no results but IsError is false, distinguish "empty = the answer" from "empty = wrong implicit scope":
+- For search/filesystem queries (grep, glob, directory_list, file_read on a literal path), an empty result IS the answer. Do not retry.
+- For arbitrary HTTP endpoints (the http tool) or any specific resource the user explicitly named (e.g. "my work calendar", "this Notion database", "folder X"), an empty result IS the answer — the user-specified contract is the boundary. Do not broaden filters or query adjacent endpoints.
+- ONLY for integrations with list-and-enumerate semantics (Google Calendar, Google Drive, Gmail/mail, Notion) AND when the user did NOT name a specific scope, an empty result on the default or first-queried scope is often a scope artifact, not a definitive "no data" answer. In that case try ONE focused diversification: list sub-resources (e.g., list_calendars after get_events returns empty on the default calendar), broaden a filter that was implicitly narrow, or query an adjacent endpoint. If that also returns empty, conclude "not found" and state explicitly what you tried so the search boundary is verifiable.
+- Never retry the identical call with identical arguments on an empty result — that is superstition, not diagnosis.
 
 ## Tool Selection
 

@@ -985,16 +985,24 @@ func TestIsReadMCPName(t *testing.T) {
 		{"google_calendar_create_event", false},
 		{"notion_create_comment", false},
 		{"drive_upload_file", false},
-		// Ambiguous first-word cases where a read verb sits at position 1
-		// (the common "run <verb>" MCP pattern, e.g. Snowflake/ClickHouse
-		// `run_query` meaning SELECT). These count as read — if a server
-		// genuinely wants to flag writes, it should not embed a read-verb.
-		{"run_query", true}, // Snowflake/ClickHouse SELECT convention
-		// Ambiguous / unknown verbs with no read verb in first 3 tokens
-		// fail closed (stay out of batchTolerant).
-		{"execute_script", false},   // could modify state
-		{"transform_data", false},   // transforms imply change
-		{"process_batch", false},    // ambiguous
+		// Compound-verb names: a read verb AND a write verb in the first
+		// three tokens must return false — the write blacklist dominates.
+		// This is the defensive half of the heuristic: destructive suffixes
+		// must not sneak through on a position-0 read-verb match.
+		{"lookup_and_delete_all_records", false}, // lookup + delete → write
+		{"get_or_create_item", false},            // get + create → write
+		{"find_and_remove_entry", false},         // find + remove → write
+		{"list-and-archive", false},              // list + archive → write
+		// "run"/"execute" are in writeVerbs (fail-closed on ambiguous
+		// action verbs). Snowflake/ClickHouse "run_query" used to be
+		// accepted as SELECT convention, but a Medium review finding
+		// pointed out that ambiguity should fall on the safe side —
+		// the server is free to rename to "query_database" if it wants
+		// NoProgress relief.
+		{"run_query", false},       // run is a write verb (fail closed)
+		{"execute_script", false},  // execute is a write verb (fail closed)
+		{"transform_data", false},  // no read verb
+		{"process_batch", false},   // no read verb
 		// Pathological: write name with a read-verb at position 4+ must
 		// NOT match (token scan stops at position 3).
 		{"request_write_access_and_get_token_afterwards", false},

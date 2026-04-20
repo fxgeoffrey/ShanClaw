@@ -138,13 +138,16 @@ var semiRepeatableProdTools = map[string]bool{
 	"bash": true,
 }
 
-// readVerbs classifies MCP tool names by the conventional verb word.
-// Only tools whose primary verb (position 0, 1, or 2 after tokenizing on
-// _ or -) is in this set are eligible for batch-tolerance. Everything
-// else — create, update, modify, delete, remove, send, add, insert,
-// append, archive, move, copy, rename, upload, download, execute, run,
-// request, etc. — STAYS under the count-based NoProgress guard because
-// a loop of write calls with unique arguments is exactly what NoProgress
+// readVerbs and writeVerbs classify MCP tool names by the conventional
+// verb word. Only tools whose primary verb (position 0, 1, or 2 after
+// tokenizing on _ or -) is in readVerbs AND whose first three tokens
+// contain NO writeVerb are eligible for batch-tolerance. The write
+// blacklist is the defensive half of the heuristic: names like
+// lookup_and_delete_all_records, get_or_create_item,
+// find_and_remove_entry would otherwise sneak through on the position-0
+// read-verb match, despite an obvious destructive suffix. Anything
+// unmatched stays under the count-based NoProgress guard because a loop
+// of write calls with unique arguments is exactly what NoProgress
 // defends against (the permission engine does not gate MCP calls, and
 // MCPTool.RequiresApproval() is always false).
 var readVerbs = map[string]bool{
@@ -164,17 +167,37 @@ var readVerbs = map[string]bool{
 	"inspect":  true,
 }
 
+var writeVerbs = map[string]bool{
+	"create":  true,
+	"delete":  true,
+	"update":  true,
+	"remove":  true,
+	"send":    true,
+	"insert":  true,
+	"append":  true,
+	"archive": true,
+	"move":    true,
+	"upload":  true,
+	"execute": true,
+	"run":     true,
+	"modify":  true,
+	"rename":  true,
+}
+
 // isReadMCPName reports whether an MCP tool name looks like a read-only
 // operation. Tokenizes on both '_' and '-', then checks the first three
-// tokens for a known read verb. Matching is case-insensitive. Handles:
+// tokens: accepts iff ≥1 read verb is present AND 0 write verbs are
+// present. Matching is case-insensitive. Handles:
 //
-//   - direct prefix:        list_calendars, get_events
-//   - 2-token namespaced:   notion_list_pages, API-query-data-source
-//   - 3-token namespaced:   google_gmail_search_messages
+//   - direct prefix:          list_calendars, get_events
+//   - 2-token namespaced:     notion_list_pages, API-query-data-source
+//   - 3-token namespaced:     google_gmail_search_messages
+//   - compound-verb rejects:  lookup_and_delete_all_records,
+//     get_or_create_item, find_and_remove_entry
 //
-// Fail-closed: names whose verb sits at position 3 or later (e.g.
-// `request_write_access_and_get_token`) are treated as writes so the
-// count-based guard stays engaged.
+// Fail-closed: ambiguous names (run_* / execute_* — could be SELECT or
+// INSERT) go through writeVerbs so the count-based guard stays engaged.
+// Names whose verb sits at position 3 or later are treated as writes.
 func isReadMCPName(name string) bool {
 	tokens := strings.FieldsFunc(strings.ToLower(name), func(r rune) bool {
 		return r == '_' || r == '-'
@@ -183,12 +206,16 @@ func isReadMCPName(name string) bool {
 	if limit > 3 {
 		limit = 3
 	}
+	hasRead := false
 	for i := 0; i < limit; i++ {
+		if writeVerbs[tokens[i]] {
+			return false
+		}
 		if readVerbs[tokens[i]] {
-			return true
+			hasRead = true
 		}
 	}
-	return false
+	return hasRead
 }
 
 // NewLoopDetector creates a detector with production defaults.

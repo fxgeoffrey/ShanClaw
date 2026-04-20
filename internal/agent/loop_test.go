@@ -2971,8 +2971,13 @@ func TestForceStop_EmptyResponseFallback(t *testing.T) {
 	if strings.TrimSpace(result) == "" {
 		t.Fatal("expected non-empty fallback, got blank result")
 	}
-	if !strings.Contains(result, "loop limit") {
-		t.Errorf("expected fallback mentioning loop limit, got %q", result)
+	// Fallback string now honestly names what happened (synthesis turn
+	// produced no output) instead of the old "loop limit after repeated
+	// failed attempts" copy, which sounded like a system crash. The new
+	// wording stays consistent with the buildForceStopReason framing the
+	// synthesis prompt uses.
+	if !strings.Contains(result, "synthesis produced no output") {
+		t.Errorf("expected fallback to name the empty-synthesis case, got %q", result)
 	}
 	status := loop.LastRunStatus()
 	if status.FailureCode != runstatus.CodeIterationLimit {
@@ -3761,4 +3766,141 @@ func TestForceStopExit_PersistenceBaseline(t *testing.T) {
 	if !sawSystemReason {
 		t.Error("expected a [system] reason message injected by runForceStopTurn, none found")
 	}
+}
+
+// TestForceStopExit_DetectorPath_SynthesisPromptShape verifies that the
+// direct LoopForceStop path (3 identical-args tool calls → ConsecutiveDup
+// force-stop) feeds the synthesis turn a structured Task/Done/Pending
+// report prompt that names the detector verdict, matching the PR #81 shape
+// previously reserved for the maxIter path.
+func TestForceStopExit_DetectorPath_SynthesisPromptShape(t *testing.T) {
+	var synthRequestMu sync.Mutex
+	var synthRequestBody string // captured body of the synthesis LLM call
+
+	llmCallCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		llmCallCount++
+		if llmCallCount == 4 {
+			// Synthesis turn — capture the outbound request body so the
+			// test can assert the prompt shape injected by buildForceStopReason.
+			body, _ := io.ReadAll(r.Body)
+			synthRequestMu.Lock()
+			synthRequestBody = string(body)
+			synthRequestMu.Unlock()
+			json.NewEncoder(w).Encode(nativeResponse("**Task** — X\n**Done** — Y", "end_turn", nil, 10, 5))
+			return
+		}
+		// Turns 1-3: same tool + same args each time. Detector fires
+		// ConsecutiveDup LoopForceStop after the 3rd identical call.
+		json.NewEncoder(w).Encode(nativeResponseWithID("", "tool_use",
+			toolCallWithID("mock_tool", `{"same":"args"}`, fmt.Sprintf("t%d", llmCallCount)), 10, 5))
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&mockTool{name: "mock_tool"})
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+	loop.SetEnableStreaming(false)
+	loop.SetHandler(&mockHandler{approveResult: true})
+
+	_, _, err := loop.Run(context.Background(), "do a thing", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	synthRequestMu.Lock()
+	body := synthRequestBody
+	synthRequestMu.Unlock()
+	if body == "" {
+		t.Fatalf("synthesis request body was not captured (expected 4 LLM calls, got %d)", llmCallCount)
+	}
+
+	// The synthesis request must carry the structured report prompt
+	// AND the detector verdict (escaped in JSON, so check a plain substring).
+	wantMarkers := []string{
+		`**Task**`,
+		`**Done**`,
+		`**Pending**`,
+		`**Partial answer**`,
+		`Do not request any more tools.`,
+		`identical arguments`, // from ConsecutiveDup's message
+	}
+	for _, marker := range wantMarkers {
+		if !strings.Contains(body, marker) {
+			t.Errorf("synthesis prompt missing marker %q (excerpt = %s)", marker, truncateForLog(body, 400))
+		}
+	}
+}
+
+// TestForceStopExit_MaxNudgesPath_SynthesisPromptShape verifies the second
+// force-stop entry point (maxNudges=3 accumulated → escalation). 6 error
+// calls with distinct args trip SameToolError LoopNudge 3 times, the
+// nudge budget is exhausted, runForceStopTurn fires with the
+// "multiple approaches failed — nudges exceeded" detector note. The
+// synthesis prompt must carry the same structured report shape.
+func TestForceStopExit_MaxNudgesPath_SynthesisPromptShape(t *testing.T) {
+	var synthRequestMu sync.Mutex
+	var synthRequestBody string
+
+	llmCallCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		llmCallCount++
+		if llmCallCount <= 6 {
+			// 6 failing-tool calls trigger SameToolError nudges at 4,5,6 →
+			// nudgeCount reaches maxNudges=3 → runForceStopTurn escalation.
+			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
+				toolCall("failing_tool", fmt.Sprintf(`{"attempt":%d}`, llmCallCount)), 10, 5))
+			return
+		}
+		// 7th LLM call = synthesis turn. Capture body.
+		body, _ := io.ReadAll(r.Body)
+		synthRequestMu.Lock()
+		synthRequestBody = string(body)
+		synthRequestMu.Unlock()
+		json.NewEncoder(w).Encode(nativeResponse("**Task** — retry failed\n**Done** — tried 6 attempts", "end_turn", nil, 10, 5))
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&mockErrorTool{name: "failing_tool"})
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+	loop.SetEnableStreaming(false)
+	loop.SetHandler(&mockHandler{approveResult: true})
+
+	_, _, err := loop.Run(context.Background(), "keep trying", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	synthRequestMu.Lock()
+	body := synthRequestBody
+	synthRequestMu.Unlock()
+	if body == "" {
+		t.Fatalf("synthesis body not captured; llmCallCount=%d", llmCallCount)
+	}
+
+	wantMarkers := []string{
+		`**Task**`,
+		`**Done**`,
+		`**Pending**`,
+		`**Partial answer**`,
+		`nudges exceeded`, // from the escalation path's detector note
+	}
+	for _, marker := range wantMarkers {
+		if !strings.Contains(body, marker) {
+			t.Errorf("synthesis prompt missing marker %q (excerpt = %s)", marker, truncateForLog(body, 400))
+		}
+	}
+}
+
+// truncateForLog returns a short, JSON-safe excerpt for test failure
+// messages. Long LLM request bodies are unreadable in t.Errorf output;
+// 400 chars is enough to locate the marker or its absence.
+func truncateForLog(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }

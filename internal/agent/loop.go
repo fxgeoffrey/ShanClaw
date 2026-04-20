@@ -1332,6 +1332,19 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	// the model returns empty text, so callers never see a blank bubble.
 	// Tools are intentionally omitted to force a text-only response.
 	runForceStopTurn := func(reason string, fallback string) (string, error) {
+		// Emit a force_stop audit event so post-merge observation can
+		// count detector-driven stops with a simple `grep "event":"force_stop"`.
+		// Reason is truncated by the audit layer's RedactSecrets+truncate.
+		if a.auditor != nil {
+			a.auditor.Log(audit.AuditEntry{
+				Timestamp:     time.Now(),
+				SessionID:     a.sessionID,
+				Event:         "force_stop",
+				InputSummary:  reason,
+				OutputSummary: fmt.Sprintf("iteration=%d tools=%s", iterationCount, topTools(toolsUsed, 5)),
+			})
+		}
+
 		messages = append(messages, client.Message{
 			Role:    "user",
 			Content: client.NewTextContent("[system] " + reason),
@@ -1422,6 +1435,31 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				"If the user's question is simple and you already have the answer from "+
 				"tool results, just answer it directly — skip the structure.",
 			iterationCount, topTools(toolsUsed, 5), lastToolName,
+		)
+	}
+
+	// buildForceStopReason produces the same structured report prompt as
+	// buildMaxIterReason but names the specific detector verdict that
+	// triggered the stop. Two call sites feed it: the direct LoopForceStop
+	// path (line ~2700) and the maxNudges escalation path (line ~2710).
+	// Both paths previously passed a terse detector note to runForceStopTurn
+	// and got only a generic "I hit the loop limit…" fallback when the
+	// synthesis LLM call returned empty text — users never saw a summary of
+	// what the agent had already accomplished. This closure restores the
+	// same UX shape PR #81 added for maxIter.
+	buildForceStopReason := func(detectorNote string) string {
+		return fmt.Sprintf(
+			"The loop detector stopped further tool calls because: %s\n"+
+				"Iteration count: %d. Tools used: %s. Last tool: %s.\n"+
+				"Do not request any more tools.\n\n"+
+				"Report in this structure. Skip sections if not applicable:\n\n"+
+				"**Task** — What the user asked (1 line).\n"+
+				"**Done** — What you accomplished so far (bullets, with concrete findings).\n"+
+				"**Pending** — What's still missing (bullets).\n"+
+				"**Partial answer** — Your best-effort response given what you've gathered.\n\n"+
+				"If the user's question is simple and you already have the answer from "+
+				"tool results, just answer it directly — skip the structure.",
+			detectorNote, iterationCount, topTools(toolsUsed, 5), lastToolName,
 		)
 	}
 
@@ -2693,9 +2731,21 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		}
 		cloudResultContent = "" // reset if mixed with other tools
 
-		// Handle loop detection results
+		// Handle loop detection results. Both the direct force-stop and
+		// the maxNudges escalation now pass the detector verdict through
+		// buildForceStopReason so the synthesis turn produces a
+		// Task/Done/Pending/Partial-answer report instead of generic
+		// "give final answer now" prose — matching the UX shape PR #81
+		// introduced for the maxIter path. Fallback text (used when the
+		// synthesis LLM call itself returns empty) honestly names what
+		// happened ("synthesis produced no output") instead of claiming a
+		// specific failure mode.
+		forceStopFallback := fmt.Sprintf(
+			"The loop detector stopped the run after %d turns; synthesis produced no output.",
+			iterationCount,
+		)
 		if worstAction == LoopForceStop {
-			text, err := runForceStopTurn(worstMsg, "I hit the loop limit after repeated failed attempts and couldn't produce a final answer.")
+			text, err := runForceStopTurn(buildForceStopReason(worstMsg), forceStopFallback)
 			if err != nil {
 				return "", usage, err
 			}
@@ -2705,7 +2755,10 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			nudgeCount++
 			if nudgeCount >= maxNudges {
 				// Escalate: too many nudges without behavior change → force stop
-				text, err := runForceStopTurn("Multiple approaches have failed. Provide your final answer now with what you have.", "I hit the loop limit after repeated failed attempts and couldn't produce a final answer.")
+				text, err := runForceStopTurn(
+					buildForceStopReason("multiple approaches failed — nudges exceeded"),
+					forceStopFallback,
+				)
 				if err != nil {
 					return "", usage, err
 				}

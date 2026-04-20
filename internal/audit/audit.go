@@ -10,16 +10,20 @@ import (
 	"time"
 )
 
-// AuditEntry represents a single audited tool call event.
+// AuditEntry represents a single audited agent event. Most entries
+// describe tool calls (ToolName populated); non-tool entries (e.g.
+// "force_stop" stops, run-level boundaries) set Event instead and leave
+// ToolName empty.
 type AuditEntry struct {
 	Timestamp     time.Time `json:"timestamp"`
 	SessionID     string    `json:"session_id"`
-	ToolName      string    `json:"tool_name"`
-	InputSummary  string    `json:"input_summary"`
-	OutputSummary string    `json:"output_summary"`
-	Decision      string    `json:"decision"`
-	Approved      bool      `json:"approved"`
-	DurationMs    int64     `json:"duration_ms"`
+	Event         string    `json:"event,omitempty"`
+	ToolName      string    `json:"tool_name,omitempty"`
+	InputSummary  string    `json:"input_summary,omitempty"`
+	OutputSummary string    `json:"output_summary,omitempty"`
+	Decision      string    `json:"decision,omitempty"`
+	Approved      bool      `json:"approved,omitempty"`
+	DurationMs    int64     `json:"duration_ms,omitempty"`
 	// Cost fields (populated when tool reports usage, e.g. gateway tools that
 	// call xAI Grok / SerpAPI). Omitted when the tool does not return usage.
 	// TotalTokens is the aggregate; for tools that only report a flat count

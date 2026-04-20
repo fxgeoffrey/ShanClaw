@@ -3649,3 +3649,116 @@ func TestAgentLoop_SkillListingPreservesMultimodal(t *testing.T) {
 		t.Error("image block was dropped from multimodal message")
 	}
 }
+
+// TestForceStopExit_PersistenceBaseline pins the existing behavior of
+// runForceStopTurn with respect to the run transcript. When the loop
+// detector force-stops a run with several tool rounds already executed,
+// the full transcript — every tool_use + matching tool_result + the
+// synthesis user prompt + the synthesis assistant response — must all be
+// visible in RunMessages(). This is a BEHAVIOR PIN, not a TDD driver:
+// it asserts what the code currently does, so a Phase 2 framing that says
+// "the change is UX-only" can be trusted.
+//
+// The test drives the agent through three identical tool calls so the
+// ConsecutiveDup detector fires LoopForceStop (consecDupThreshold+1=3),
+// then verifies RunMessages() against the expected shape.
+func TestForceStopExit_PersistenceBaseline(t *testing.T) {
+	llmCallCount := 0
+	var synthesisText = "Partial: completed step 1 of 3; stopped before step 2."
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		llmCallCount++
+		switch llmCallCount {
+		case 1, 2, 3:
+			// Return the SAME tool call with identical args each turn so
+			// the detector sees ConsecutiveDup at count=2 (LoopNudge) and
+			// count=3 (LoopForceStop).
+			json.NewEncoder(w).Encode(nativeResponseWithID("", "tool_use",
+				toolCallWithID("mock_tool", `{"same":"args"}`, fmt.Sprintf("toolu_%d", llmCallCount)), 10, 5))
+		default:
+			// Synthesis turn after runForceStopTurn injects "[system] <reason>".
+			json.NewEncoder(w).Encode(nativeResponse(synthesisText, "end_turn", nil, 10, 5))
+		}
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&mockTool{name: "mock_tool"})
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+	loop.SetEnableStreaming(false)
+	loop.SetHandler(&mockHandler{approveResult: true})
+
+	result, _, err := loop.Run(context.Background(), "do the work", nil, nil)
+	if err != nil {
+		t.Fatalf("force-stop path should complete without error, got: %v", err)
+	}
+	if result != synthesisText {
+		t.Fatalf("final text should be synthesis output, got %q", result)
+	}
+
+	// Snapshot: capture what persistence callers (session.Save,
+	// daemon.runner's captureTurnBaseline+applyTurnMessages) see.
+	msgs := loop.RunMessages()
+
+	// Shape assertions. The transcript must contain:
+	// - the original user prompt
+	// - at least one tool_use + matching tool_result (≥3 rounds happened)
+	// - the synthesis assistant message at the end (role=assistant, text=synthesisText)
+	if len(msgs) < 5 {
+		t.Fatalf("RunMessages too short for a 3-round force-stop + synthesis: got %d, want ≥5", len(msgs))
+	}
+
+	// Message.Content can carry plain text (scaffolded user prompt, synthesis
+	// assistant reply, [system] nudges/reasons) OR block content (tool_use,
+	// tool_result). Content.Text() unifies the two.
+	firstUserText := msgs[0].Content.Text()
+	if msgs[0].Role != "user" || !strings.Contains(firstUserText, "do the work") {
+		t.Fatalf("first message should be original user prompt, got role=%q text=%q", msgs[0].Role, firstUserText)
+	}
+
+	// Count tool_use and tool_result blocks across the whole transcript.
+	// Every tool_use must have a matching tool_result (no orphaned ids).
+	toolUseIDs := map[string]int{}
+	toolResultIDs := map[string]int{}
+	for _, msg := range msgs {
+		if !msg.Content.HasBlocks() {
+			continue
+		}
+		for _, b := range msg.Content.Blocks() {
+			switch b.Type {
+			case "tool_use":
+				toolUseIDs[b.ID]++
+			case "tool_result":
+				toolResultIDs[b.ToolUseID]++
+			}
+		}
+	}
+	if len(toolUseIDs) < 3 {
+		t.Fatalf("expected ≥3 tool_use rounds before force-stop, saw %d distinct ids: %v", len(toolUseIDs), toolUseIDs)
+	}
+	for id := range toolUseIDs {
+		if toolResultIDs[id] == 0 {
+			t.Errorf("tool_use id=%q has no matching tool_result — transcript has an orphan", id)
+		}
+	}
+
+	// Last message: synthesis assistant response.
+	last := msgs[len(msgs)-1]
+	if last.Role != "assistant" || last.Content.Text() != synthesisText {
+		t.Fatalf("last message must be the synthesis assistant reply, got role=%q text=%q", last.Role, last.Content.Text())
+	}
+
+	// Somewhere before the synthesis there must be a "[system]" reason
+	// message (the runForceStopTurn-injected reason). This proves the
+	// synthesis turn actually ran through runForceStopTurn and was saved.
+	sawSystemReason := false
+	for _, msg := range msgs[:len(msgs)-1] {
+		if msg.Role == "user" && strings.HasPrefix(msg.Content.Text(), "[system] ") {
+			sawSystemReason = true
+			break
+		}
+	}
+	if !sawSystemReason {
+		t.Error("expected a [system] reason message injected by runForceStopTurn, none found")
+	}
+}

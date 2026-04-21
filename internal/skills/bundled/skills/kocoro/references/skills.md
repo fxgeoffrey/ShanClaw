@@ -49,6 +49,25 @@ Skills are knowledge packages that teach agents specific abilities — like read
 - Response: `{"status": "deleted"}`
 - Notes: DESTRUCTIVE. The `{slug}` path segment is the directory identifier. Automatically detaches from all agents that use it and clears any stored API keys from the OS keychain.
 
+### Set skill secrets (API keys / env vars)
+- Method: PUT
+- Path: /skills/{slug}/secrets
+- Body: `{"KEY_NAME": "value", "ANOTHER_KEY": "value"}` (flat map, one entry per env var)
+- Response: `{"status": "updated"}`
+- Notes: This is the ONLY correct way to configure API keys for a skill. Values are written to the macOS Keychain (service `com.shannon.skill.<slug>`, account = env var name). Key names must match `[A-Z0-9_]+` (uppercase letters, digits, underscore). Values are never written to `~/.shannon/config.yaml`, `.env`, agent config, or any other file; never returned by any GET endpoint; never appear in session transcripts or audit logs. At runtime they are injected as env vars into the `bash` tool's child process ONLY when the skill is activated via `use_skill` in the current turn — a loaded-but-inactive skill contributes nothing.
+
+### Clear all secrets for a skill
+- Method: DELETE
+- Path: /skills/{slug}/secrets
+- Response: `{"status": "deleted"}`
+- Notes: Removes every stored value for this skill from the Keychain. The skill itself stays installed.
+
+### Delete one secret key
+- Method: DELETE
+- Path: /skills/{slug}/secrets/{key}
+- Response: `{"status": "deleted"}`
+- Notes: Removes a single env var by name, leaving other keys intact. `{key}` is the env var name (e.g., `FAL_KEY`).
+
 ## Common Scenarios
 
 ### "What skills are available to install?"
@@ -73,8 +92,24 @@ Skills are knowledge packages that teach agents specific abilities — like read
 ### "Completely remove a skill"
 1. DELETE /skills/{skill-name}?confirm=true — removes skill and detaches from ALL agents
 
+### "Configure API keys for a skill" (e.g., image-gen, figma)
+Some skills need API keys to call external services. These are declared by the skill and fetched at runtime from the OS keychain — NEVER edit `.env` or agent config to set them.
+1. GET /skills — find the target skill and read its `required_secrets` list (env var names it needs, e.g. `["FAL_KEY", "LEGNEXT_KEY"]`) and `configured_secrets` list (names already stored)
+2. Tell the user which keys are needed and explain the values will be stored in the macOS Keychain (never in files, never echoed back by the API)
+3. After the user provides values: PUT /skills/{slug}/secrets body: `{"FAL_KEY": "...", "LEGNEXT_KEY": "..."}`
+4. Verify: GET /skills — check `configured_secrets` now includes the key names (values themselves are never returned)
+
+### "Update or rotate one API key"
+1. PUT /skills/{slug}/secrets body: `{"FAL_KEY": "new-value"}` — overwrites just that key, leaves other stored keys intact
+
+### "Remove one API key" / "Remove all API keys for a skill"
+- Single key: DELETE /skills/{slug}/secrets/{KEY_NAME}
+- All keys: DELETE /skills/{slug}/secrets
+
 ## Safety Notes
 
 - **Deletion detaches from all agents**: If you delete a skill, every agent that uses it immediately loses that ability. Prefer detaching from a specific agent (DELETE /agents/{name}/skills/{skill}) if you only want to remove it from one.
 - **Marketplace skills**: Review the skill description before installing — marketplace skills are community-contributed and not officially vetted.
 - **Custom skill edits**: Use PUT /skills/{name} only for skills you own. Editing bundled skills may cause issues on updates. If you need to customize a bundled skill, copy its content first and create a new skill with a different name.
+- **Skill secrets live in the OS keychain, not in files**: Never suggest editing `~/.shannon/config.yaml`, `.env`, or agent config to set a skill's API keys — that path doesn't work. Use `PUT /skills/{slug}/secrets` exclusively. This is different from MCP server env vars (`mcp.servers.*.env` in config.yaml) — MCP and skills use separate storage layers even though both look like "env vars" on the surface.
+- **Never echo secret values back to the user or into logs**: Values are write-only via the API. Confirm success by checking `configured_secrets` (which lists key names only) after a PUT, not by trying to GET the value.

@@ -34,13 +34,11 @@ func BundledSkillSource(shannonDir string) (SkillSource, error) {
 
 type skillFrontmatter struct {
 	Name string `yaml:"name"`
-	// Slug, when present in frontmatter, used to override the directory-name
-	// derived slug. Some ClawHub authors have historically set this to carry
-	// the URL identifier. Not part of the Agent Skills spec — per
-	// `openclaw/clawhub` (docs/skill-format.md), slug is always derived from
-	// the directory basename. We only consult it as an optional hint for
-	// authors who already shipped it; the on-disk Skill.Slug remains the
-	// authoritative identifier.
+	// Slug is not part of the Agent Skills spec nor the openclaw/clawhub
+	// spec (slug is derived from the directory basename). We accept the
+	// YAML key so authors who historically set it don't blow up
+	// unmarshal, but we intentionally ignore its value — Skill.Slug is
+	// always the on-disk directory name.
 	Slug          string         `yaml:"slug,omitempty"`
 	Description   string         `yaml:"description"`
 	License       string         `yaml:"license"`
@@ -139,6 +137,20 @@ func loadSkillMD(path, dirName, source string) (*Skill, error) {
 	// Both names are valid and must coexist so the skill still installs.
 	if err := ValidateSkillName(dirName); err != nil {
 		return nil, fmt.Errorf("directory name %q is not a valid slug: %w", dirName, err)
+	}
+	// Bound frontmatter.name so it can't smuggle unusual characters into
+	// prompts shown to the LLM (skill catalog, use_skill results, sticky
+	// reinjection snippets). Formatting-sensitive: reject control chars
+	// and any newline. Length cap prevents oversized catalog entries.
+	if err := validateFrontmatterName(fm.Name); err != nil {
+		return nil, err
+	}
+	// If an author set `slug:` in frontmatter and it disagrees with the
+	// directory, warn so the mismatch surfaces during development. We
+	// still trust the directory name — it's the URL/marketplace truth.
+	if fm.Slug != "" && fm.Slug != dirName {
+		log.Printf("WARNING: skill %s/SKILL.md has slug: %q which does not match directory %q; using the directory as the authoritative slug",
+			path, fm.Slug, dirName)
 	}
 	if fm.Description == "" {
 		return nil, fmt.Errorf("skill description is required")

@@ -1438,8 +1438,12 @@ func (s *Server) validateInstalledSkills(names []string) error {
 	if err != nil {
 		return fmt.Errorf("load installed skills: %w", err)
 	}
-	installed := make(map[string]bool, len(list))
+	// Accept either Slug (directory / marketplace identifier) or Name
+	// (frontmatter display label) as the identifier. Slug is the primary
+	// key we advise clients to use; Name is kept for backward compat.
+	installed := make(map[string]bool, len(list)*2)
 	for _, skill := range list {
+		installed[skill.Slug] = true
 		installed[skill.Name] = true
 	}
 	var missing []string
@@ -2415,7 +2419,7 @@ func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
 	for _, skill := range list {
 		meta := skill.ToMeta()
 		meta.RequiredSecrets = skill.RequiredSecrets()
-		meta.ConfiguredSecrets = s.secretsStore.ConfiguredKeys(skill.Name)
+		meta.ConfiguredSecrets = s.secretsStore.ConfiguredKeys(skill.Slug)
 		metas = append(metas, meta)
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"skills": metas})
@@ -2503,7 +2507,7 @@ func (s *Server) handleGetSkill(w http.ResponseWriter, r *http.Request) {
 				detail.AllowedTools = skill.AllowedTools
 			}
 			detail.RequiredSecrets = skill.RequiredSecrets()
-			detail.ConfiguredSecrets = s.secretsStore.ConfiguredKeys(skill.Name)
+			detail.ConfiguredSecrets = s.secretsStore.ConfiguredKeys(skill.Slug)
 			writeJSON(w, http.StatusOK, detail)
 			return
 		}

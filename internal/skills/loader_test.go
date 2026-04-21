@@ -501,17 +501,18 @@ func TestLoadSkills_StickySnippet_ExplicitOverride(t *testing.T) {
 	}
 }
 
-// TestLoadSkills_Kocoro_StickySnippetPicksPolicy asserts the actual bundled
-// kocoro SKILL.md extracts the HTTP-API policy paragraph, not the bland
-// "You help users ..." intro. This locks in the reviewer-flagged bug fix.
-func TestLoadSkills_Kocoro_StickySnippetPicksPolicy(t *testing.T) {
-	// Walk up to the repo root so this test works from any cwd.
+// TestLoadSkills_Kocoro_NotSticky asserts kocoro is intentionally NOT sticky.
+// Sticky reminders re-inject a snippet at the start of every turn; for a
+// task-driven skill like kocoro that body competes with the use_skill tool
+// result for model attention, prompting the model to re-call use_skill to
+// reconcile and tripping ConsecutiveDuplicate on turn 3. The opt-in was
+// removed; this test pins the decision so future edits don't silently
+// re-enable it.
+func TestLoadSkills_Kocoro_NotSticky(t *testing.T) {
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
 	}
-	// loader_test.go lives at internal/skills/; bundled skills are a sibling
-	// subdir. Resolve the path relative to the current file's directory.
 	bundledDir := filepath.Join(wd, "bundled", "skills")
 	loaded, err := LoadSkills(SkillSource{Dir: bundledDir, Source: "bundled"})
 	if err != nil {
@@ -527,19 +528,8 @@ func TestLoadSkills_Kocoro_StickySnippetPicksPolicy(t *testing.T) {
 	if kocoro == nil {
 		t.Fatalf("kocoro skill not found in bundled; loaded=%d", len(loaded))
 	}
-	if !kocoro.StickyInstructions {
-		t.Fatal("kocoro.StickyInstructions must be true")
-	}
-	// The bug: snippet was picking "You help users ..." bland intro.
-	if strings.HasPrefix(kocoro.StickySnippet, "You help users") {
-		t.Errorf("kocoro snippet regressed to bland intro: %q", kocoro.StickySnippet)
-	}
-	// The policy: snippet should mention HTTP API + the "never direct file" rule.
-	if !strings.Contains(kocoro.StickySnippet, "HTTP API") && !strings.Contains(kocoro.StickySnippet, "http") {
-		t.Errorf("kocoro snippet missing HTTP policy: %q", kocoro.StickySnippet)
-	}
-	if !strings.Contains(kocoro.StickySnippet, "Never") && !strings.Contains(kocoro.StickySnippet, "never") {
-		t.Errorf("kocoro snippet missing 'Never' directive: %q", kocoro.StickySnippet)
+	if kocoro.StickyInstructions {
+		t.Fatal("kocoro must NOT be sticky — re-injection competes with use_skill body and triggers ConsecutiveDuplicate loop")
 	}
 }
 

@@ -5,7 +5,6 @@ description: >
   MUST use for: create/delete/configure agent, install skill, connect
   Slack/DB, manage rules, project init — any platform management task.
 allowed-tools: http file_read
-sticky-instructions: true
 ---
 
 # Kocoro — Platform Configuration Assistant
@@ -59,4 +58,4 @@ For detailed docs on MCP servers, permissions, project init, or multi-step recip
 ## Style
 
 - Conversational. Propose names and solutions. Explain simply. One task at a time.
-- After creating an agent, tell the user: `shan --agent <name>` to use it (NOT `shan -a` — there is no `-a` shorthand).
+- After creating an agent, tell the user it's ready to use from the ShanClaw Desktop sidebar.

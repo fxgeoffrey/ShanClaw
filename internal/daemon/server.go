@@ -787,7 +787,13 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 
 // handleResetSession 就地清空命名 agent 的 session 对话历史，保留 ID/Title/CWD 等元数据。
 // Query: ?agent=<name> (必填) —— 默认 agent 的 session 可直接删除重建，无需本接口。
-// 会先取消正在运行的任务，再清空消息。
+// 先取消正在运行的任务，再清空消息。
+//
+// 已知竞态（与 handleEditMessage 同策略）：CancelBySessionID 只发信号不等待，
+// 若 agent loop 处于 mid-turn checkpoint 写盘阶段，其 Save() 可能在 Reset() 之后落盘，
+// 导致 InProgress 残留或部分历史回写。Desktop 端在触发 /reset 前应保证 UI 无活跃 run；
+// 若出现残留消息，再次 /reset 即可清除。彻底关闭该窗口需要在 SessionCache 层做同步屏障，
+// 属于独立重构。
 func (s *Server) handleResetSession(w http.ResponseWriter, r *http.Request) {
 	if s.deps == nil {
 		writeError(w, http.StatusInternalServerError, "daemon deps not configured")
@@ -803,17 +809,6 @@ func (s *Server) handleResetSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	agentName := r.URL.Query().Get("agent")
-	if agentName == "" {
-		var body struct {
-			Agent string `json:"agent,omitempty"`
-		}
-		if r.ContentLength > 0 {
-			if !decodeBody(w, r, &body) {
-				return
-			}
-			agentName = body.Agent
-		}
-	}
 	if agentName == "" {
 		writeError(w, http.StatusBadRequest, "agent query parameter is required; use DELETE /sessions/{id} to discard a default-agent session")
 		return

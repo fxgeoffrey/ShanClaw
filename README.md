@@ -281,6 +281,7 @@ Type `/` in the TUI to see the interactive command menu:
 | `/session resume <n>` | Resume session by number or ID |
 | `/search <query>` | Search session history (keyword, phrase, stemming) |
 | `/clear` | New session + clear screen |
+| `/reset` | Clear current session history in place (keeps ID, title, CWD) |
 | `/compact [instructions]` | Compress context and keep a summary |
 | `/doctor` | Run diagnostic checks |
 | `/permissions` | Show or manage tool permissions |

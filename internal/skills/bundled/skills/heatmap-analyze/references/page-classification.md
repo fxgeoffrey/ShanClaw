@@ -55,6 +55,21 @@ Classify a webpage into one of 7 types based on URL, content signals, and data p
 5. **Check Content Flow**: PAS story → Sales LP / Article LP; Spec listing → PDP; Info/editorial → Other Content
 6. **Determine ad_lp vs sales_lp**: If page_insight sourceType shows >50% ad/UTM traffic → use `ad_lp`
 
+## Weak Priors from `brand_context` (optional)
+
+When Phase 0b/0c populated a `brand_context` object (see `references/discovery.md`), two fields
+can serve as **weak classification priors**:
+
+- `brand_context.business_model` — e.g. `ecommerce` leans toward `pdp` / `sales_lp` / `homepage`;
+  `saas` leans toward `other_content` (pricing, features) or `sales_lp`; `content` leans toward
+  `article_lp` / `other_content`.
+- `preview_signals.proposed_page_type` — a pre-classification inferred from the Phase 0c.2 block
+  names sample (if that probe ran).
+
+These are **priors, not verdicts**. Always run the 6-step classification above against the
+Phase 1 full data. If the prior disagrees with the full-data signals, trust the full data and
+silently discard the prior.
+
 ## Classification Result
 
 After classification, record these internally (this is an intermediate step — not shown to the user):

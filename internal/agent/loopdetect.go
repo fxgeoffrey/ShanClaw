@@ -117,6 +117,23 @@ var repeatableGUITools = map[string]bool{
 	"screenshot": true, "computer": true, "accessibility": true, "browser": true,
 }
 
+// dupExemptTools lists tools where every call is inherently independent
+// and duplicate counting (consecutive or windowed) is always a false
+// positive. Unlike repeatableGUITools (where polling spin is still a real
+// concern caught by ExactDup), these tools have zero side effects and
+// zero cost model — calling them N times produces N identical outputs
+// with no state change.
+//
+//   - use_skill: idempotent metadata loader (internal/tools/skill.go).
+//     Loading the same SKILL.md ×N is harmless. Production audit log had
+//     9 force-stops at iter=3 on use_skill same-args ×3 (2026-04-21).
+//
+// Adding a tool here is a stronger exemption than repeatableGUITools —
+// think carefully before extending.
+var dupExemptTools = map[string]bool{
+	"use_skill": true,
+}
+
 // isRepeatableToolName reports whether a tool naturally repeats across a
 // workflow and should be exempt from the generic NoProgress detectors. It
 // checks the configured repeatable set plus a "browser_" prefix so playwright
@@ -351,13 +368,17 @@ func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 		}
 		consecCount++
 	}
-	if consecCount >= ld.consecDupThreshold+1 {
-		return LoopForceStop, fmt.Sprintf(
-			"You have called %s with identical arguments %d times in a row. Stop retrying and provide your answer now.", name, consecCount)
-	}
-	if consecCount >= ld.consecDupThreshold {
-		return LoopNudge, fmt.Sprintf(
-			"You've called %s %d times consecutively with identical arguments. The results won't change. Use the results you already have or try a different approach.", name, consecCount)
+	// dupExemptTools (use_skill) are pure idempotent loaders — skip both
+	// ConsecutiveDup and ExactDup checks entirely.
+	if !dupExemptTools[name] {
+		if consecCount >= ld.consecDupThreshold+1 {
+			return LoopForceStop, fmt.Sprintf(
+				"You have called %s with identical arguments %d times in a row. Stop retrying and provide your answer now.", name, consecCount)
+		}
+		if consecCount >= ld.consecDupThreshold {
+			return LoopNudge, fmt.Sprintf(
+				"You've called %s %d times consecutively with identical arguments. The results won't change. Use the results you already have or try a different approach.", name, consecCount)
+		}
 	}
 
 	// 1b. Window-based exact duplicate — catches spread-out repeats
@@ -370,13 +391,15 @@ func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 			}
 		}
 	}
-	if dupCount >= ld.exactDupThreshold*2 {
-		return LoopForceStop, fmt.Sprintf(
-			"You have called %s with identical arguments %d times. Stop retrying and provide your answer now.", name, dupCount)
-	}
-	if dupCount >= ld.exactDupThreshold {
-		return LoopNudge, fmt.Sprintf(
-			"You've called %s %d times with identical arguments and similar results. Try a fundamentally different approach.", name, dupCount)
+	if !dupExemptTools[name] {
+		if dupCount >= ld.exactDupThreshold*2 {
+			return LoopForceStop, fmt.Sprintf(
+				"You have called %s with identical arguments %d times. Stop retrying and provide your answer now.", name, dupCount)
+		}
+		if dupCount >= ld.exactDupThreshold {
+			return LoopNudge, fmt.Sprintf(
+				"You've called %s %d times with identical arguments and similar results. Try a fundamentally different approach.", name, dupCount)
+		}
 	}
 
 	// 2. Same tool error detector: same tool returning errors

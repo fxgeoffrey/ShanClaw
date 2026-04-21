@@ -1147,3 +1147,33 @@ func TestLoopDetector_NoProgress_BashMixedArgsRatio_GateIsolated(t *testing.T) {
 		}
 	})
 }
+
+// TestLoopDetector_UseSkill_RepeatedNeverFiresAnyDup documents production
+// issue: 9 force-stops in audit log on use_skill same-args ×3, iter=3,
+// killing queries before they were processed. use_skill is an idempotent
+// metadata load (see internal/tools/skill.go) — repeating it is harmless.
+// After the fix, ×5 same-args should return LoopContinue from Check
+// (neither ConsecutiveDup nor ExactDup fires).
+func TestLoopDetector_UseSkill_RepeatedNeverFiresAnyDup(t *testing.T) {
+	ld := NewLoopDetector()
+	for range 5 {
+		ld.Record("use_skill", `{"skill_name":"kocoro"}`, false, "", "", false)
+	}
+	action, msg := ld.Check("use_skill")
+	if action != LoopContinue {
+		t.Fatalf("use_skill ×5 same-args must return LoopContinue (idempotent metadata load), got %v: %s", action, msg)
+	}
+}
+
+// TestLoopDetector_UseSkill_DifferentArgsNotAffected: sanity — different
+// skill names still go through normal flow (not relevant but guards against
+// over-broad exemption accidentally suppressing legitimate signals).
+func TestLoopDetector_UseSkill_DifferentArgsNotAffected(t *testing.T) {
+	ld := NewLoopDetector()
+	ld.Record("use_skill", `{"skill_name":"kocoro"}`, false, "", "", false)
+	ld.Record("use_skill", `{"skill_name":"playwright"}`, false, "", "", false)
+	action, _ := ld.Check("use_skill")
+	if action != LoopContinue {
+		t.Fatalf("use_skill with different args must return LoopContinue, got %v", action)
+	}
+}

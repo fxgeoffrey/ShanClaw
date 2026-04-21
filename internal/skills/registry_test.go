@@ -98,6 +98,38 @@ func TestRequiredSecrets_BothSourcesMerged(t *testing.T) {
 	}
 }
 
+// TestRequiredSecrets_AllThreeSourcesMerged covers the three-way dedup
+// path when a skill author declares the same key under multiple
+// interchangeable parent aliases (openclaw / clawdbot / clawdis).
+func TestRequiredSecrets_AllThreeSourcesMerged(t *testing.T) {
+	s := &Skill{
+		Metadata: map[string]any{
+			"openclaw": map[string]any{
+				"requires": map[string]any{"env": []any{"SHARED"}},
+			},
+			"clawdbot": map[string]any{
+				"requires": map[string]any{"env": []any{"SHARED", "CLAWDBOT_ONLY"}},
+			},
+			"clawdis": map[string]any{
+				"requires": map[string]any{"env": []any{"SHARED", "CLAWDIS_ONLY"}},
+			},
+		},
+	}
+	secrets := s.RequiredSecrets()
+	if len(secrets) != 3 {
+		t.Fatalf("expected 3 deduplicated secrets, got %d: %v", len(secrets), secrets)
+	}
+	keys := map[string]bool{}
+	for _, s := range secrets {
+		keys[s.Key] = true
+	}
+	for _, expected := range []string{"SHARED", "CLAWDBOT_ONLY", "CLAWDIS_ONLY"} {
+		if !keys[expected] {
+			t.Errorf("missing expected key %s", expected)
+		}
+	}
+}
+
 func TestRequiredSecrets_NoMetadata(t *testing.T) {
 	s := &Skill{}
 	secrets := s.RequiredSecrets()

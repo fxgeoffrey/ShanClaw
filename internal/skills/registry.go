@@ -29,9 +29,10 @@ type Skill struct {
 	Prompt          string         `json:"prompt,omitempty"`
 	License         string         `json:"license,omitempty"`
 	Compatibility   string         `json:"compatibility,omitempty"`
-	// Metadata uses `map[string]any` to preserve nested YAML structures
-	// (ClawHub uses a structured `clawdbot` object). See skillFrontmatter
-	// in loader.go for rationale.
+	// Metadata uses `map[string]any` to preserve nested YAML structures.
+	// ClawHub exposes a structured schema under any of three
+	// interchangeable parent keys: `openclaw`, `clawdbot`, and `clawdis`.
+	// See skillFrontmatter in loader.go for rationale.
 	Metadata        map[string]any `json:"metadata,omitempty"`
 	AllowedTools    []string       `json:"allowed_tools,omitempty"`
 	// StickyInstructions, when true, opts the skill into a short

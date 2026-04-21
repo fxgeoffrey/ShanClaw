@@ -170,12 +170,15 @@ func LoadAgent(agentsDir, name string) (*Agent, error) {
 		if err != nil {
 			return nil, fmt.Errorf("agent %q: bad skills: %w", name, err)
 		}
+		// Match manifest entries against both Slug (directory identifier,
+		// canonical post-decoupling) and Name (frontmatter display label)
+		// so manifests written by either API path resolve correctly.
 		attached := make(map[string]bool, len(attachedNames))
 		for _, n := range attachedNames {
 			attached[n] = true
 		}
 		for _, s := range allSkills {
-			if attached[s.Name] {
+			if attached[s.Slug] || attached[s.Name] {
 				ag.Skills = append(ag.Skills, s)
 			}
 		}

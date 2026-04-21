@@ -84,19 +84,27 @@ func TestLoadSkills_PriorityDedup(t *testing.T) {
 	}
 }
 
-// TestLoadSkills_NameMismatch_IsSkippedNotErrored locks in fail-open
-// behavior: a single broken skill must not abort the entire LoadSkills call.
-// The skill is logged and dropped; the function returns no error and an empty
-// (or partial) result list.
-func TestLoadSkills_NameMismatch_IsSkippedNotErrored(t *testing.T) {
+// TestLoadSkills_NameDifferentFromDir_Loads confirms the name/slug decoupling:
+// when frontmatter.name differs from the directory basename, the skill still
+// loads. This matches the openclaw/clawhub contract (slug is always derived
+// from the directory, name is a free-form label from frontmatter). Regression
+// target: ClawHub's xiaohongshu-mcp-skills package which ships with
+// `name: xiaohongshu` but installs under slug `xiaohongshu-mcp-skills`.
+func TestLoadSkills_NameDifferentFromDir_Loads(t *testing.T) {
 	tmp := t.TempDir()
-	createSkillDir(t, tmp, "pdf", "---\nname: wrong-name\ndescription: Mismatch\n---\nBody.")
-	skills, err := LoadSkills(SkillSource{Dir: tmp, Source: "global"})
+	createSkillDir(t, tmp, "xiaohongshu-mcp-skills", "---\nname: xiaohongshu\ndescription: Mismatch is fine\n---\nBody.")
+	loaded, err := LoadSkills(SkillSource{Dir: tmp, Source: "global"})
 	if err != nil {
-		t.Fatalf("LoadSkills must not error on a single bad skill: %v", err)
+		t.Fatalf("LoadSkills should not error: %v", err)
 	}
-	if len(skills) != 0 {
-		t.Errorf("expected the bad skill to be skipped, got %d skills", len(skills))
+	if len(loaded) != 1 {
+		t.Fatalf("expected the skill to load, got %d skills", len(loaded))
+	}
+	if loaded[0].Name != "xiaohongshu" {
+		t.Errorf("Name should come from frontmatter, got %q", loaded[0].Name)
+	}
+	if loaded[0].Slug != "xiaohongshu-mcp-skills" {
+		t.Errorf("Slug should come from directory name, got %q", loaded[0].Slug)
 	}
 }
 
@@ -151,8 +159,9 @@ func TestLoadSkills_BrokenSkillDoesNotShadowLowerSource(t *testing.T) {
 	highPrio := t.TempDir()
 	lowPrio := t.TempDir()
 
-	// Higher-priority source has a broken `pdf` skill (bad name mismatch).
-	createSkillDir(t, highPrio, "pdf", "---\nname: not-pdf\ndescription: x\n---\n# x")
+	// Higher-priority source has a broken `pdf` skill (missing required
+	// description field, so the loader rejects it).
+	createSkillDir(t, highPrio, "pdf", "---\nname: pdf\n---\n# broken: no description")
 
 	// Lower-priority source has a valid `pdf` skill.
 	createSkillDir(t, lowPrio, "pdf", "---\nname: pdf\ndescription: Real PDF\n---\n# Real PDF")

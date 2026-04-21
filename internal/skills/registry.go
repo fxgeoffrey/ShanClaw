@@ -9,8 +9,22 @@ type SecretSpec struct {
 
 // Skill is a composable capability loaded from a SKILL.md file.
 // Follows the Anthropic Agent Skills spec (agentskills.io/specification).
+//
+// Name vs Slug:
+//   - Name comes from frontmatter.name — the human-readable / LLM activation
+//     identifier the skill author declares. Shown to the model in the
+//     "Available Skills" list; used as the argument to `use_skill`.
+//   - Slug is the on-disk directory name, which also serves as the
+//     marketplace URL identifier and the key for stored API secrets.
+//     Always URL-safe (^[a-z0-9][a-z0-9-]*$).
+//
+// The two are normally equal. ClawHub allows them to diverge (e.g.
+// `name: Docker` / directory `docker`, or ClawHub slug
+// `xiaohongshu-mcp-skills` with frontmatter `name: xiaohongshu`), so we
+// track them separately instead of enforcing equality at load time.
 type Skill struct {
 	Name            string         `json:"name"`
+	Slug            string         `json:"slug"`
 	Description     string         `json:"description"`
 	Prompt          string         `json:"prompt,omitempty"`
 	License         string         `json:"license,omitempty"`
@@ -44,19 +58,21 @@ type Skill struct {
 
 // SkillMeta is the lightweight representation for API responses (no body/prompt).
 type SkillMeta struct {
-	Name             string       `json:"name"`
-	Description      string       `json:"description"`
-	Source           string       `json:"source,omitempty"`
-	InstallSource    string       `json:"install_source"`
-	MarketplaceSlug  string       `json:"marketplace_slug,omitempty"`
-	RequiredSecrets  []SecretSpec `json:"required_secrets,omitempty"`
-	ConfiguredSecrets []string    `json:"configured_secrets,omitempty"`
+	Name              string       `json:"name"`
+	Slug              string       `json:"slug"`
+	Description       string       `json:"description"`
+	Source            string       `json:"source,omitempty"`
+	InstallSource     string       `json:"install_source"`
+	MarketplaceSlug   string       `json:"marketplace_slug,omitempty"`
+	RequiredSecrets   []SecretSpec `json:"required_secrets,omitempty"`
+	ConfiguredSecrets []string     `json:"configured_secrets,omitempty"`
 }
 
 // ToMeta returns API-safe metadata without the full prompt body.
 func (s *Skill) ToMeta() SkillMeta {
 	return SkillMeta{
 		Name:            s.Name,
+		Slug:            s.Slug,
 		Description:     s.Description,
 		Source:          s.Source,
 		InstallSource:   s.InstallSource,

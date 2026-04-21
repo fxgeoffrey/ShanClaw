@@ -15,6 +15,7 @@ import (
 // or Skill (which hides Source/Dir via json:"-" tags).
 type SkillDetail struct {
 	Name              string         `json:"name"`
+	Slug              string         `json:"slug"`
 	Description       string         `json:"description"`
 	Prompt            string         `json:"prompt"`
 	Source            string         `json:"source"`
@@ -31,10 +32,19 @@ type SkillDetail struct {
 }
 
 // WriteGlobalSkill writes a skill to the global skills directory
-// (~/.shannon/skills/<name>/SKILL.md). Same atomic write pattern
+// (~/.shannon/skills/<slug>/SKILL.md). Same atomic write pattern
 // as agents.WriteAgentSkill but different path root.
+//
+// Directory is keyed by Slug (the URL/on-disk identifier); Name is the
+// frontmatter display label and may contain uppercase / CJK / spaces,
+// neither of which is safe for a filesystem path. Falls back to Name
+// for skills created before the Name/Slug split where Slug is unset.
 func WriteGlobalSkill(shannonDir string, skill *Skill) error {
-	dir := filepath.Join(shannonDir, "skills", skill.Name)
+	dirKey := skill.Slug
+	if dirKey == "" {
+		dirKey = skill.Name
+	}
+	dir := filepath.Join(shannonDir, "skills", dirKey)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}

@@ -59,11 +59,22 @@ func (t *useSkillTool) Run(ctx context.Context, argsJSON string) (agent.ToolResu
 		return agent.ToolResult{Content: "no skills available", IsError: true}, nil
 	}
 
+	// Match by Name first (the identifier shown to the LLM in the skill
+	// list), then fall back to Slug so callers that use the directory
+	// name also resolve.
 	var skill *skills.Skill
 	for _, s := range *t.skills {
 		if s.Name == args.SkillName {
 			skill = s
 			break
+		}
+	}
+	if skill == nil {
+		for _, s := range *t.skills {
+			if s.Slug == args.SkillName {
+				skill = s
+				break
+			}
 		}
 	}
 	if skill == nil {
@@ -77,12 +88,14 @@ func (t *useSkillTool) Run(ctx context.Context, argsJSON string) (agent.ToolResu
 		}, nil
 	}
 
-	// Register this skill as activated for the current run, so subsequent
-	// bash commands can access its declared secrets via environment vars.
-	// Secret values are NEVER substituted into the prompt body — they must
-	// only reach the shell child process, never the LLM context or session
-	// transcript.
-	skills.ActivatedFromContext(ctx).Add(skill.Name)
+	// Register this skill's Slug as activated for the current run, so
+	// subsequent bash commands can access its declared secrets via env
+	// vars. Slug is the key used by SecretsStore (marketplace slug =
+	// directory name); Name can differ and must not be used here.
+	// Secret values are NEVER substituted into the prompt body — they
+	// only reach the shell child process, never the LLM context or
+	// session transcript.
+	skills.ActivatedFromContext(ctx).Add(skill.Slug)
 
 	body := skill.Prompt
 	if skill.Dir != "" {

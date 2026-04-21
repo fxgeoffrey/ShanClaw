@@ -1417,11 +1417,24 @@ func (s *Server) skillSources() ([]skills.SkillSource, error) {
 	return []skills.SkillSource{global}, nil
 }
 
+// skillNamesFromRequest extracts the URL-safe identifier (Slug, falling
+// back to Name for legacy clients) for each skill entry. The returned
+// list is what gets persisted to _attached.yaml and what URL-based
+// attach routes also use — keeping body-based and URL-based attach in
+// sync so the same skill can be resolved by the loader regardless of
+// which API path wrote the manifest.
 func skillNamesFromRequest(entries []*skills.Skill) []string {
 	names := make([]string, 0, len(entries))
 	for _, skill := range entries {
-		if skill != nil && skill.Name != "" {
-			names = append(names, skill.Name)
+		if skill == nil {
+			continue
+		}
+		ident := skill.Slug
+		if ident == "" {
+			ident = skill.Name
+		}
+		if ident != "" {
+			names = append(names, ident)
 		}
 	}
 	return names
@@ -1438,8 +1451,12 @@ func (s *Server) validateInstalledSkills(names []string) error {
 	if err != nil {
 		return fmt.Errorf("load installed skills: %w", err)
 	}
-	installed := make(map[string]bool, len(list))
+	// Accept either Slug (directory / marketplace identifier) or Name
+	// (frontmatter display label) as the identifier. Slug is the primary
+	// key we advise clients to use; Name is kept for backward compat.
+	installed := make(map[string]bool, len(list)*2)
 	for _, skill := range list {
+		installed[skill.Slug] = true
 		installed[skill.Name] = true
 	}
 	var missing []string
@@ -1841,7 +1858,14 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "skill entry cannot be null")
 			return
 		}
-		if err := skills.ValidateSkillName(skill.Name); err != nil {
+		// Validate the URL-safe identifier (Slug) rather than the
+		// display Name. Legacy clients that only send Name fall through
+		// to Name validation for backward compatibility.
+		ident := skill.Slug
+		if ident == "" {
+			ident = skill.Name
+		}
+		if err := skills.ValidateSkillName(ident); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -2283,7 +2307,7 @@ func (s *Server) handleMarketplaceInstall(w http.ResponseWriter, r *http.Request
 		sources, _ := s.skillSources()
 		list, _ := skills.LoadSkills(sources...)
 		for _, skill := range list {
-			if skill.Name == entry.Slug {
+			if skill.Slug == entry.Slug {
 				writeJSON(w, http.StatusCreated, skill.ToMeta())
 				return
 			}
@@ -2291,9 +2315,16 @@ func (s *Server) handleMarketplaceInstall(w http.ResponseWriter, r *http.Request
 		// Fallback: install succeeded but the skill did not show up in
 		// LoadSkills. This shouldn't happen because InstallFromMarketplace
 		// guarantees a valid SKILL.md on success, but we return a stable
-		// 201 with minimal info rather than misleading the client.
+		// 201 with minimal info rather than misleading the client. Slug
+		// is the primary identifier clients use for subsequent CRUD, so
+		// populate it explicitly instead of leaving it empty.
+		fallbackName := entry.Name
+		if fallbackName == "" {
+			fallbackName = entry.Slug
+		}
 		writeJSON(w, http.StatusCreated, skills.SkillMeta{
-			Name:        entry.Slug,
+			Name:        fallbackName,
+			Slug:        entry.Slug,
 			Description: entry.Description,
 			Source:      "global",
 		})
@@ -2415,7 +2446,7 @@ func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
 	for _, skill := range list {
 		meta := skill.ToMeta()
 		meta.RequiredSecrets = skill.RequiredSecrets()
-		meta.ConfiguredSecrets = s.secretsStore.ConfiguredKeys(skill.Name)
+		meta.ConfiguredSecrets = s.secretsStore.ConfiguredKeys(skill.Slug)
 		metas = append(metas, meta)
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"skills": metas})
@@ -2458,7 +2489,7 @@ func (s *Server) handleInstallSkill(w http.ResponseWriter, r *http.Request) {
 	sources, _ := s.skillSources()
 	list, _ := skills.LoadSkills(sources...)
 	for _, skill := range list {
-		if skill.Name == name {
+		if skill.Slug == name {
 			writeJSON(w, http.StatusCreated, skill.ToMeta())
 			return
 		}
@@ -2484,9 +2515,10 @@ func (s *Server) handleGetSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, skill := range list {
-		if skill.Name == name {
+		if skill.Slug == name {
 			detail := skills.SkillDetail{
 				Name:               skill.Name,
+				Slug:               skill.Slug,
 				Description:        skill.Description,
 				Prompt:             skill.Prompt,
 				Source:             skill.Source,
@@ -2502,7 +2534,7 @@ func (s *Server) handleGetSkill(w http.ResponseWriter, r *http.Request) {
 				detail.AllowedTools = skill.AllowedTools
 			}
 			detail.RequiredSecrets = skill.RequiredSecrets()
-			detail.ConfiguredSecrets = s.secretsStore.ConfiguredKeys(skill.Name)
+			detail.ConfiguredSecrets = s.secretsStore.ConfiguredKeys(skill.Slug)
 			writeJSON(w, http.StatusOK, detail)
 			return
 		}
@@ -2565,14 +2597,24 @@ func (s *Server) handlePutGlobalSkill(w http.ResponseWriter, r *http.Request) {
 				fmt.Sprintf("cannot load existing skill %q (refusing to clobber AllowedTools/Metadata): %v", name, loadErr))
 			return
 		}
+		// URL param is the slug (directory identifier), not the
+		// frontmatter display label. Match by Slug so a skill whose
+		// Name differs from its Slug (e.g. "Docker" / "docker") is
+		// found and its AllowedTools/Metadata are preserved.
 		for _, existing := range list {
-			if existing.Name == name {
+			if existing.Slug == name {
 				skillToWrite = *existing
 				break
 			}
 		}
 	}
-	skillToWrite.Name = name
+	skillToWrite.Slug = name
+	// Preserve the existing Name when updating; only overwrite if the
+	// skill is brand-new (Name was never set). The URL slug must not
+	// replace a carefully chosen display label like "Docker".
+	if skillToWrite.Name == "" {
+		skillToWrite.Name = name
+	}
 	skillToWrite.Description = req.Description
 	skillToWrite.Prompt = req.Prompt
 	skillToWrite.License = req.License

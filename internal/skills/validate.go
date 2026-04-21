@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 var skillNameRegex = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`)
@@ -32,6 +33,31 @@ func ValidateSkillName(name string) error {
 	}
 	if builtinCommands[name] {
 		return fmt.Errorf("skill name %q conflicts with built-in slash command", name)
+	}
+	return nil
+}
+
+// validateFrontmatterName bounds the frontmatter.name field so it can't
+// smuggle newlines or control chars into LLM-visible contexts (skill
+// catalog, use_skill output, sticky reinjection). Unlike slugs, frontmatter
+// name is a free-form display label and may contain uppercase / mixed
+// case / CJK / spaces; we only reject hostile formatting.
+func validateFrontmatterName(name string) error {
+	if name == "" {
+		return fmt.Errorf("skill name is required in frontmatter")
+	}
+	// Count runes, not bytes, so CJK names (3 bytes per character in UTF-8)
+	// are not wrongly rejected at ~33 characters.
+	if utf8.RuneCountInString(name) > 100 {
+		return fmt.Errorf("skill frontmatter name exceeds 100 characters")
+	}
+	for _, r := range name {
+		// Reject ASCII control chars and the DEL character. U+0000–U+001F
+		// and U+007F can break the "Available Skills" list formatting or
+		// inject markers into <system-reminder> content.
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("skill frontmatter name contains a control character")
+		}
 	}
 	return nil
 }

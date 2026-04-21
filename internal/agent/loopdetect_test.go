@@ -1215,3 +1215,61 @@ func TestNudgeWindow_BurstEscalates(t *testing.T) {
 		t.Fatal("3rd nudge in 5-iter window should escalate")
 	}
 }
+
+// TestConsecutiveDup_FailFailSuccessRetry locks the invariant that a flaky
+// retry pattern (fail, fail, succeed) on the same args does NOT force-stop.
+// Real Playwright selectors race page-load timing — the model must be
+// allowed to retry without being killed at attempt 3. Rule 1: tail-success
+// after any error in the run → skip detector (model recovered).
+func TestConsecutiveDup_FailFailSuccessRetry(t *testing.T) {
+	ld := NewLoopDetector()
+	ld.Record("browser_click", `{"ref":"e1"}`, true, "element not found", "", false)
+	ld.Record("browser_click", `{"ref":"e1"}`, true, "element not found", "", false)
+	ld.Record("browser_click", `{"ref":"e1"}`, false, "", "", false)
+	action, msg := ld.Check("browser_click")
+	if action != LoopContinue {
+		t.Fatalf("fail-fail-success retry must return LoopContinue (tail recovery), got %v: %s", action, msg)
+	}
+}
+
+// TestConsecutiveDup_ThreeSuccessfulSameArgsStillStops confirms the
+// legitimate "spinning on identical successful results" case still
+// triggers. Rule 1 doesn't apply (no error in run), Rule 2 doesn't apply
+// (not all errors) → original strict threshold.
+func TestConsecutiveDup_ThreeSuccessfulSameArgsStillStops(t *testing.T) {
+	ld := NewLoopDetector()
+	for range 3 {
+		ld.Record("web_search", `{"q":"climate"}`, false, "", "", false)
+	}
+	action, _ := ld.Check("web_search")
+	if action != LoopForceStop {
+		t.Fatalf("3 successful identical web_search must still force-stop, got %v", action)
+	}
+}
+
+// TestConsecutiveDup_FourErrorsNudgesNotForceStop: 4 same-args fails is
+// past the success threshold (3) but should now use Rule 2's 2x
+// threshold (4 nudge, 5 force-stop). At 4 errors → nudge, not force-stop.
+func TestConsecutiveDup_FourErrorsNudgesNotForceStop(t *testing.T) {
+	ld := NewLoopDetector()
+	for range 4 {
+		ld.Record("browser_click", `{"ref":"e1"}`, true, "element not found", "", false)
+	}
+	action, _ := ld.Check("browser_click")
+	if action != LoopNudge {
+		t.Fatalf("4 same-args consecutive errors should nudge (error budget 4/5), got %v", action)
+	}
+}
+
+// TestConsecutiveDup_FiveAllErrorsForceStops: 5 same-args all-error hits
+// the 2x force-stop budget. No tail success, no recovery — real stuck loop.
+func TestConsecutiveDup_FiveAllErrorsForceStops(t *testing.T) {
+	ld := NewLoopDetector()
+	for range 5 {
+		ld.Record("browser_click", `{"ref":"e1"}`, true, "element not found", "", false)
+	}
+	action, _ := ld.Check("browser_click")
+	if action != LoopForceStop {
+		t.Fatalf("5 same-args consecutive errors should force-stop (2x budget), got %v", action)
+	}
+}

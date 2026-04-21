@@ -361,21 +361,48 @@ func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 	// 1a. Consecutive exact duplicate — catches back-to-back identical calls
 	// like web_search→web_search. Does NOT fire for read→edit→read patterns
 	// because the intervening edit breaks the consecutive run.
+	// IsError-aware (added 2026-04-21):
+	//
+	//   Rule 1 (tail-success skip): if the most recent call succeeded AND the
+	//   run had any error, the model has just recovered. Skip this detector —
+	//   ExactDup across the full window still catches sustained spin, and
+	//   punishing a successful retry is strictly worse than a false negative.
+	//
+	//   Rule 2 (all-errors 2x): if every call in the run is an error, treat
+	//   it as legitimate retry and double the threshold (4 nudge, 5 force-stop).
+	//   Flaky Playwright selectors race page-load timing — 3 fails is normal.
+	//
+	//   Otherwise (all-success, or mixed ending in error): original strict
+	//   threshold (2 nudge, 3 force-stop).
 	consecCount := 0
+	consecErrCount := 0
 	for i := len(ld.history) - 1; i >= 0; i-- {
 		if ld.history[i].Name != name || ld.history[i].ArgsHash != latestHash {
 			break
 		}
 		consecCount++
+		if ld.history[i].IsError {
+			consecErrCount++
+		}
 	}
 	// dupExemptTools (use_skill) are pure idempotent loaders — skip both
 	// ConsecutiveDup and ExactDup checks entirely.
-	if !dupExemptTools[name] {
-		if consecCount >= ld.consecDupThreshold+1 {
+	// recovered = tail-success after any error → model has just recovered;
+	// skip both 1a and 1b (see Rule 1 comment above).
+	recovered := consecCount > 0 &&
+		!ld.history[len(ld.history)-1].IsError &&
+		consecErrCount > 0
+
+	if !dupExemptTools[name] && consecCount > 0 && !recovered {
+		threshold := ld.consecDupThreshold
+		if consecErrCount == consecCount {
+			threshold = ld.consecDupThreshold * 2 // Rule 2: all-errors budget
+		}
+		if consecCount >= threshold+1 {
 			return LoopForceStop, fmt.Sprintf(
 				"You have called %s with identical arguments %d times in a row. Stop retrying and provide your answer now.", name, consecCount)
 		}
-		if consecCount >= ld.consecDupThreshold {
+		if consecCount >= threshold {
 			return LoopNudge, fmt.Sprintf(
 				"You've called %s %d times consecutively with identical arguments. The results won't change. Use the results you already have or try a different approach.", name, consecCount)
 		}
@@ -383,6 +410,7 @@ func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 
 	// 1b. Window-based exact duplicate — catches spread-out repeats
 	// like read→edit→read→edit→read (same args appearing 3+ times in window).
+	// Rule 1 (tail-success skip) also applies here: skip if model just recovered.
 	dupCount := 0
 	if latestHash != "" {
 		for _, rec := range ld.history {
@@ -391,7 +419,7 @@ func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 			}
 		}
 	}
-	if !dupExemptTools[name] {
+	if !dupExemptTools[name] && !recovered {
 		if dupCount >= ld.exactDupThreshold*2 {
 			return LoopForceStop, fmt.Sprintf(
 				"You have called %s with identical arguments %d times. Stop retrying and provide your answer now.", name, dupCount)

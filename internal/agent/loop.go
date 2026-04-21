@@ -1254,7 +1254,16 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	const maxResultChars = 300 // compressed tool result max chars
 
 	// Loop detection + task-aware state
-	const maxNudges = 3 // force-stop after this many nudge injections
+	// nudge escalation: ≥ maxNudges nudges within nudgeWindowIters consecutive
+	// iterations triggers force-stop. Replaces the previous flat counter that
+	// never reset, which turned 3 widely-spaced harmless nudges in a long
+	// workflow (e.g. real Teams session at iter 9/15/16) into a premature
+	// force-stop. Window of 5 means a productive iteration ages out the
+	// oldest nudge, restoring "self-recovery" headroom.
+	const (
+		maxNudges        = 3
+		nudgeWindowIters = 5
+	)
 
 	// Approval cache: tracks tool+args combos the user already approved this turn
 	approvalCache := NewApprovalCache()
@@ -1287,7 +1296,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		continuationCount    int
 		afterCheckpoint      bool
 		checkpointDone       bool
-		nudgeCount           int
+		nudges               = newNudgeWindow(maxNudges, nudgeWindowIters)
 		hallucinationNudges  int
 		lastInputTokens      int    // actual input tokens from last LLM response
 		lastOutputTokens     int    // actual output tokens from last LLM response
@@ -2787,9 +2796,8 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			return text, usage, nil
 		}
 		if worstAction == LoopNudge {
-			nudgeCount++
-			if nudgeCount >= maxNudges {
-				// Escalate: too many nudges without behavior change → force stop
+			if nudges.recordAndCheck(iterationCount) {
+				// Escalate: too many nudges within the rolling window → force stop
 				const escalationNote = "multiple approaches failed — nudges exceeded"
 				auditDetectorForceStop(escalationNote)
 				text, err := runForceStopTurn(
@@ -3382,6 +3390,36 @@ func hasNativeToolIDs(toolCalls []client.FunctionCall) bool {
 		}
 	}
 	return true
+}
+
+// nudgeWindow tracks recent nudge events by iteration index and reports
+// whether the count within the trailing `window` iterations meets `max`.
+// Replaces the previous flat `nudgeCount` counter that never reset, which
+// turned 3 widely-spaced harmless nudges in a long workflow into a force-stop.
+type nudgeWindow struct {
+	max     int
+	window  int
+	recents []int // iteration indices where nudges fired, in ascending order
+}
+
+func newNudgeWindow(max, window int) *nudgeWindow {
+	return &nudgeWindow{max: max, window: window}
+}
+
+// recordAndCheck appends `iter` and returns true if at least `max` nudges
+// have fired within the trailing `window` iterations (inclusive of iter).
+func (n *nudgeWindow) recordAndCheck(iter int) bool {
+	n.recents = append(n.recents, iter)
+	cutoff := iter - n.window + 1
+	keep := 0
+	for _, e := range n.recents {
+		if e >= cutoff {
+			n.recents[keep] = e
+			keep++
+		}
+	}
+	n.recents = n.recents[:keep]
+	return len(n.recents) >= n.max
 }
 
 // effectiveMaxIter returns a dynamic iteration limit based on tools used so far.

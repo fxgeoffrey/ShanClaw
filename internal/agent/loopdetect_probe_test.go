@@ -30,7 +30,8 @@ type probeStep struct {
 	startsNewIter bool
 }
 
-const probeMaxNudges = 3 // mirrors loop.go:1257
+const probeMaxNudges = 3  // mirrors loop.go maxNudges
+const probeNudgeWindow = 5 // mirrors loop.go nudgeWindowIters
 
 // runProbeRealistic mirrors loop.go more faithfully:
 //   - batchTolerant = {bash} (loop.go:1334-ish)
@@ -41,7 +42,7 @@ func runProbeRealistic(t *testing.T, name string, steps []probeStep) {
 	ld := NewLoopDetector()
 	ld.batchTolerant = map[string]bool{"bash": true}
 
-	nudgeCount := 0
+	nudges := newNudgeWindow(probeMaxNudges, probeNudgeWindow)
 	iterIdx := 0
 	worstAction := LoopContinue
 	worstMsg := ""
@@ -53,11 +54,12 @@ func runProbeRealistic(t *testing.T, name string, steps []probeStep) {
 			return false
 		}
 		if worstAction == LoopNudge {
-			nudgeCount++
-			t.Logf("[%s] iter %d (ended @ step %d): NUDGE #%d — %s", name, iterIdx, endStep, nudgeCount, worstMsg)
-			if nudgeCount >= probeMaxNudges {
-				t.Logf("  → ESCALATED FORCE_STOP at iteration %d, step %d/%d (nudgeCount=%d ≥ maxNudges=%d)",
-					iterIdx, endStep, len(steps), nudgeCount, probeMaxNudges)
+			escalated := nudges.recordAndCheck(iterIdx)
+			t.Logf("[%s] iter %d (ended @ step %d): NUDGE (recents=%d in last %d iters) — %s",
+				name, iterIdx, endStep, len(nudges.recents), probeNudgeWindow, worstMsg)
+			if escalated {
+				t.Logf("  → ESCALATED FORCE_STOP at iteration %d, step %d/%d (maxNudges=%d, window=%d)",
+					iterIdx, endStep, len(steps), probeMaxNudges, probeNudgeWindow)
 				return false
 			}
 		}
@@ -88,8 +90,8 @@ func runProbeRealistic(t *testing.T, name string, steps []probeStep) {
 	if !flushIter(len(steps)) {
 		return
 	}
-	t.Logf("[%s] completed all %d steps across %d iterations (nudgeCount=%d, no force-stop)",
-		name, len(steps), iterIdx, nudgeCount)
+	t.Logf("[%s] completed all %d steps across %d iterations (recents=%d in last %d iters, no force-stop)",
+		name, len(steps), iterIdx, len(nudges.recents), probeNudgeWindow)
 }
 
 // =====================================================================
@@ -398,7 +400,7 @@ func TestProbe_ReplayTeamsSession(t *testing.T) {
 	ld := NewLoopDetector()
 	ld.batchTolerant = map[string]bool{"bash": true}
 
-	nudgeCount := 0
+	nudges := newNudgeWindow(probeMaxNudges, probeNudgeWindow)
 	prevIter := -1
 	worstAction := LoopContinue
 	worstMsg := ""
@@ -411,11 +413,12 @@ func TestProbe_ReplayTeamsSession(t *testing.T) {
 			return false
 		}
 		if worstAction == LoopNudge {
-			nudgeCount++
-			t.Logf("REPLAY: iter %d (call #%d): NUDGE #%d — %s", atIter, worstAtCall, nudgeCount, worstMsg)
-			if nudgeCount >= probeMaxNudges {
-				t.Logf("  → ESCALATED FORCE_STOP at session iter %d (call #%d, nudgeCount=%d)",
-					atIter, worstAtCall, nudgeCount)
+			escalated := nudges.recordAndCheck(atIter)
+			t.Logf("REPLAY: iter %d (call #%d): NUDGE (recents=%d in last %d iters) — %s",
+				atIter, worstAtCall, len(nudges.recents), probeNudgeWindow, worstMsg)
+			if escalated {
+				t.Logf("  → ESCALATED FORCE_STOP at session iter %d (call #%d, maxNudges=%d, window=%d)",
+					atIter, worstAtCall, probeMaxNudges, probeNudgeWindow)
 				return false
 			}
 		}
@@ -447,7 +450,7 @@ func TestProbe_ReplayTeamsSession(t *testing.T) {
 	if !flushIter(len(calls), prevIter) {
 		return
 	}
-	t.Logf("REPLAY survived: completed all %d calls (%d iters), nudgeCount=%d", len(calls), prevIter, nudgeCount)
+	t.Logf("REPLAY survived: completed all %d calls (%d iters), recents=%d in last %d iters", len(calls), prevIter, len(nudges.recents), probeNudgeWindow)
 }
 
 // =====================================================================

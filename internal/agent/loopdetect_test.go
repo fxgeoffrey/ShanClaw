@@ -1185,3 +1185,33 @@ func TestLoopDetector_UseSkill_ExemptionScopedToSelf(t *testing.T) {
 		t.Fatalf("web_search ×3 same args must still force-stop after use_skill exemption activity, got %v", action)
 	}
 }
+
+// TestNudgeWindow_RollsOff documents the rolling-window semantics: nudges
+// older than `nudgeWindow` iterations age out. A long workflow with widely
+// spaced harmless nudges should never trigger maxNudges escalation.
+func TestNudgeWindow_RollsOff(t *testing.T) {
+	w := newNudgeWindow(3, 5) // 3 max, 5-iter window
+	if w.recordAndCheck(1) {
+		t.Fatal("1 nudge in window should not escalate")
+	}
+	if w.recordAndCheck(2) {
+		t.Fatal("2 nudges in window should not escalate")
+	}
+	// iter 3-7: no nudges. By iter 8, the iter-1 and iter-2 nudges should age out (cutoff = 8 - 5 + 1 = 4).
+	if w.recordAndCheck(8) {
+		t.Fatal("3rd nudge at iter 8 (window=5) should not escalate — first two aged out")
+	}
+}
+
+func TestNudgeWindow_BurstEscalates(t *testing.T) {
+	w := newNudgeWindow(3, 5)
+	if w.recordAndCheck(1) {
+		t.Fatal("1st nudge should not escalate")
+	}
+	if w.recordAndCheck(2) {
+		t.Fatal("2nd nudge should not escalate")
+	}
+	if !w.recordAndCheck(3) {
+		t.Fatal("3rd nudge in 5-iter window should escalate")
+	}
+}

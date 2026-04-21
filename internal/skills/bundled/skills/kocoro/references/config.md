@@ -17,7 +17,7 @@ Global settings control how Shannon behaves across all agents — which AI model
 - Path: /config
 - Body: `{"agent": {"model": "claude-opus-4-5"}}`
 - Response: `{"status": "updated"}`
-- Notes: PATCH merges deeply — you only need to include the fields you want to change. Protected fields (`endpoint`, `api_key`, `daemon.auto_approve`, `permissions.denied_commands`) return HTTP 409 and cannot be changed through this API.
+- Notes: PATCH merges deeply — you only need to include the fields you want to change. Protected fields (`endpoint`, `api_key`, `permissions.denied_commands`) return HTTP 409 and cannot be changed through this API.
 
 ### Reload config from disk
 - Method: POST
@@ -43,7 +43,7 @@ Global settings control how Shannon behaves across all agents — which AI model
 | `agent.max_iterations` | Max tool-use rounds per conversation turn | No |
 | `agent.skill_discovery` | Enable small-model skill matching on first turn (default: true) | No |
 | `tools.bash_timeout` | Max seconds a bash command can run (default: 120) | No |
-| `daemon.auto_approve` | Skip approval prompts for all tool calls | YES |
+| `daemon.auto_approve` | Skip approval prompts for all tool calls | No |
 | `mcp_servers` | External service integrations (see mcp reference) | No |
 
 ## Common Scenarios
@@ -82,7 +82,7 @@ See `references/memory.md` for the full mode breakdown, diagnostics, and audit e
 
 ## Safety Notes
 
-- **Protected fields**: `endpoint`, `api_key`, and `daemon.auto_approve` are protected. Attempting to modify them returns HTTP 409. These fields cannot be changed through this skill — the user must edit `~/.shannon/config.yaml` directly.
+- **Protected fields**: `endpoint` and `api_key` are protected. Attempting to modify them returns HTTP 409. These fields cannot be changed through this skill — the user must edit `~/.shannon/config.yaml` directly.
 - **Three config levels**: Changes via PATCH /config write to the global config (`~/.shannon/config.yaml`). Project-level settings (`.shannon/config.yaml`) override global settings for that project. Local settings (`.shannon/config.local.yaml`) override both.
 - **Reload after file edits**: If you edit config files directly on disk, call POST /config/reload so the daemon picks up the changes.
 - **Model names**: Use exact model IDs from your provider. Invalid model names will cause conversations to fail at the start.

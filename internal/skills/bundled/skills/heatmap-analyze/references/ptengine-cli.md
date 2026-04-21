@@ -29,6 +29,55 @@ Configuration priority (highest → lowest):
 2. Environment variable (`PTENGINE_API_KEY`)
 3. Config file
 
+### Obtaining an API Key
+
+If the user does not yet have a Ptengine API Key, walk them through the
+6-step flow in the Ptengine product. Official copy is provided in English
+and Japanese below — pick the block that matches the reply language (see
+**Reply language** at the end of this section).
+
+**English**
+
+1. Log in to the Ptengine product.
+2. Navigate to the Experience module.
+3. Click the settings icon (⚙) in the top right corner, select
+   "External App Integration".
+4. Switch to the "API Keys" tab.
+5. Click "Create API Key", enter a name and select permissions
+   (Data Upload / Data Query). For this skill, choose **Data Query** —
+   Data Upload is not required.
+6. Copy and securely store your key — it will only be shown once.
+
+**日本語**
+
+1. Ptengine にログイン。
+2. Experience モジュールに移動。
+3. 右上の設定アイコン（⚙）をクリックし、「外部アプリ連携」を選択。
+4. 「API キー」タブに切り替え。
+5. 「API キーを作成」をクリックし、名前を入力して権限範囲
+   （データアップロード / データクエリ）を選択。本 skill では
+   **データクエリ** を選択してください（データアップロードは不要）。
+6. キーをコピーして安全に保管してください（キーは作成時にのみ
+   表示されます）。
+
+Then pass the key to the CLI:
+
+```bash
+ptengine-cli config set --api-key <KEY> --profile-id <PROFILE_ID>
+```
+
+**Reply language.** This is a Phase 0 setup conversation and is NOT
+governed by the `language` parameter (which only controls the final
+analysis report). Respond in the language of the user's question:
+
+- English question → reply in English using the **English** block above.
+- 日本語の質問 → use the **日本語** block above.
+- Any other language (including Chinese) → reply in the user's language,
+  translating from the **English** block. Do not invent UI labels; if
+  unsure about a localized product string, keep the English label
+  unchanged in quotes (e.g. "External App Integration", "API Keys",
+  "Data Query", "Data Upload") so the user can still match it in the UI.
+
 ## Global Flags
 
 | Flag | Description |

@@ -12,6 +12,10 @@ set -eu
 # ptengine-cli release validated against this skill.
 PTENGINE_CLI_REF="v0.1.0"
 
+# Absolute path of this script's directory, so hint messages can point to
+# references/ptengine-cli.md with a resolvable path regardless of caller cwd.
+SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
+
 CHECK_ONLY=false
 if [ "${1-}" = "--check-only" ]; then
   CHECK_ONLY=true
@@ -43,6 +47,7 @@ if has_cli; then
     echo ""
     echo "WARNING: ptengine-cli is installed but not configured."
     echo "Run:  ptengine-cli config set --api-key <YOUR_API_KEY> --profile-id <YOUR_PROFILE_ID>"
+    echo "How to obtain a key: see $SCRIPT_DIR/references/ptengine-cli.md (section: Obtaining an API Key)."
     echo ""
     echo "STATUS: NEEDS_CONFIG"
     exit 1
@@ -69,6 +74,7 @@ if has_cli; then
   echo ""
   echo "Next step — configure your API credentials:"
   echo "  ptengine-cli config set --api-key <YOUR_API_KEY> --profile-id <YOUR_PROFILE_ID>"
+  echo "  How to obtain a key: see $SCRIPT_DIR/references/ptengine-cli.md (section: Obtaining an API Key)."
   echo ""
   echo "STATUS: INSTALLED_NEEDS_CONFIG"
 else

@@ -1273,3 +1273,57 @@ func TestConsecutiveDup_FiveAllErrorsForceStops(t *testing.T) {
 		t.Fatalf("5 same-args consecutive errors should force-stop (2x budget), got %v", action)
 	}
 }
+
+// TestExactDup_SixAllErrorsSpreadNotForceStop: 6 spread-out same-args
+// failures (with intervening different-tool calls) is past the old
+// exactDupThreshold*2=6 force-stop trigger. With all-error 2x budget,
+// the new threshold for all-errors is 6 nudge / 12 force-stop.
+// 6 errors → should nudge, not force-stop.
+func TestExactDup_SixAllErrorsSpreadNotForceStop(t *testing.T) {
+	ld := NewLoopDetector()
+	for i := 0; i < 6; i++ {
+		ld.Record("browser_click", `{"ref":"e1"}`, true, "element not found", "", false)
+		ld.Record("browser_snapshot", `{}`, false, "",
+			fmt.Sprintf("https://example.com/state%d", i), false)
+	}
+	action, msg := ld.Check("browser_click")
+	if action == LoopForceStop {
+		t.Fatalf("6 spread-out same-args errors should not force-stop (2x all-error budget), got: %s", msg)
+	}
+}
+
+// TestExactDup_SixAllSuccessSpreadStillForceStops: 6 spread-out same-args
+// successes (no errors) uses the original threshold → force-stop at 6.
+// This is real spin, not flaky retry.
+func TestExactDup_SixAllSuccessSpreadStillForceStops(t *testing.T) {
+	ld := NewLoopDetector()
+	for i := 0; i < 6; i++ {
+		ld.Record("file_read", `{"file":"main.go"}`, false, "", "", false)
+		ld.Record("file_edit",
+			fmt.Sprintf(`{"old":"a%d","new":"b%d"}`, i, i), false, "", "", false)
+	}
+	action, _ := ld.Check("file_read")
+	if action != LoopForceStop {
+		t.Fatalf("6 spread-out same-args successes must still force-stop (original budget), got %v", action)
+	}
+}
+
+// TestExactDup_MixedSuccessAndErrorsUsesStrictThreshold: if ANY of the
+// repeats succeeded, we no longer have "all errors" — use the strict
+// threshold. Mixed means the tool sometimes works; continuing to call it
+// with identical args is spin.
+// Final call in sequence is an error (so tail-success recovery skip does
+// NOT apply — recovery requires tail=success AND errCount>0).
+func TestExactDup_MixedSuccessAndErrorsUsesStrictThreshold(t *testing.T) {
+	ld := NewLoopDetector()
+	// 3 same-args: fail, success, fail — mixed, tail=error → strict threshold → nudge at 3
+	ld.Record("browser_click", `{"ref":"e1"}`, true, "element not found", "", false)
+	ld.Record("browser_snapshot", `{}`, false, "", "sigA", false)
+	ld.Record("browser_click", `{"ref":"e1"}`, false, "", "", false)
+	ld.Record("browser_snapshot", `{}`, false, "", "sigB", false)
+	ld.Record("browser_click", `{"ref":"e1"}`, true, "element not found", "", false)
+	action, _ := ld.Check("browser_click")
+	if action != LoopNudge {
+		t.Fatalf("3 mixed same-args repeats (tail=error) should nudge (strict threshold), got %v", action)
+	}
+}

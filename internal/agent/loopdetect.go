@@ -411,20 +411,34 @@ func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 	// 1b. Window-based exact duplicate — catches spread-out repeats
 	// like read→edit→read→edit→read (same args appearing 3+ times in window).
 	// Rule 1 (tail-success skip) also applies here: skip if model just recovered.
+	//
+	// IsError-aware (added 2026-04-21): if every same-args repeat in the
+	// window is an error, treat as flaky-retry recovery pattern (browser_click
+	// → snapshot → wait_for → browser_click → …) and double the threshold.
+	// Any success in the set means the tool sometimes works and continuing
+	// identical calls is real spin — strict threshold applies.
 	dupCount := 0
+	dupErrCount := 0
 	if latestHash != "" {
 		for _, rec := range ld.history {
 			if rec.Name == name && rec.ArgsHash == latestHash {
 				dupCount++
+				if rec.IsError {
+					dupErrCount++
+				}
 			}
 		}
 	}
 	if !dupExemptTools[name] && !recovered {
-		if dupCount >= ld.exactDupThreshold*2 {
+		threshold := ld.exactDupThreshold
+		if dupCount > 0 && dupErrCount == dupCount {
+			threshold = ld.exactDupThreshold * 2 // all-errors budget
+		}
+		if dupCount >= threshold*2 {
 			return LoopForceStop, fmt.Sprintf(
 				"You have called %s with identical arguments %d times. Stop retrying and provide your answer now.", name, dupCount)
 		}
-		if dupCount >= ld.exactDupThreshold {
+		if dupCount >= threshold {
 			return LoopNudge, fmt.Sprintf(
 				"You've called %s %d times with identical arguments and similar results. Try a fundamentally different approach.", name, dupCount)
 		}

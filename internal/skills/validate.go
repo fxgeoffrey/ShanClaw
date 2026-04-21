@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 var skillNameRegex = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`)
@@ -45,7 +46,9 @@ func validateFrontmatterName(name string) error {
 	if name == "" {
 		return fmt.Errorf("skill name is required in frontmatter")
 	}
-	if len(name) > 100 {
+	// Count runes, not bytes, so CJK names (3 bytes per character in UTF-8)
+	// are not wrongly rejected at ~33 characters.
+	if utf8.RuneCountInString(name) > 100 {
 		return fmt.Errorf("skill frontmatter name exceeds 100 characters")
 	}
 	for _, r := range name {

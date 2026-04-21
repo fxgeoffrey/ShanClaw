@@ -2704,12 +2704,18 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				}
 				// Arm sticky reminder if the activated skill opted in. The
 				// use_skill result doesn't carry the flag directly, so look
-				// it up on a.agentSkills by name (parsed from the call args).
+				// it up on a.agentSkills by the identifier the LLM passed.
+				// Match both Name (frontmatter display label) and Slug
+				// (directory identifier) — use_skill itself accepts both
+				// via its two-pass fallback, so sticky re-lookup must too.
 				stickySkillName = ""
 				stickySkillSnippet = ""
 				if sn := parseUseSkillName(ac.argsStr); sn != "" {
 					for _, s := range a.agentSkills {
-						if s != nil && s.Name == sn && s.StickyInstructions {
+						if s == nil || !s.StickyInstructions {
+							continue
+						}
+						if s.Name == sn || s.Slug == sn {
 							stickySkillName = s.Name
 							stickySkillSnippet = s.StickySnippet
 							stickyInjectPending = true

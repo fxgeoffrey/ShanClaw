@@ -165,8 +165,15 @@ type skillFrontmatter struct {
 
 // WriteAgentSkill writes a skill as a SKILL.md file with YAML frontmatter.
 // Uses proper YAML marshalling to handle special characters in values.
+//
+// Directory is keyed by Slug (URL-safe identifier). Falls back to Name
+// for skills that predate the Name/Slug split where Slug is unset.
 func WriteAgentSkill(agentsDir, agentName string, skill *skills.Skill) error {
-	dir := filepath.Join(agentsDir, agentName, "skills", skill.Name)
+	dirKey := skill.Slug
+	if dirKey == "" {
+		dirKey = skill.Name
+	}
+	dir := filepath.Join(agentsDir, agentName, "skills", dirKey)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
@@ -260,7 +267,16 @@ func (r *AgentCreateRequest) Validate() error {
 		if s == nil {
 			return fmt.Errorf("skill entry cannot be null")
 		}
-		if err := skills.ValidateSkillName(s.Name); err != nil {
+		// Slug is the URL-safe identifier validated by ValidateSkillName.
+		// Name is the free-form frontmatter display label ("Docker",
+		// "xiaohongshu") and must NOT be forced through the slug regex.
+		// Fall back to Name only when Slug is empty (legacy clients
+		// that predate the Name/Slug split still just send "name").
+		ident := s.Slug
+		if ident == "" {
+			ident = s.Name
+		}
+		if err := skills.ValidateSkillName(ident); err != nil {
 			return err
 		}
 	}

@@ -9,8 +9,8 @@ Skills are knowledge packages that teach agents specific abilities — like read
 ### List installed skills
 - Method: GET
 - Path: /skills
-- Response: `{"skills": [{"name": "...", "description": "...", "source": "global"}]}`
-- Notes: Shows all skills currently installed in your Shannon instance.
+- Response: `{"skills": [{"name": "...", "slug": "...", "description": "...", "source": "global", "install_source": "...", "required_secrets": [...], "configured_secrets": [...]}]}`
+- Notes: Shows all skills currently installed in your Shannon instance. Use `slug` (the on-disk / URL-safe identifier) for all subsequent CRUD calls; `name` is a free-form display label that may contain uppercase letters or CJK characters and is not guaranteed to match the slug.
 
 ### List downloadable skills (bundled)
 - Method: GET
@@ -27,27 +27,27 @@ Skills are knowledge packages that teach agents specific abilities — like read
 ### Install a bundled skill
 - Method: POST
 - Path: /skills/install/{name}
-- Response: `{"name": "...", "description": "..."}`
-- Notes: Installs from bundled (downloadable) skills. Use the name from GET /skills/downloadable.
+- Response: `{"name": "...", "slug": "...", "description": "...", "install_source": "..."}`
+- Notes: Installs from bundled (downloadable) skills. The `{name}` path segment is the skill's slug (always lowercase + hyphens).
 
 ### Install a marketplace skill
 - Method: POST
 - Path: /skills/marketplace/install/{slug}
-- Response: `{"slug": "string", "name": "string", "installed": true}`
-- Notes: Downloads and installs from the marketplace. Use the slug from GET /skills/marketplace.
+- Response: `{"slug": "string", "name": "string", "description": "string", "install_source": "marketplace"}`
+- Notes: Downloads and installs from the marketplace. Use the slug from GET /skills/marketplace. The response `name` is the frontmatter display label (may differ from the slug, e.g. slug `xiaohongshu-mcp-skills` with name `xiaohongshu`).
 
 ### Update a custom skill
 - Method: PUT
-- Path: /skills/{name}
-- Body: `{"content": "# My Skill\n\nUpdated skill instructions..."}`
+- Path: /skills/{slug}
+- Body: `{"description": "...", "prompt": "# My Skill\n\n..."}`
 - Response: `{"status": "updated"}`
-- Notes: For skills you have created or customized. Bundled skills should be reinstalled rather than edited.
+- Notes: For skills you have created or customized. The `{slug}` path segment is the directory identifier (from GET /skills). Bundled skills should be reinstalled rather than edited. The existing frontmatter `name` (display label) is preserved; supply a fresh name via the payload only when renaming intentionally.
 
 ### Delete a skill
 - Method: DELETE
-- Path: /skills/{name}?confirm=true
+- Path: /skills/{slug}?confirm=true
 - Response: `{"status": "deleted"}`
-- Notes: DESTRUCTIVE. Automatically detaches from all agents that use it.
+- Notes: DESTRUCTIVE. The `{slug}` path segment is the directory identifier. Automatically detaches from all agents that use it and clears any stored API keys from the OS keychain.
 
 ## Common Scenarios
 

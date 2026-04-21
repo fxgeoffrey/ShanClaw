@@ -1981,3 +1981,36 @@ func TestRunSyncLoop_ReturnsImmediatelyOnZeroInterval(t *testing.T) {
 		t.Fatalf("runSyncLoop should return immediately when DaemonInterval <= 0")
 	}
 }
+
+func TestServer_PatchConfigSetsDaemonAutoApprove(t *testing.T) {
+	shannonDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(shannonDir, "config.yaml"), []byte("daemon:\n  auto_approve: false\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	srv := NewServer(0, nil, &ServerDeps{ShannonDir: shannonDir}, "test")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, "/config", strings.NewReader(`{"daemon":{"auto_approve":true}}`))
+	req.Header.Set("Content-Type", "application/json")
+	srv.handlePatchConfig(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body["status"] != "updated" {
+		t.Fatalf("unexpected response body: %v", body)
+	}
+
+	data, err := os.ReadFile(filepath.Join(shannonDir, "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !strings.Contains(string(data), "auto_approve: true") {
+		t.Fatalf("expected auto_approve: true in persisted config, got %s", data)
+	}
+}

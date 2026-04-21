@@ -54,7 +54,7 @@ For detailed docs on MCP servers, permissions, project init, or multi-step recip
 **NEVER modify these fields** — the API rejects with 409. Do NOT add `X-Confirm` or any header to bypass:
 `endpoint`, `api_key`, `permissions.denied_commands`. Tell the user to edit `~/.shannon/config.yaml` directly.
 **MCP servers**: shells (`sh`, `bash`, `zsh`), wrapper commands (`env`, `nohup`, `sudo`), and eval flags (`-c`, `-e`, `--eval`) are blocked. Use actual server binaries, not shell wrappers.
-**CONFIRM first**: delete any resource, add MCP server, widen permissions.
+**CONFIRM first**: delete any resource, add MCP server, widen permissions, set `daemon.auto_approve` (disables approval prompts for all tool calls).
 
 ## Style
 

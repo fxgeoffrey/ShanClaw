@@ -86,12 +86,8 @@ func TestCheckProtectedFields_DaemonAutoApprove(t *testing.T) {
 			"auto_approve": true,
 		},
 	}
-	reason, isProtected := checkProtectedFields(patch)
-	if !isProtected {
-		t.Fatal("expected isProtected=true for daemon.auto_approve")
-	}
-	if reason != "bypasses all tool approval" {
-		t.Errorf("unexpected reason: %q", reason)
+	if _, isProtected := checkProtectedFields(patch); isProtected {
+		t.Fatal("daemon.auto_approve should be settable via API")
 	}
 }
 

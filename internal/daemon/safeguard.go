@@ -20,7 +20,6 @@ var protectedFields = map[string]string{
 // protectedNestedFields maps [parent, child] to a reason.
 var protectedNestedFields = map[[2]string]string{
 	{"permissions", "denied_commands"}: "removes security restrictions",
-	{"daemon", "auto_approve"}:        "bypasses all tool approval",
 }
 
 // checkProtectedFields inspects a config patch for protected fields.

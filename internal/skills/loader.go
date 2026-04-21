@@ -34,10 +34,13 @@ func BundledSkillSource(shannonDir string) (SkillSource, error) {
 
 type skillFrontmatter struct {
 	Name string `yaml:"name"`
-	// Slug, when present, is the canonical identifier (ClawHub convention:
-	// `name` is a display label like "Docker", `slug` is the URL identifier
-	// like "docker"). If empty, Name is used as the identity — that covers
-	// all bundled/Anthropic skills where the two are equal.
+	// Slug, when present in frontmatter, used to override the directory-name
+	// derived slug. Some ClawHub authors have historically set this to carry
+	// the URL identifier. Not part of the Agent Skills spec — per
+	// `openclaw/clawhub` (docs/skill-format.md), slug is always derived from
+	// the directory basename. We only consult it as an optional hint for
+	// authors who already shipped it; the on-disk Skill.Slug remains the
+	// authoritative identifier.
 	Slug          string         `yaml:"slug,omitempty"`
 	Description   string         `yaml:"description"`
 	License       string         `yaml:"license"`
@@ -63,15 +66,6 @@ type skillFrontmatter struct {
 	StickySnippet string `yaml:"sticky-snippet,omitempty"`
 }
 
-// canonicalName returns the authoritative identity for a skill:
-// frontmatter.slug if set, otherwise frontmatter.name. The two are equal for
-// every bundled skill; ClawHub skills separate them.
-func (fm *skillFrontmatter) canonicalName() string {
-	if fm.Slug != "" {
-		return fm.Slug
-	}
-	return fm.Name
-}
 
 func LoadSkills(sources ...SkillSource) ([]*Skill, error) {
 	seen := make(map[string]bool)
@@ -137,16 +131,14 @@ func loadSkillMD(path, dirName, source string) (*Skill, error) {
 	if fm.Name == "" {
 		return nil, fmt.Errorf("skill name is required in frontmatter")
 	}
-	// Use the canonical identity (slug when present, else name). This lets
-	// ClawHub-style frontmatter — display `name: Docker`, URL `slug: docker`
-	// — satisfy the directory-name check without forcing authors to lowercase
-	// the display label.
-	canonical := fm.canonicalName()
-	if canonical != dirName {
-		return nil, fmt.Errorf("skill %q must match directory name %q", canonical, dirName)
-	}
-	if err := ValidateSkillName(canonical); err != nil {
-		return nil, err
+	// Slug is the on-disk / URL-safe identifier, always derived from the
+	// directory name (per openclaw/clawhub docs/skill-format.md). We don't
+	// require frontmatter.name to equal dirName: some ClawHub authors ship
+	// skills where `name` is a display label (e.g. `name: xiaohongshu`) and
+	// the marketplace slug is different (e.g. `xiaohongshu-mcp-skills`).
+	// Both names are valid and must coexist so the skill still installs.
+	if err := ValidateSkillName(dirName); err != nil {
+		return nil, fmt.Errorf("directory name %q is not a valid slug: %w", dirName, err)
 	}
 	if fm.Description == "" {
 		return nil, fmt.Errorf("skill description is required")
@@ -166,7 +158,8 @@ func loadSkillMD(path, dirName, source string) (*Skill, error) {
 	}
 	snippet = truncateStickySnippet(snippet, stickySnippetMaxChars)
 	return &Skill{
-		Name:                  canonical,
+		Name:                  fm.Name,
+		Slug:                  dirName,
 		Description:           fm.Description,
 		Prompt:                prompt,
 		License:               fm.License,

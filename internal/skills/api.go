@@ -15,6 +15,7 @@ import (
 // or Skill (which hides Source/Dir via json:"-" tags).
 type SkillDetail struct {
 	Name              string         `json:"name"`
+	Slug              string         `json:"slug"`
 	Description       string         `json:"description"`
 	Prompt            string         `json:"prompt"`
 	Source            string         `json:"source"`

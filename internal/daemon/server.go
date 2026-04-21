@@ -2283,7 +2283,7 @@ func (s *Server) handleMarketplaceInstall(w http.ResponseWriter, r *http.Request
 		sources, _ := s.skillSources()
 		list, _ := skills.LoadSkills(sources...)
 		for _, skill := range list {
-			if skill.Name == entry.Slug {
+			if skill.Slug == entry.Slug {
 				writeJSON(w, http.StatusCreated, skill.ToMeta())
 				return
 			}
@@ -2458,7 +2458,7 @@ func (s *Server) handleInstallSkill(w http.ResponseWriter, r *http.Request) {
 	sources, _ := s.skillSources()
 	list, _ := skills.LoadSkills(sources...)
 	for _, skill := range list {
-		if skill.Name == name {
+		if skill.Slug == name {
 			writeJSON(w, http.StatusCreated, skill.ToMeta())
 			return
 		}
@@ -2484,9 +2484,10 @@ func (s *Server) handleGetSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, skill := range list {
-		if skill.Name == name {
+		if skill.Slug == name {
 			detail := skills.SkillDetail{
 				Name:               skill.Name,
+				Slug:               skill.Slug,
 				Description:        skill.Description,
 				Prompt:             skill.Prompt,
 				Source:             skill.Source,

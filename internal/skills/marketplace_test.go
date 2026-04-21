@@ -608,17 +608,35 @@ func TestInstallFromMarketplaceSuccess(t *testing.T) {
 	}
 }
 
-func TestInstallFromMarketplaceNameMismatch(t *testing.T) {
+// TestInstallFromMarketplaceNameDiffersFromSlug confirms that a skill whose
+// frontmatter `name` differs from the marketplace slug still installs.
+// Regression target: ClawHub's xiaohongshu-mcp-skills package ships with
+// `name: xiaohongshu`. Previous strict `canonical == dirName` rejection was
+// over-tight and not required by the openclaw/clawhub spec.
+func TestInstallFromMarketplaceNameDiffersFromSlug(t *testing.T) {
 	repo := makeFixtureRepo(t, "---\nname: different\ndescription: d\n---\n")
 	shannonDir := t.TempDir()
 
 	entry := MarketplaceEntry{Slug: "demo", Name: "demo", Repo: "file://" + repo, Ref: "main"}
-	err := InstallFromMarketplace(context.Background(), shannonDir, entry, NewSlugLocks())
-	if err == nil || !errors.Is(err, ErrInvalidSkillPayload) {
-		t.Errorf("expected ErrInvalidSkillPayload, got: %v", err)
+	if err := InstallFromMarketplace(context.Background(), shannonDir, entry, NewSlugLocks()); err != nil {
+		t.Fatalf("install should succeed despite name/slug mismatch, got: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(shannonDir, "skills", "demo")); !os.IsNotExist(err) {
-		t.Error("no skill dir should exist after rejected install")
+	if _, err := os.Stat(filepath.Join(shannonDir, "skills", "demo", "SKILL.md")); err != nil {
+		t.Errorf("SKILL.md should exist under the slug-named directory: %v", err)
+	}
+	// Loaded skill: Name from frontmatter, Slug from directory name.
+	list, err := LoadSkills(SkillSource{Dir: filepath.Join(shannonDir, "skills"), Source: SourceGlobal})
+	if err != nil {
+		t.Fatalf("LoadSkills: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(list))
+	}
+	if list[0].Name != "different" {
+		t.Errorf("Name should be %q (from frontmatter), got %q", "different", list[0].Name)
+	}
+	if list[0].Slug != "demo" {
+		t.Errorf("Slug should be %q (from directory), got %q", "demo", list[0].Slug)
 	}
 }
 
@@ -849,10 +867,9 @@ Essential Docker commands for container and image management.
 }
 
 // Regression test: ClawHub's `ivangdavila/docker` ships with `name: Docker`
-// (display label) and `slug: docker` (identity). The old case-sensitive
-// `fm.Name == dirName` check rejected it as ErrInvalidSkillPayload. With the
-// canonical-name logic (prefer fm.Slug when present), install should succeed
-// and the loaded Skill.Name should be the slug.
+// (display label) and `slug: docker` (directory identity). Install must
+// succeed and the loaded skill must be addressable by its slug; the
+// frontmatter display name is preserved as skill.Name.
 func TestInstallFromMarketplaceZipSlugOverridesDisplayName(t *testing.T) {
 	skillMD := `---
 name: Docker
@@ -888,7 +905,8 @@ Commands and workflows.
 		t.Fatalf("InstallFromMarketplace with display-name/slug split should succeed, got: %v", err)
 	}
 
-	// The installed skill should be addressable by its slug, not "Docker".
+	// The installed skill should be addressable by its slug on disk; the
+	// frontmatter display name "Docker" is preserved as skill.Name.
 	sources := []SkillSource{{Dir: filepath.Join(shannonDir, "skills"), Source: SourceGlobal}}
 	list, err := LoadSkills(sources...)
 	if err != nil {
@@ -896,22 +914,26 @@ Commands and workflows.
 	}
 	var loaded *Skill
 	for _, s := range list {
-		if s.Name == "docker" {
+		if s.Slug == "docker" {
 			loaded = s
 			break
 		}
 	}
 	if loaded == nil {
-		t.Fatal("loaded skill name should be canonicalized to the slug, got none matching \"docker\"")
+		t.Fatal("loaded skill should be addressable by slug \"docker\"")
 	}
-	for _, s := range list {
-		if s.Name == "Docker" {
-			t.Errorf("skill should NOT appear under the display name %q, only the slug", s.Name)
-		}
+	if loaded.Name != "Docker" {
+		t.Errorf("Name should preserve frontmatter display label %q, got %q", "Docker", loaded.Name)
+	}
+	if loaded.Slug != "docker" {
+		t.Errorf("Slug should be %q (from directory), got %q", "docker", loaded.Slug)
 	}
 }
 
-func TestInstallFromMarketplaceZipNameMismatch(t *testing.T) {
+// TestInstallFromMarketplaceZipNameDiffersFromSlug: zip-transport counterpart
+// to TestInstallFromMarketplaceNameDiffersFromSlug — frontmatter name differs
+// from marketplace slug, install still succeeds.
+func TestInstallFromMarketplaceZipNameDiffersFromSlug(t *testing.T) {
 	zipBytes := makeZipFixture(t, []zipFileSpec{
 		{name: "SKILL.md", body: "---\nname: actual\ndescription: d\n---\n"},
 	})
@@ -923,13 +945,11 @@ func TestInstallFromMarketplaceZipNameMismatch(t *testing.T) {
 	shannonDir := t.TempDir()
 	entry := MarketplaceEntry{Slug: "expected", Name: "expected", DownloadURL: ts.URL}
 
-	err := InstallFromMarketplace(context.Background(), shannonDir, entry, NewSlugLocks())
-	if err == nil || !errors.Is(err, ErrInvalidSkillPayload) {
-		t.Errorf("expected ErrInvalidSkillPayload for name mismatch, got: %v", err)
+	if err := InstallFromMarketplace(context.Background(), shannonDir, entry, NewSlugLocks()); err != nil {
+		t.Fatalf("install should succeed despite name/slug mismatch, got: %v", err)
 	}
-	// No skill dir should exist after rejection.
-	if _, err := os.Stat(filepath.Join(shannonDir, "skills", "expected")); !os.IsNotExist(err) {
-		t.Error("no skill dir should exist after rejected zip install")
+	if _, err := os.Stat(filepath.Join(shannonDir, "skills", "expected", "SKILL.md")); err != nil {
+		t.Errorf("SKILL.md should be installed under slug directory: %v", err)
 	}
 }
 

@@ -125,7 +125,7 @@ func TestUseSkill_PromptNeverContainsSecretValues(t *testing.T) {
 }
 
 func TestUseSkill_RegistersActivatedSkill(t *testing.T) {
-	s := &skills.Skill{Name: "my-skill", Prompt: "body", Dir: t.TempDir()}
+	s := &skills.Skill{Name: "my-skill", Slug: "my-skill", Prompt: "body", Dir: t.TempDir()}
 	skillList := []*skills.Skill{s}
 	tool := newUseSkillTool(&skillList)
 
@@ -140,6 +140,53 @@ func TestUseSkill_RegistersActivatedSkill(t *testing.T) {
 	names := set.Names()
 	if len(names) != 1 || names[0] != "my-skill" {
 		t.Errorf("expected activated set to contain [my-skill], got %v", names)
+	}
+}
+
+// TestUseSkill_RegistersSlugWhenNameDiffers ensures activation uses the
+// on-disk Slug (the key SecretsStore is indexed by) rather than the
+// frontmatter Name when the two differ. Regression target: xiaohongshu-
+// mcp-skills where Name="xiaohongshu" but secrets live under
+// Slug="xiaohongshu-mcp-skills".
+func TestUseSkill_RegistersSlugWhenNameDiffers(t *testing.T) {
+	s := &skills.Skill{Name: "xiaohongshu", Slug: "xiaohongshu-mcp-skills", Prompt: "body", Dir: t.TempDir()}
+	skillList := []*skills.Skill{s}
+	tool := newUseSkillTool(&skillList)
+
+	set := skills.NewActivatedSet()
+	ctx := skills.WithActivatedSet(context.Background(), set)
+
+	// LLM activates by Name (what it sees in the "Available Skills" list).
+	args, _ := json.Marshal(map[string]string{"skill_name": "xiaohongshu"})
+	if _, err := tool.Run(ctx, string(args)); err != nil {
+		t.Fatalf("error: %v", err)
+	}
+
+	names := set.Names()
+	if len(names) != 1 || names[0] != "xiaohongshu-mcp-skills" {
+		t.Errorf("expected activated set to contain the Slug [xiaohongshu-mcp-skills], got %v", names)
+	}
+}
+
+// TestUseSkill_ActivationBySlug covers the fallback path: some callers may
+// address the skill by its Slug (directory name) instead of frontmatter
+// Name. Both must resolve to the same skill and register the Slug.
+func TestUseSkill_ActivationBySlug(t *testing.T) {
+	s := &skills.Skill{Name: "xiaohongshu", Slug: "xiaohongshu-mcp-skills", Prompt: "body", Dir: t.TempDir()}
+	skillList := []*skills.Skill{s}
+	tool := newUseSkillTool(&skillList)
+
+	set := skills.NewActivatedSet()
+	ctx := skills.WithActivatedSet(context.Background(), set)
+
+	args, _ := json.Marshal(map[string]string{"skill_name": "xiaohongshu-mcp-skills"})
+	if _, err := tool.Run(ctx, string(args)); err != nil {
+		t.Fatalf("error: %v", err)
+	}
+
+	names := set.Names()
+	if len(names) != 1 || names[0] != "xiaohongshu-mcp-skills" {
+		t.Errorf("expected activated set to contain [xiaohongshu-mcp-skills], got %v", names)
 	}
 }
 

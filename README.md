@@ -862,6 +862,8 @@ Skills are listed in the system prompt (name + description only). The LLM activa
 
 Attached agent skills also appear as `/summarize` slash commands in the TUI.
 
+**Skill secrets.** Skills that need API keys declare required env vars in their ClawHub metadata (`metadata.openclaw.requires.env` / `metadata.clawdbot.requires.env` / `metadata.clawdis.requires.env`). Values are stored in the macOS Keychain — never on disk, never in the prompt or session transcript — and scoped to active skills only: a skill that is installed but never activated via `use_skill` contributes no env vars to `bash`. Manage keys over the daemon API (`PUT/DELETE /skills/{name}/secrets`); `GET /skills` returns `required_secrets` and `configured_secrets` (names only, never values).
+
 ### Using Agents
 
 ```bash

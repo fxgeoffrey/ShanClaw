@@ -260,6 +260,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("DELETE /sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("PATCH /sessions/{id}", s.handlePatchSession)
 	mux.HandleFunc("POST /sessions/{id}/edit", s.handleEditMessage)
+	mux.HandleFunc("POST /sessions/{id}/reset", s.handleResetSession)
 	mux.HandleFunc("GET /sessions/{id}/summary", s.handleSessionSummary)
 	mux.HandleFunc("GET /sessions/search", s.handleSessionSearch)
 	mux.HandleFunc("GET /permissions", s.handlePermissions)
@@ -782,6 +783,58 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// handleResetSession 就地清空命名 agent 的 session 对话历史，保留 ID/Title/CWD 等元数据。
+// Query: ?agent=<name> (必填) —— 默认 agent 的 session 可直接删除重建，无需本接口。
+// 会先取消正在运行的任务，再清空消息。
+func (s *Server) handleResetSession(w http.ResponseWriter, r *http.Request) {
+	if s.deps == nil {
+		writeError(w, http.StatusInternalServerError, "daemon deps not configured")
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "session id required")
+		return
+	}
+	if id != filepath.Base(id) || strings.ContainsAny(id, `/\`) {
+		writeError(w, http.StatusBadRequest, "invalid session id")
+		return
+	}
+	agentName := r.URL.Query().Get("agent")
+	if agentName == "" {
+		var body struct {
+			Agent string `json:"agent,omitempty"`
+		}
+		if r.ContentLength > 0 {
+			if !decodeBody(w, r, &body) {
+				return
+			}
+			agentName = body.Agent
+		}
+	}
+	if agentName == "" {
+		writeError(w, http.StatusBadRequest, "agent query parameter is required; use DELETE /sessions/{id} to discard a default-agent session")
+		return
+	}
+	if err := agents.ValidateAgentName(agentName); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	s.deps.SessionCache.CancelBySessionID(id)
+
+	mgr := s.deps.SessionCache.GetOrCreateManager(s.deps.SessionCache.SessionsDir(agentName))
+	if err := mgr.Reset(id); err != nil {
+		if os.IsNotExist(err) {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("session %q not found", id))
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "reset", "id": id})
 }
 
 func (s *Server) handlePatchSession(w http.ResponseWriter, r *http.Request) {

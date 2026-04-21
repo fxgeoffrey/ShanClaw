@@ -1713,6 +1713,20 @@ func (m *Model) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 		m.sessionAllowed = make(map[string]bool)
 		m.applyRuntimeContext(sess)
 		return m, m.rerenderOutput()
+	case "/reset":
+		sess := m.sessions.Current()
+		if sess == nil {
+			m.appendOutput("No active session to reset")
+			break
+		}
+		if err := m.sessions.Reset(sess.ID); err != nil {
+			m.appendOutput(fmt.Sprintf("Reset failed: %v", err))
+			break
+		}
+		m.output = nil
+		m.sessionAllowed = make(map[string]bool)
+		m.applyRuntimeContext(m.sessions.Current())
+		return m, m.rerenderOutput()
 	case "/sessions":
 		sessions, err := m.sessions.List()
 		if err != nil {
@@ -2310,6 +2324,7 @@ Commands:
   /rename <title>                Rename current session
   /copy                          Copy last response to clipboard
   /clear                         New session + clear screen
+  /reset                         Clear current session history in place
   /compact [instructions]        Compress context, keep summary
   /status                        Show session status
   /doctor                        Run diagnostic checks
@@ -2448,6 +2463,7 @@ var baseSlashCommands = []slashCmd{
 	{"/search", "Search session history"},
 	{"/session", "new | resume <n>"},
 	{"/clear", "New session + clear screen"},
+	{"/reset", "Clear current session history in place"},
 	{"/compact", "Compress context (keep summary)"},
 	{"/status", "Show session status"},
 	{"/doctor", "Run diagnostic checks"},

@@ -270,6 +270,38 @@ func (m *Manager) RebuildIndex() error {
 	return m.store.RebuildIndex()
 }
 
+// Reset 就地清空指定 session 的对话历史，保留 ID/Title/CreatedAt/CWD/Source/Channel/Usage。
+// 清理：Messages、MessageMeta、RemoteTasks、SummaryCache、SummaryCacheKey、InProgress。
+// 若目标是当前内存 session，同步更新并重置其 runtime (WorkingSet)。
+func (m *Manager) Reset(id string) error {
+	if id == "" {
+		return fmt.Errorf("session id required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	sess, err := m.store.Load(id)
+	if err != nil {
+		return err
+	}
+	sess.Messages = nil
+	sess.MessageMeta = nil
+	sess.RemoteTasks = nil
+	sess.SummaryCache = ""
+	sess.SummaryCacheKey = ""
+	sess.InProgress = false
+	if err := m.store.Save(sess); err != nil {
+		return err
+	}
+	if m.current != nil && m.current.ID == id {
+		m.current = sess
+	}
+	if rt, ok := m.runtime[id]; ok && rt != nil {
+		rt.workingSet = agent.NewWorkingSet()
+	}
+	return nil
+}
+
 // TruncateMessages 将指定 session 的消息截断为前 index 条，同步截断 MessageMeta。
 // 用于"编辑历史消息后重新发送"场景，截断点之后的所有消息将被丢弃并持久化。
 func (m *Manager) TruncateMessages(id string, index int) error {

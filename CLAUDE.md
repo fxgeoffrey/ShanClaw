@@ -148,13 +148,17 @@ When a feature is added, refactored, or significantly changed, check and update 
 - **AGENTS.md** — external-agent-facing: overlaps with CLAUDE.md (structure tree, conventions, tool inventory). Keep in sync.
 
 ### Kocoro Skill Co-Maintenance
-The `kocoro` bundled skill (`internal/skills/bundled/skills/kocoro/`) is a platform configuration assistant that teaches the AI how to manage ShanClaw via the daemon HTTP API. Its SKILL.md and 9 reference files (`references/*.md`) describe available API endpoints, config fields, and workflows. **When any of the following change, update the corresponding kocoro reference file in the same PR:**
-- Daemon API endpoints (agent/skill/schedule/rules CRUD, config PATCH) → `references/agents.md`, `references/skills.md`, `references/schedules.md`, `references/config.md`
+The `kocoro` bundled skill (`internal/skills/bundled/skills/kocoro/`) is a platform configuration assistant that teaches the AI how to manage ShanClaw via the daemon HTTP API. Its SKILL.md and 11 reference files (`references/*.md`) describe available API endpoints, config fields, and workflows. **Kocoro is the AI's only source of truth for ShanClaw's HTTP surface — if it doesn't know an endpoint exists, it will hallucinate a workaround (e.g., telling users to edit `.env` when the API handles secrets).**
+
+**Mechanical check**: every `mux.HandleFunc(...)` line in `internal/daemon/server.go` must have a matching entry in some `references/*.md`. When adding a new endpoint or feature (not just modifying existing ones), update the corresponding kocoro reference file in the same PR:
+- Daemon API endpoints — main resources AND sub-resources (`/skills/{name}/secrets`, `/skills/{name}/scripts`, `/agents/{name}/skills/*`, `/agents/{name}/commands/*`, `/skills/marketplace/*`) → `references/agents.md`, `references/skills.md`, `references/schedules.md`, `references/config.md`
 - MCP server config schema or validation → `references/mcp.md`
 - Permission model or safety gates → `references/permissions.md`
 - Project init behavior → `references/project-init.md`
 - Instructions/rules file structure → `references/instructions.md`
 - Multi-step setup recipes → `references/recipes.md`
+- Session sync behavior (`internal/sync/`, config keys under `sync.*`) → `references/session-sync.md`
+- Memory client config or sidecar protocol (`internal/memory/`, config keys under `memory.*`) → `references/memory.md`
 - Protected config fields or tool filter (`allowed-tools`) → `SKILL.md` security section
 
 ### Agent Names

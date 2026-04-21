@@ -36,13 +36,15 @@ body: {"name": "agent-name", "prompt": "You are a ... assistant. You help users 
 
 **Attach skill to agent:** `http PUT http://localhost:7533/agents/{name}/skills/{skill}`
 
+**Set skill API keys:** `http PUT http://localhost:7533/skills/{slug}/secrets` body: `{"KEY_NAME": "value"}` (values go to OS keychain, NEVER edit `.env` or agent config for skill keys — see `references/skills.md`)
+
 **Update settings:** `http PATCH http://localhost:7533/config` body: `{"agent": {"temperature": 0.7}}`
 
 **Create rule:** `http PUT http://localhost:7533/rules/{name}` body: `{"content": "..."}`
 
 **Create schedule:** `http POST http://localhost:7533/schedules` body: `{"prompt": "...", "cron": "0 9 * * 1-5"}`
 
-For detailed docs on MCP servers, permissions, project init, or multi-step recipes, load the relevant reference:
+For detailed docs on MCP servers, skill API keys, permissions, project init, or multi-step recipes, load the relevant reference:
 `references/agents.md` · `references/skills.md` · `references/config.md` · `references/mcp.md` · `references/instructions.md` · `references/schedules.md` · `references/permissions.md` · `references/project-init.md` · `references/recipes.md` · `references/session-sync.md` · `references/memory.md`
 
 - [Session sync](references/session-sync.md) — opt-in daily upload of local sessions to Shannon Cloud

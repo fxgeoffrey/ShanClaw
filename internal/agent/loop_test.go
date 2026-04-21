@@ -3946,7 +3946,8 @@ func TestForceStopExit_MaxNudgesPath_SynthesisPromptShape(t *testing.T) {
 		llmCallCount++
 		if llmCallCount <= 6 {
 			// 6 failing-tool calls trigger SameToolError nudges at 4,5,6 →
-			// nudgeCount reaches maxNudges=3 → runForceStopTurn escalation.
+			// 3 nudges within the rolling window (maxNudges=3, nudgeWindowIters=5)
+			// → runForceStopTurn escalation.
 			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
 				toolCall("failing_tool", fmt.Sprintf(`{"attempt":%d}`, llmCallCount)), 10, 5))
 			return

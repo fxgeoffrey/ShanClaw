@@ -1165,15 +1165,23 @@ func TestLoopDetector_UseSkill_RepeatedNeverFiresAnyDup(t *testing.T) {
 	}
 }
 
-// TestLoopDetector_UseSkill_DifferentArgsNotAffected: sanity — different
-// skill names still go through normal flow (not relevant but guards against
-// over-broad exemption accidentally suppressing legitimate signals).
-func TestLoopDetector_UseSkill_DifferentArgsNotAffected(t *testing.T) {
+// TestLoopDetector_UseSkill_ExemptionScopedToSelf guards against the
+// dupExempt entry leaking into other tools. After 5 use_skill calls
+// (which would normally trip ExactDup), records 3 same-args web_search
+// calls — those must still force-stop. This catches the regression
+// where an over-broad exemption (e.g. checking against the whole
+// dupExemptTools map outside the name-scoped path) would suppress
+// legitimate signals on adjacent tools.
+func TestLoopDetector_UseSkill_ExemptionScopedToSelf(t *testing.T) {
 	ld := NewLoopDetector()
-	ld.Record("use_skill", `{"skill_name":"kocoro"}`, false, "", "", false)
-	ld.Record("use_skill", `{"skill_name":"playwright"}`, false, "", "", false)
-	action, _ := ld.Check("use_skill")
-	if action != LoopContinue {
-		t.Fatalf("use_skill with different args must return LoopContinue, got %v", action)
+	for range 5 {
+		ld.Record("use_skill", `{"skill_name":"kocoro"}`, false, "", "", false)
+	}
+	for range 3 {
+		ld.Record("web_search", `{"q":"climate"}`, false, "", "", false)
+	}
+	action, _ := ld.Check("web_search")
+	if action != LoopForceStop {
+		t.Fatalf("web_search ×3 same args must still force-stop after use_skill exemption activity, got %v", action)
 	}
 }

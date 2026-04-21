@@ -29,6 +29,33 @@ Configuration priority (highest → lowest):
 2. Environment variable (`PTENGINE_API_KEY`)
 3. Config file
 
+### Obtaining an API Key
+
+If the user does not yet have a Ptengine API Key, walk them through these
+steps in the Ptengine product. UI labels below show the Chinese product
+strings in quotes so users on any locale can match the elements:
+
+1. Log in to Ptengine.
+2. Open the **Experience** module ("Experience 模块").
+3. Click the settings icon (⚙) in the top-right corner and choose
+   **External App Integration** ("外部应用集成").
+4. Switch to the **API Keys** tab ("API 密钥").
+5. Click **Create API Key** ("创建 API 密钥"), enter a name, and select
+   the permission scope. For this skill, choose **Data Query** ("数据查询")
+   — Data Upload ("数据上传") is not required.
+6. Copy the key and store it safely — it is shown **only once** at creation
+   time and cannot be retrieved later.
+
+Then pass the key to the CLI:
+
+```bash
+ptengine-cli config set --api-key <KEY> --profile-id <PROFILE_ID>
+```
+
+When explaining these steps to the end user, translate the narrative into
+their requested analysis language (CHINESE / ENGLISH / JAPANESE) but keep
+the quoted UI labels intact so they can locate each element in the product.
+
 ## Global Flags
 
 | Flag | Description |

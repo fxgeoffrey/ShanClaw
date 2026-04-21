@@ -43,6 +43,7 @@ if has_cli; then
     echo ""
     echo "WARNING: ptengine-cli is installed but not configured."
     echo "Run:  ptengine-cli config set --api-key <YOUR_API_KEY> --profile-id <YOUR_PROFILE_ID>"
+    echo "Don't have an API Key? See references/ptengine-cli.md - 'Obtaining an API Key'."
     echo ""
     echo "STATUS: NEEDS_CONFIG"
     exit 1
@@ -69,6 +70,7 @@ if has_cli; then
   echo ""
   echo "Next step — configure your API credentials:"
   echo "  ptengine-cli config set --api-key <YOUR_API_KEY> --profile-id <YOUR_PROFILE_ID>"
+  echo "  (How to obtain a key: see references/ptengine-cli.md - 'Obtaining an API Key')"
   echo ""
   echo "STATUS: INSTALLED_NEEDS_CONFIG"
 else

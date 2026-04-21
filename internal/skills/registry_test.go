@@ -46,6 +46,28 @@ func TestRequiredSecrets_Clawdbot(t *testing.T) {
 	}
 }
 
+// TestRequiredSecrets_Clawdis covers the third interchangeable parent
+// key accepted by the ClawHub spec. Rarely used in practice but
+// documented — skills that do use it must parse correctly.
+func TestRequiredSecrets_Clawdis(t *testing.T) {
+	s := &Skill{
+		Metadata: map[string]any{
+			"clawdis": map[string]any{
+				"requires": map[string]any{
+					"env": []any{"SOME_API_KEY"},
+				},
+			},
+		},
+	}
+	secrets := s.RequiredSecrets()
+	if len(secrets) != 1 {
+		t.Fatalf("expected 1 secret, got %d", len(secrets))
+	}
+	if secrets[0].Key != "SOME_API_KEY" {
+		t.Errorf("expected key SOME_API_KEY, got %s", secrets[0].Key)
+	}
+}
+
 func TestRequiredSecrets_BothSourcesMerged(t *testing.T) {
 	s := &Skill{
 		Metadata: map[string]any{

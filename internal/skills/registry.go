@@ -80,16 +80,18 @@ func (s *Skill) ToMeta() SkillMeta {
 	}
 }
 
-// RequiredSecrets parses requires.env from ClawHub metadata
-// (metadata.openclaw.requires.env and metadata.clawdbot.requires.env).
-// Returns nil if no secrets are declared or metadata is malformed.
+// RequiredSecrets parses requires.env from ClawHub metadata. The spec
+// accepts three interchangeable parent keys (openclaw / clawdbot / clawdis)
+// pointing at the same ClawdisSkillMetadataSchema — see
+// https://github.com/openclaw/clawhub/blob/main/docs/spec.md. Returns
+// nil if no secrets are declared or metadata is malformed.
 func (s *Skill) RequiredSecrets() []SecretSpec {
 	if len(s.Metadata) == 0 {
 		return nil
 	}
 	seen := map[string]bool{}
 	var result []SecretSpec
-	for _, parentKey := range []string{"openclaw", "clawdbot"} {
+	for _, parentKey := range []string{"openclaw", "clawdbot", "clawdis"} {
 		envKeys := extractRequiresEnv(s.Metadata, parentKey)
 		for _, key := range envKeys {
 			if seen[key] {

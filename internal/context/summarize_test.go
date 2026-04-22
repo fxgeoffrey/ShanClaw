@@ -271,3 +271,22 @@ func TestGenerateSummary_ReturnsUsage(t *testing.T) {
 		t.Errorf("usage not propagated: got %+v", usage)
 	}
 }
+
+// TestSummarizePrompt_RequiresStructuredSections asserts the summarization
+// prompt explicitly instructs the LLM to emit three working-state sections
+// inside <summary>. This is a guardrail against future edits silently
+// dropping the structure — if the sections are removed, post-compaction
+// behavior regresses (model re-reads files it had open, re-activates skills).
+func TestSummarizePrompt_RequiresStructuredSections(t *testing.T) {
+	required := []string{
+		"Open files",
+		"Active skill",
+		"Loaded tool",
+	}
+	for _, phrase := range required {
+		if !strings.Contains(summarizePrompt, phrase) {
+			t.Errorf("summarizePrompt must instruct LLM to include section %q; current prompt:\n%s",
+				phrase, summarizePrompt)
+		}
+	}
+}

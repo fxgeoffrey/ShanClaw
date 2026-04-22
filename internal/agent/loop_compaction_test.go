@@ -917,3 +917,154 @@ func TestAgentLoop_ReactiveCompaction_UsesEmergencyFallbackWhenSoftStillOverBudg
 		t.Fatalf("unexpected call order: %v", gotCalls)
 	}
 }
+
+// TestAgentLoop_CompactionTriggersOnWarmCache is a regression test for the
+// compaction-gate fix that sums cached tokens into the gate's input.
+//
+// Before the fix, lastInputTokens was assigned normalizedUsage.InputTokens —
+// which Anthropic defines as *excluding* cached tokens. A long warm-cache
+// session would report input_tokens of a few hundred while cache_read_tokens
+// carried the real 90K+ prompt, so ShouldCompact never tripped and compaction
+// never fired until the cache went cold.
+//
+// After the fix, totalPromptTokens(u) = input + cache_read + cache_creation,
+// which reflects the real context-window consumption.
+//
+// This test drives the loop against a mock that always reports a small
+// InputTokens but a large CacheReadTokens. Once messages grow past
+// MinShapeable (9), the gate must trigger — PersistLearnings + GenerateSummary
+// must both fire. If the test fails, the gate has regressed to the pre-fix
+// behaviour.
+func TestAgentLoop_CompactionTriggersOnWarmCache(t *testing.T) {
+	memoryDir := t.TempDir()
+
+	var mu sync.Mutex
+	var calls []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := readBody(r.Body)
+		defer r.Body.Close()
+
+		var req struct {
+			ModelTier string `json:"model_tier"`
+			Messages  []struct {
+				Role    string          `json:"role"`
+				Content json.RawMessage `json:"content"`
+			} `json:"messages"`
+		}
+		json.Unmarshal(raw, &req)
+
+		mu.Lock()
+		callNum := len(calls) + 1
+
+		if req.ModelTier == "small" {
+			isPersist := false
+			isSummary := false
+			for _, m := range req.Messages {
+				var text string
+				json.Unmarshal(m.Content, &text)
+				if strings.Contains(text, "extracting durable knowledge") {
+					isPersist = true
+				}
+				if strings.Contains(text, "Compress the following conversation") {
+					isSummary = true
+				}
+			}
+			if isPersist {
+				calls = append(calls, fmt.Sprintf("call %d: PERSIST", callNum))
+				mu.Unlock()
+				json.NewEncoder(w).Encode(nativeResponse(
+					"- Warm-cache compaction fired correctly",
+					"end_turn", nil, 50, 30))
+				return
+			}
+			if isSummary {
+				calls = append(calls, fmt.Sprintf("call %d: SUMMARY", callNum))
+				mu.Unlock()
+				json.NewEncoder(w).Encode(nativeResponse(
+					"Agent summarised cached history.", "end_turn", nil, 50, 30))
+				return
+			}
+			calls = append(calls, fmt.Sprintf("call %d: small-other", callNum))
+			mu.Unlock()
+			json.NewEncoder(w).Encode(nativeResponse("ok", "end_turn", nil, 50, 30))
+			return
+		}
+
+		// Main-tier: simulate a warm cache — small InputTokens, large CacheReadTokens.
+		// context_window=2000 so threshold = 1700. InputTokens alone (200) is below
+		// threshold; total prompt (200 + 1800 cache_read = 2000) is above. Pre-fix
+		// code reads only InputTokens and would NOT compact; post-fix reads
+		// totalPromptTokens and SHOULD compact once msgCount > MinShapeable (9).
+		msgCount := len(req.Messages)
+		resp := client.CompletionResponse{
+			Model:        "test-model",
+			FinishReason: "tool_use",
+			FunctionCall: nil,
+			ToolCalls: []client.FunctionCall{{
+				Name:      "think",
+				Arguments: json.RawMessage(fmt.Sprintf(`{"thought":"step with %d msgs"}`, msgCount)),
+			}},
+			Usage: client.Usage{
+				InputTokens:     200,
+				OutputTokens:    50,
+				TotalTokens:     250,
+				CacheReadTokens: 1800,
+			},
+			RequestID: "req-test",
+		}
+		if msgCount >= 12 {
+			// Emit end_turn so the run can terminate after compaction fires.
+			resp.FinishReason = "end_turn"
+			resp.ToolCalls = nil
+			resp.OutputText = "Analysis complete after warm-cache compaction."
+		}
+		calls = append(calls, fmt.Sprintf("call %d: MAIN (msgs=%d, input=200, cache_read=1800)", callNum, msgCount))
+		mu.Unlock()
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&thinkTool{})
+
+	handler := &mockHandler{approveResult: true}
+
+	loop := NewAgentLoop(gw, reg, "medium", "", 20, 2000, 200, nil, nil, nil)
+	loop.SetContextWindow(2000)
+	loop.SetMemoryDir(memoryDir)
+	loop.SetHandler(handler)
+
+	_, _, err := loop.Run(context.Background(),
+		"Run through several reasoning steps so message count grows past MinShapeable.",
+		nil, nil)
+	if err != nil {
+		t.Logf("Run error (iteration limit is acceptable): %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	t.Logf("\n=== Call sequence (%d total) ===", len(calls))
+	for _, c := range calls {
+		t.Logf("  %s", c)
+	}
+
+	hasPersist := false
+	hasSummary := false
+	for _, c := range calls {
+		if strings.Contains(c, "PERSIST") {
+			hasPersist = true
+		}
+		if strings.Contains(c, "SUMMARY") {
+			hasSummary = true
+		}
+	}
+
+	if !hasPersist {
+		t.Error("PersistLearnings must fire once warm-cache total prompt exceeds 85% — gate regressed to pre-fix behavior")
+	}
+	if !hasSummary {
+		t.Error("GenerateSummary must fire once warm-cache total prompt exceeds 85% — gate regressed to pre-fix behavior")
+	}
+}

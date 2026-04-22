@@ -947,6 +947,22 @@ func TestLoopDetector_BrowserSameToolStillDetected(t *testing.T) {
 	}
 }
 
+// TestLoopDetector_BrowserSnapshotConsecutiveDupStillForceStops preserves the
+// load-bearing polling guard after the repeatable-result-only relaxation:
+// repeated browser_snapshot calls with identical args must still be stopped by
+// the duplicate detectors instead of silently inheriting the raised threshold.
+func TestLoopDetector_BrowserSnapshotConsecutiveDupStillForceStops(t *testing.T) {
+	ld := NewLoopDetector()
+	const pageURL = "https://example.com/app"
+	for range 3 {
+		ld.Record("browser_snapshot", `{}`, false, "", pageURL, false)
+	}
+	action, msg := ld.Check("browser_snapshot")
+	if action != LoopForceStop {
+		t.Fatalf("3 identical browser_snapshot calls must still force-stop via duplicate detection, got %v: %s", action, msg)
+	}
+}
+
 // TestIsReadMCPName locks the read-verb whitelist used to populate
 // the loop detector's batchTolerant set. Read-only MCP tools must match
 // (eligible for uniqueness-gated NoProgress relief); write-capable tools
@@ -1328,6 +1344,23 @@ func TestExactDup_MixedSuccessAndErrorsUsesStrictThreshold(t *testing.T) {
 	}
 }
 
+// TestExactDup_FailFailSuccessSpreadRetrySkipsOnRecoveredTail documents the
+// spread-out retry shape the comments describe for ExactDup: the model retries
+// the same browser_click across intervening snapshots, then succeeds. The
+// first success after a same-args error streak is recovery, not spin.
+func TestExactDup_FailFailSuccessSpreadRetrySkipsOnRecoveredTail(t *testing.T) {
+	ld := NewLoopDetector()
+	ld.Record("browser_click", `{"ref":"e1"}`, true, "element not found", "", false)
+	ld.Record("browser_snapshot", `{}`, false, "", "https://example.com/state1", false)
+	ld.Record("browser_click", `{"ref":"e1"}`, true, "element not found", "", false)
+	ld.Record("browser_snapshot", `{}`, false, "", "https://example.com/state2", false)
+	ld.Record("browser_click", `{"ref":"e1"}`, false, "", "", false)
+	action, msg := ld.Check("browser_click")
+	if action != LoopContinue {
+		t.Fatalf("fail-snapshot-fail-snapshot-success must return LoopContinue (spread recovery), got %v: %s", action, msg)
+	}
+}
+
 // TestFamilyNoProgress_RepeatableVaryingArgsUnder15Silent: 14 varying-args
 // browser_snapshot calls on a stable URL. Pre-fix: FamilyNoProgress main
 // path force-stops at progressCount=7. Post-fix: repeatable + no topic
@@ -1364,6 +1397,24 @@ func TestFamilyNoProgress_RepeatableFormFillContinues(t *testing.T) {
 	action, _ := ld.Check("browser_click")
 	if action != LoopContinue {
 		t.Fatalf("10 varying-args browser_click on stable URL (form fill) must continue, got %v", action)
+	}
+}
+
+// TestFamilyNoProgress_RepeatableResultOnly_SelfTopicOnlySilentBelow15 covers
+// repeatable tools whose args include a URL, so the latest topic hash matches
+// the current call itself but no prior calls. That is still result-only: the
+// strong topic signal is absent, so stable result_sig should stay silent until
+// the raised threshold instead of force-stopping at 7.
+func TestFamilyNoProgress_RepeatableResultOnly_SelfTopicOnlySilentBelow15(t *testing.T) {
+	ld := NewLoopDetector()
+	const resultSig = "https://app.example.com/search"
+	for i := 0; i < 7; i++ {
+		args := fmt.Sprintf(`{"url":"https://app.example.com/search?q=item-%d"}`, i)
+		ld.Record("browser_navigate", args, false, "", resultSig, false)
+	}
+	action, msg := ld.Check("browser_navigate")
+	if action != LoopContinue {
+		t.Fatalf("7 browser_navigate calls with self-only topic match and stable result_sig must stay silent below 15, got %v: %s", action, msg)
 	}
 }
 

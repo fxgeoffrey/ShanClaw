@@ -254,17 +254,27 @@ func isReadMCPName(name string) bool {
 }
 
 // NewLoopDetector creates a detector with production defaults.
+//
+// Threshold policy (v2, 2026-04-22): values are tuned for Claude 4.X
+// self-recovery behavior. The previous (3.5-era) defaults were 2/3/4/8
+// and produced frequent false positives — newer models reliably notice
+// they're stuck and switch approach without external intervention.
+// Raised values trade off slightly later detection of genuine spin for
+// dramatically fewer false-positive nudges/force-stops on legitimate
+// iterative workflows (refactor loops, multi-source research, form
+// fills). The unit tests assert the relationships, not the absolute
+// numbers — so retuning is a one-line change here.
 func NewLoopDetector() *LoopDetector {
 	return &LoopDetector{
 		history:                 make([]ToolCallRecord, 0, 20),
 		historySize:             20,
-		consecDupThreshold:      2,
-		exactDupThreshold:       3,
-		sameToolErrThreshold:    4,
-		noProgressThreshold:     8,
+		consecDupThreshold:      3, // v2: 2 → 3 (was over-strict for re-search/re-fetch)
+		exactDupThreshold:       5, // v2: 3 → 5 (refactor read→edit→read iteration is common)
+		sameToolErrThreshold:    6, // v2: 4 → 6 (cross-args retry needs more headroom)
+		noProgressThreshold:     12, // v2: 8 → 12 (legitimate research uses many same-tool calls)
 		repeatableTools:         repeatableGUITools,
 		semiRepeatableTools:     semiRepeatableProdTools,
-		semiRepeatableThreshold: 12,
+		semiRepeatableThreshold: 16, // v2: 12 → 16 (bash multi-step scripting)
 	}
 }
 
@@ -392,6 +402,7 @@ func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 	recovered := consecCount > 0 &&
 		!ld.history[len(ld.history)-1].IsError &&
 		consecErrCount > 0
+	exactRecovered := latestRecoveredAfterSameArgsErrors(ld.history, name, latestHash)
 
 	if !dupExemptTools[name] && consecCount > 0 && !recovered {
 		threshold := ld.consecDupThreshold
@@ -429,7 +440,7 @@ func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 			}
 		}
 	}
-	if !dupExemptTools[name] && !recovered {
+	if !dupExemptTools[name] && !exactRecovered {
 		threshold := ld.exactDupThreshold
 		if dupCount > 0 && dupErrCount == dupCount {
 			threshold = ld.exactDupThreshold * 2 // all-errors budget
@@ -516,15 +527,24 @@ func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 		// For repeatable tools (browser_*, screenshot, accessibility, computer),
 		// a stable result_sig is a weak "no progress" signal: SPA workflows and
 		// form fills legitimately share the same URL across many operations.
-		// When the strong topic-based signal is absent (sameTopicCount==0), use
-		// a single force-stop threshold at 15 and skip intermediate nudges —
-		// nudges here would stack with the rolling-window escalation (loop.go's
-		// nudges window) and kill long but legitimate form fills.
+		// When the strong topic-based signal is absent (no prior same-topic
+		// collisions beyond the current call itself), use a single force-stop
+		// threshold at 15 and skip intermediate nudges — nudges here would stack
+		// with the rolling-window escalation (loop.go's nudges window) and kill
+		// long but legitimate form fills.
 		//
 		// Non-repeatable families and repeatable tools with actual topic-signal
 		// collisions still use the original 3/5/7 path.
 		isRepeatable := isRepeatableToolName(ld.repeatableTools, name)
-		repeatableResultOnly := isRepeatable && sameTopicCount == 0
+		// sameTopicCount includes the current call itself whenever latestTopic is
+		// non-empty. Treat "self only" as no strong topic signal — the detector
+		// should only use the stricter topic-based thresholds when prior calls
+		// collide on the same normalized topic.
+		topicCollisions := sameTopicCount
+		if latestTopic != "" && topicCollisions > 0 {
+			topicCollisions--
+		}
+		repeatableResultOnly := isRepeatable && topicCollisions == 0
 
 		if repeatableResultOnly {
 			if progressCount >= 15 {
@@ -532,13 +552,16 @@ func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 			}
 			// Below 15: silent. No nudge tier — see rationale above.
 		} else {
-			if progressCount >= 7 {
+			// v2 (2026-04-22): raised from 3/5/7 → 5/8/12. Multi-source research
+			// (3 different queries on the same topic) is a legitimate pattern;
+			// the old thresholds nudged the model immediately on a 3rd query.
+			if progressCount >= 12 {
 				return LoopForceStop, familyNoProgressMessage(family, progressCount, familyCount, 2)
 			}
-			if progressCount >= 5 {
+			if progressCount >= 8 {
 				return LoopNudge, familyNoProgressMessage(family, progressCount, familyCount, 1)
 			}
-			if progressCount >= 3 {
+			if progressCount >= 5 {
 				return LoopNudge, familyNoProgressMessage(family, progressCount, familyCount, 0)
 			}
 		}
@@ -555,11 +578,15 @@ func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 					sameToolInFamily++
 				}
 			}
-			if sameToolInFamily >= 7 {
+			// v2 (2026-04-22): raised from 5/7 → 8/12. This fallback fires only
+			// when topic/result tracking was empty (e.g. file_* / grep / glob
+			// where there's no URL or web topic to dedupe by). Real research
+			// sessions can hit a single tool 6-10 times legitimately.
+			if sameToolInFamily >= 12 {
 				return LoopForceStop, fmt.Sprintf(
 					"You have called %s %d times without meaningful progress. Provide your answer now.", name, sameToolInFamily)
 			}
-			if sameToolInFamily >= 5 {
+			if sameToolInFamily >= 8 {
 				return LoopNudge, fmt.Sprintf(
 					"You've called %s %d times. Consider whether you're making progress or stuck in a loop.", name, sameToolInFamily)
 			}
@@ -581,11 +608,14 @@ func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 			}
 			unproductiveStreak++
 		}
-		if unproductiveStreak >= 8 {
+		// v2 (2026-04-22): raised from 5/8 → 7/12. Rare-information lookups
+		// (e.g. "find this obscure error string") legitimately need many
+		// query variants before finding a hit.
+		if unproductiveStreak >= 12 {
 			return LoopForceStop, fmt.Sprintf(
 				"You have made %d consecutive unproductive search calls. Stop searching and use what you have, or ask the user for guidance.", unproductiveStreak)
 		}
-		if unproductiveStreak >= 5 {
+		if unproductiveStreak >= 7 {
 			return LoopNudge, fmt.Sprintf(
 				"You've made %d search calls without finding useful results. Reconsider your approach — try different search terms, check if the file/pattern exists, or ask the user for guidance.", unproductiveStreak)
 		}
@@ -648,6 +678,36 @@ func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 	}
 
 	return LoopContinue, ""
+}
+
+// latestRecoveredAfterSameArgsErrors reports whether the latest same-name,
+// same-args call is the first success after a recent same-args error streak.
+// Intervening different tools do not break this recovery pattern for ExactDup:
+// browser_click(e1,error) → browser_snapshot → browser_click(e1,success) is
+// still a legitimate retry recovery, not spread-out spin.
+func latestRecoveredAfterSameArgsErrors(history []ToolCallRecord, name, latestHash string) bool {
+	if len(history) == 0 || latestHash == "" {
+		return false
+	}
+	latest := history[len(history)-1]
+	if latest.Name != name || latest.ArgsHash != latestHash || latest.IsError {
+		return false
+	}
+
+	sawError := false
+	for i := len(history) - 2; i >= 0; i-- {
+		rec := history[i]
+		if rec.Name != name || rec.ArgsHash != latestHash {
+			continue
+		}
+		if rec.IsError {
+			sawError = true
+			continue
+		}
+		// An earlier same-args success means the recovery already happened.
+		return sawError
+	}
+	return sawError
 }
 
 func hashArgs(args string) string {

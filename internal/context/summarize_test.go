@@ -389,6 +389,7 @@ func TestSummarizePrompt_RequiresStructuredSections(t *testing.T) {
 		"Open files",
 		"Active skill",
 		"Loaded tool",
+		"Never return an empty",
 	}
 	for _, phrase := range required {
 		if !strings.Contains(summarizePrompt, phrase) {

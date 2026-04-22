@@ -1,7 +1,9 @@
 package context
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -15,19 +17,36 @@ Phase 1 — Write a chronological analysis inside <analysis> tags:
 - Note every user correction, decision, or preference change
 - Track files read, modified, or created
 - Record errors, blockers, and their resolutions
+- Note which skills were activated via use_skill and any tool_search schema loads
 
-Phase 2 — Write the final summary inside <summary> tags:
-- Distill the analysis into what a continuation needs to know
-- Preserve user corrections and decisions (these are highest priority)
-- Include current task state and next steps
-- Be factual and brief
+Phase 2 — Write the final summary inside <summary> tags. The summary MUST contain these labeled sections in this order:
+
+## Current task & next steps
+What the user is working on and what the model was about to do when compacted.
+
+## User corrections & decisions
+Every correction, preference, or explicit decision the user made. Highest-priority content — never omit.
+
+## Open files / important reads
+Files the model has read this session and still needs awareness of. List one per line as "path — one-line purpose" (e.g. "internal/agent/loop.go — core agentic loop being modified"). Do NOT include file contents; only paths + purpose. Omit files that were only glanced at and are no longer relevant.
+
+## Active skill policies
+Skills activated via use_skill whose guidance still applies. One bullet per skill: "skill-name — one-line what-it-enforces" (e.g. "test-driven-development — write failing test before implementation"). Do NOT reproduce SKILL.md bodies.
+
+## Loaded tool capabilities
+Tools whose schemas were pulled in via tool_search this session. One comma-separated line (e.g. "Loaded: linear_search_issues, linear_create_issue, github_list_prs"). Omit this section entirely if tool_search was never called.
+
+Rules:
+- Be factual and brief. The goal is continuation, not exposition.
+- If a section has no content, omit its header rather than writing "none" or "N/A".
+- Do not add sections beyond the five above.
 
 Format your response as:
 <analysis>
 [chronological walkthrough]
 </analysis>
 <summary>
-[concise summary for continuation]
+[structured summary with the sections above]
 </summary>`
 
 // Completer is the interface for making LLM completion calls.
@@ -110,10 +129,9 @@ func extractSummary(raw string) string {
 	raw = strings.TrimSpace(raw)
 
 	// Try to extract <summary>...</summary>
-	if start := strings.Index(raw, "<summary>"); start >= 0 {
-		after := raw[start+len("<summary>"):]
-		if end := strings.Index(after, "</summary>"); end >= 0 {
-			return strings.TrimSpace(after[:end])
+	if _, after, found := strings.Cut(raw, "<summary>"); found {
+		if content, _, ok := strings.Cut(after, "</summary>"); ok {
+			return strings.TrimSpace(content)
 		}
 		// Opening tag but no closing — take everything after the tag
 		return strings.TrimSpace(after)
@@ -122,17 +140,17 @@ func extractSummary(raw string) string {
 	// No <summary> tags — strip <analysis>...</analysis> and return remainder
 	result := raw
 	for {
-		start := strings.Index(result, "<analysis>")
-		if start < 0 {
+		before, rest, found := strings.Cut(result, "<analysis>")
+		if !found {
 			break
 		}
-		end := strings.Index(result, "</analysis>")
-		if end < 0 {
+		_, afterClose, closed := strings.Cut(rest, "</analysis>")
+		if !closed {
 			// Opening tag but no closing — strip from <analysis> onward
-			result = result[:start]
+			result = before
 			break
 		}
-		result = result[:start] + result[end+len("</analysis>"):]
+		result = before + afterClose
 	}
 
 	result = strings.TrimSpace(result)
@@ -156,22 +174,98 @@ func messageText(m client.Message) string {
 	// Block content — serialize each block type
 	var sb strings.Builder
 	for _, b := range m.Content.Blocks() {
-		switch b.Type {
-		case "text":
-			sb.WriteString(b.Text)
-		case "tool_use":
-			fmt.Fprintf(&sb, "[tool_call: %s]", b.Name)
-		case "tool_result":
-			text := client.ToolResultText(b)
-			if text != "" {
-				// Truncate long tool results for the summary (rune-safe)
-				if r := []rune(text); len(r) > 500 {
-					text = string(r[:500]) + "..."
-				}
-				fmt.Fprintf(&sb, "[tool_result: %s]", text)
-			}
+		if text := summarizeContentBlock(b); text != "" {
+			sb.WriteString(text)
+			sb.WriteString(" ")
 		}
-		sb.WriteString(" ")
 	}
 	return strings.TrimSpace(sb.String())
+}
+
+func summarizeContentBlock(b client.ContentBlock) string {
+	switch b.Type {
+	case "text":
+		return b.Text
+	case "tool_use":
+		return summarizeToolUse(b)
+	case "tool_result":
+		return summarizeToolResult(b)
+	case "tool_reference":
+		if b.ToolName != "" {
+			return fmt.Sprintf("[tool_reference: %s]", b.ToolName)
+		}
+	}
+	return ""
+}
+
+func summarizeToolUse(b client.ContentBlock) string {
+	if b.Name == "" {
+		return ""
+	}
+	args := compactToolInput(b.Input)
+	if args == "" {
+		return fmt.Sprintf("[tool_call: %s]", b.Name)
+	}
+	return fmt.Sprintf("[tool_call: %s %s]", b.Name, args)
+}
+
+func summarizeToolResult(b client.ContentBlock) string {
+	// Truncate base text BEFORE appending refs so "Loaded tools: ..." survives
+	// near-limit tool_result bodies. Refs carry the tool_search loaded-schema
+	// names — surfacing them in the summary is the whole point of this helper,
+	// so we keep them in full rather than a second-pass truncate that could
+	// clip them.
+	text := truncateSummaryText(strings.TrimSpace(client.ToolResultText(b)), 450)
+	if refs := toolReferenceNames(b); len(refs) > 0 {
+		refText := "Loaded tools: " + strings.Join(refs, ", ")
+		if text == "" {
+			text = refText
+		} else {
+			text += "\n" + refText
+		}
+	}
+	if text == "" {
+		return ""
+	}
+	return fmt.Sprintf("[tool_result: %s]", text)
+}
+
+func toolReferenceNames(b client.ContentBlock) []string {
+	// Comma-ok assertion is safe when ToolContent is a nil interface or carries
+	// any non-[]ContentBlock value (e.g. the string shape — see ToolResultText).
+	// Returns (nil, false) without panicking in both cases.
+	nested, ok := b.ToolContent.([]client.ContentBlock)
+	if !ok {
+		return nil
+	}
+	names := make([]string, 0, len(nested))
+	for _, child := range nested {
+		if child.Type == "tool_reference" && child.ToolName != "" {
+			names = append(names, child.ToolName)
+		}
+	}
+	return names
+}
+
+func compactToolInput(raw json.RawMessage) string {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" || trimmed == "{}" || trimmed == "[]" {
+		return ""
+	}
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, raw); err == nil {
+		return truncateSummaryText(buf.String(), 240)
+	}
+	return truncateSummaryText(trimmed, 240)
+}
+
+func truncateSummaryText(text string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	r := []rune(text)
+	if len(r) <= maxRunes {
+		return text
+	}
+	return string(r[:maxRunes]) + "..."
 }

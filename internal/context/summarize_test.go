@@ -159,6 +159,52 @@ func TestGenerateSummary(t *testing.T) {
 			t.Error("transcript should include tool_result content")
 		}
 	})
+
+	t.Run("includes tool metadata needed for structured continuation summary", func(t *testing.T) {
+		mock := &mockCompleter{
+			response: &client.CompletionResponse{
+				OutputText: "Structured summary with loaded tools and active skill.",
+			},
+		}
+
+		assistantBlocks := []client.ContentBlock{
+			client.NewToolUseBlock("read1", "file_read", []byte(`{"path":"/tmp/foo.go","offset":10}`)),
+			client.NewToolUseBlock("skill1", "use_skill", []byte(`{"skill_name":"test-driven-development"}`)),
+			client.NewToolUseBlock("search1", "tool_search", []byte(`{"query":"select:browser_navigate,github_list_prs"}`)),
+		}
+		resultBlocks := []client.ContentBlock{
+			client.NewToolResultBlock("read1", "  11 | package main", false),
+			client.NewToolResultBlock("skill1", "Write the failing test first.", false),
+			client.NewToolResultBlockWithBlocks("search1", []client.ContentBlock{
+				{Type: "tool_reference", ToolName: "browser_navigate"},
+				{Type: "tool_reference", ToolName: "github_list_prs"},
+			}, false),
+		}
+
+		messages := []client.Message{
+			{Role: "system", Content: client.NewTextContent("system")},
+			{Role: "user", Content: client.NewTextContent("continue the task after compaction")},
+			{Role: "assistant", Content: client.NewBlockContent(assistantBlocks)},
+			{Role: "user", Content: client.NewBlockContent(resultBlocks)},
+		}
+
+		_, _, err := GenerateSummary(context.Background(), mock, messages)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		transcript := mock.lastReq.Messages[1].Content.Text()
+		for _, needle := range []string{
+			`"/tmp/foo.go"`,
+			`"skill_name":"test-driven-development"`,
+			"browser_navigate",
+			"github_list_prs",
+		} {
+			if !strings.Contains(transcript, needle) {
+				t.Errorf("transcript should include %q, got:\n%s", needle, transcript)
+			}
+		}
+	})
 }
 
 func TestGenerateSummaryReturnsUsage(t *testing.T) {
@@ -238,6 +284,12 @@ func TestExtractSummary(t *testing.T) {
 			"",
 			"analysis",
 		},
+		{
+			"structured summary preserves section headers",
+			"<analysis>walkthrough</analysis>\n<summary>\n## Current task & next steps\nFixing the bug.\n\n## Open files / important reads\ninternal/agent/loop.go — core loop\n</summary>",
+			"## Open files",
+			"walkthrough",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -269,5 +321,79 @@ func TestGenerateSummary_ReturnsUsage(t *testing.T) {
 	}
 	if usage.InputTokens != 500 || usage.OutputTokens != 100 || usage.CostUSD != 0.002 {
 		t.Errorf("usage not propagated: got %+v", usage)
+	}
+}
+
+// TestCompactToolInput_FiltersEmptyEquivalents verifies that both empty-object
+// ("{}") and empty-array ("[]") inputs are treated as "no args" and omitted
+// from the rendered transcript. Without the "[]" filter, an array-rooted
+// empty input would render as `[tool_call: name []]` — noise that conveys
+// no semantic information.
+func TestCompactToolInput_FiltersEmptyEquivalents(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"empty string", "", ""},
+		{"null literal", "null", ""},
+		{"empty object", "{}", ""},
+		{"empty array", "[]", ""},
+		{"whitespace around null", "  null  ", ""},
+		{"real object input", `{"path":"/tmp/foo"}`, `{"path":"/tmp/foo"}`},
+		{"real array input", `[1,2,3]`, `[1,2,3]`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := compactToolInput([]byte(tt.raw))
+			if got != tt.want {
+				t.Errorf("compactToolInput(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSummarizeToolResult_RefsPreservedWithLongText verifies that when a
+// tool_result carries both near-limit text AND nested tool_reference blocks,
+// the "Loaded tools: ..." line is NOT silently clipped by the 500-rune cap.
+// Regression guard for the PR-review finding: the original implementation
+// concatenated base text + refs and truncated as one unit, so a long
+// tool_result would eat the refs line. The fix truncates base text first,
+// leaving explicit room for refs.
+func TestSummarizeToolResult_RefsPreservedWithLongText(t *testing.T) {
+	longText := strings.Repeat("a", 490)
+	block := client.ContentBlock{
+		Type: "tool_result",
+		ToolContent: []client.ContentBlock{
+			{Type: "text", Text: longText},
+			{Type: "tool_reference", ToolName: "browser_navigate"},
+			{Type: "tool_reference", ToolName: "github_list_prs"},
+		},
+	}
+	got := summarizeToolResult(block)
+
+	wantRefs := "Loaded tools: browser_navigate, github_list_prs"
+	if !strings.Contains(got, wantRefs) {
+		t.Errorf("expected %q to survive even with long base text; got:\n%s",
+			wantRefs, got)
+	}
+}
+
+// TestSummarizePrompt_RequiresStructuredSections asserts the summarization
+// prompt explicitly instructs the LLM to emit three working-state sections
+// inside <summary>. This is a guardrail against future edits silently
+// dropping the structure — if the sections are removed, post-compaction
+// behavior regresses (model re-reads files it had open, re-activates skills).
+func TestSummarizePrompt_RequiresStructuredSections(t *testing.T) {
+	required := []string{
+		"Open files",
+		"Active skill",
+		"Loaded tool",
+	}
+	for _, phrase := range required {
+		if !strings.Contains(summarizePrompt, phrase) {
+			t.Errorf("summarizePrompt must instruct LLM to include section %q; current prompt:\n%s",
+				phrase, summarizePrompt)
+		}
 	}
 }

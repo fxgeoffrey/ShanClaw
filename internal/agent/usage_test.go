@@ -52,3 +52,45 @@ func TestUsageAccumulator_AccumulatesSplitCacheCreation(t *testing.T) {
 		t.Fatalf("expected total tokens 100, got %d", snap.LLM.TotalTokens)
 	}
 }
+
+func TestTotalPromptTokens(t *testing.T) {
+	tests := []struct {
+		name string
+		u    client.Usage
+		want int
+	}{
+		{
+			name: "only non-cached input",
+			u:    client.Usage{InputTokens: 1200},
+			want: 1200,
+		},
+		{
+			name: "warm cache: small input, large cache read",
+			u:    client.Usage{InputTokens: 500, CacheReadTokens: 90000},
+			want: 90500,
+		},
+		{
+			name: "cache miss filled a new cache: small input, large cache creation",
+			u:    client.Usage{InputTokens: 300, CacheCreationTokens: 45000},
+			want: 45300,
+		},
+		{
+			name: "mixed: all three populated",
+			u:    client.Usage{InputTokens: 800, CacheReadTokens: 60000, CacheCreationTokens: 5000},
+			want: 65800,
+		},
+		{
+			name: "zero usage",
+			u:    client.Usage{},
+			want: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := totalPromptTokens(tt.u)
+			if got != tt.want {
+				t.Errorf("totalPromptTokens(%+v) = %d, want %d", tt.u, got, tt.want)
+			}
+		})
+	}
+}

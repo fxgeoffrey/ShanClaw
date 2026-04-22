@@ -139,6 +139,15 @@ func (a *UsageAccumulator) Snapshot() AccumulatedUsage {
 	}
 }
 
+// totalPromptTokens returns the effective prompt size for compaction decisions.
+// Anthropic's input_tokens excludes cached tokens (they're reported separately
+// as cache_read_input_tokens / cache_creation_input_tokens but still count
+// against the model's context window). Using raw input_tokens as the
+// compaction gate means warm-cache sessions never trip the threshold.
+func totalPromptTokens(u client.Usage) int {
+	return u.InputTokens + u.CacheReadTokens + u.CacheCreationTokens
+}
+
 // Reset clears accumulated totals. Use between independent runs in a
 // long-lived handler (e.g. daemon per-message handler reuse).
 func (a *UsageAccumulator) Reset() {

@@ -1303,8 +1303,9 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		compactionSummary    string // cached summary from compaction
 		compactionApplied    bool   // true once messages have been shaped
 		reactiveCompacted    bool   // true once reactive compaction fired (never resets)
-		summaryFailures      int    // consecutive summary failures; backs off after 3
-		toolSearchFired      bool
+		summaryFailures        int // consecutive summary failures; backs off after 3
+		lastSummaryFailureIter int // iteration of the most recent failure; used by summaryBackedOff distance check. Zero value is fine: the `summaryFailures >= maxSummaryFailures` guard prevents the formula from firing before any real failure.
+		toolSearchFired        bool
 		latestUserText       = buildReanchorText(userMessage, userContent) // most recent real user request — raw prompt plus every current-turn user text block (includes resolved attachment hints); excludes tool results and injected nudges
 		cloudNudgeFired      bool
 		cloudDelegateClaimed bool   // set on first cloud_delegate attempt; blocks subsequent calls unless it fails
@@ -1689,7 +1690,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		// After 3 consecutive summary failures, back off for 5 iterations before retrying.
 		const maxSummaryFailures = 3
 		const summaryBackoffIters = 5
-		summaryBackedOff := summaryFailures >= maxSummaryFailures && (i-summaryFailures) < summaryBackoffIters
+		summaryBackedOff := summaryFailures >= maxSummaryFailures && (i-lastSummaryFailureIter) <= summaryBackoffIters
 		if a.contextWindow > 0 && !compactionApplied && !summaryBackedOff && len(messages) > ctxwin.MinShapeable() {
 			shouldCompact := false
 			if lastPromptTokens > 0 {
@@ -1722,12 +1723,27 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 					summary, sumUsage, sumErr := ctxwin.GenerateSummary(ctx, a.client, messages)
 					restoreLLM()
 					a.emitInternalUsage(sumUsage)
-					if sumErr != nil {
+					trimmedSummary := strings.TrimSpace(summary)
+					switch {
+					case sumErr != nil:
 						summaryFailures++
+						lastSummaryFailureIter = i
 						fmt.Fprintf(os.Stderr, "[context] compaction summary failed (%d/%d): %v\n", summaryFailures, maxSummaryFailures, sumErr)
-					} else {
-						summaryFailures = 0 // reset on success
-						compactionSummary = summary
+					case trimmedSummary == "":
+						// Non-error empty summary: the small-tier model produced output that
+						// extractSummary filtered to "" (e.g. <analysis> only, no <summary>
+						// block). Treat as failure so the existing backoff circuit breaker
+						// fires instead of trying compaction every iteration.
+						summaryFailures++
+						lastSummaryFailureIter = i
+						fmt.Fprintf(os.Stderr, "[context] compaction summary empty (%d/%d) — prompt under-fit; backing off\n", summaryFailures, maxSummaryFailures)
+					default:
+						summaryFailures = 0 // reset on real success
+						// lastSummaryFailureIter intentionally NOT reset: the summaryFailures
+						// guard in summaryBackedOff already disables the distance check once
+						// the counter is 0, so any stale value is inert until a new failure
+						// streak begins and overwrites it.
+						compactionSummary = trimmedSummary
 					}
 				}
 				if compactionSummary != "" {

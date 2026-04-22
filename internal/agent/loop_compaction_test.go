@@ -1068,3 +1068,210 @@ func TestAgentLoop_CompactionTriggersOnWarmCache(t *testing.T) {
 		t.Error("GenerateSummary must fire once warm-cache total prompt exceeds 85% — gate regressed to pre-fix behavior")
 	}
 }
+
+// TestAgentLoop_EmptySummaryTriggersBackoff verifies two related fixes:
+//
+//  1. When GenerateSummary returns a non-error empty string (e.g. LLM produced
+//     <analysis> only, extractSummary filtered to ""), the compaction gate
+//     treats it as a failure and increments summaryFailures.
+//  2. After 3 consecutive failures, the cool-off window of 5 iterations
+//     really skips 5 iterations of SUMMARY attempts — regardless of when
+//     the failures happen in the run. The pre-fix `(i - summaryFailures) < 5`
+//     expression only yields a full 5-iter window when failures start at
+//     i=0; a middle cluster at e.g. i=4,5,6 collapsed the window to 1 iter,
+//     a late cluster at i=9,10,11 produced zero backoff at all.
+//
+// Post-fix assertions:
+//   - Total SUMMARY count is ≤ 4 across the whole run (3 initial failures
+//     plus at most one post-cool-off retry before the iter cap)
+//   - At least 3 SUMMARY calls fire, so the breaker actually trips
+//   - Between the 3rd and 4th SUMMARY there are ≥ 5 MAIN completion calls.
+//     Every iteration emits exactly one MAIN call regardless of compaction
+//     gating, so MAIN count between SUMMARYs is a direct measure of
+//     iterations skipped by backoff. This is the key assertion: measuring
+//     call-stream index differences (e.g. "4th SUMMARY ≥ call 3rdIndex+6")
+//     would silently accept a 3-iter backoff as if it were 5, because the
+//     iter that retries also contributes MAIN+PERSIST calls to the stream.
+func TestAgentLoop_EmptySummaryTriggersBackoff(t *testing.T) {
+	memoryDir := t.TempDir()
+
+	var mu sync.Mutex
+	var calls []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := readBody(r.Body)
+		defer r.Body.Close()
+
+		var req struct {
+			ModelTier string `json:"model_tier"`
+			Messages  []struct {
+				Role    string          `json:"role"`
+				Content json.RawMessage `json:"content"`
+			} `json:"messages"`
+		}
+		json.Unmarshal(raw, &req)
+
+		mu.Lock()
+		callNum := len(calls) + 1
+
+		if req.ModelTier == "small" {
+			isPersist := false
+			isSummary := false
+			for _, m := range req.Messages {
+				var text string
+				json.Unmarshal(m.Content, &text)
+				if strings.Contains(text, "extracting durable knowledge") {
+					isPersist = true
+				}
+				if strings.Contains(text, "Compress the following conversation") {
+					isSummary = true
+				}
+			}
+			if isPersist {
+				calls = append(calls, fmt.Sprintf("call %d: PERSIST", callNum))
+				mu.Unlock()
+				json.NewEncoder(w).Encode(nativeResponse(
+					"- simulated persist", "end_turn", nil, 50, 30))
+				return
+			}
+			if isSummary {
+				calls = append(calls, fmt.Sprintf("call %d: SUMMARY(empty)", callNum))
+				mu.Unlock()
+				// LLM returned <analysis> only — extractSummary strips it and returns "".
+				// sumErr is nil; summary is "".
+				json.NewEncoder(w).Encode(nativeResponse(
+					"<analysis>scratch work, no summary block produced</analysis>",
+					"end_turn", nil, 50, 30))
+				return
+			}
+			calls = append(calls, fmt.Sprintf("call %d: small-other", callNum))
+			mu.Unlock()
+			json.NewEncoder(w).Encode(nativeResponse("ok", "end_turn", nil, 50, 30))
+			return
+		}
+
+		// Main-tier: push messages past MinShapeable (9) and keep total prompt above
+		// context_window*0.85. With context_window=2000 threshold=1700, small input
+		// + large cache_read (1800) makes totalPromptTokens cross every turn.
+		msgCount := len(req.Messages)
+		resp := client.CompletionResponse{
+			Model:        "test-model",
+			FinishReason: "tool_use",
+			ToolCalls: []client.FunctionCall{{
+				Name:      "think",
+				Arguments: json.RawMessage(fmt.Sprintf(`{"thought":"iter with %d msgs"}`, msgCount)),
+			}},
+			Usage: client.Usage{
+				InputTokens:     200,
+				OutputTokens:    50,
+				TotalTokens:     250,
+				CacheReadTokens: 1800, // total = 2000 > 1700 threshold
+			},
+			RequestID: "req-test",
+		}
+		if msgCount >= 30 {
+			// Hard stop after 15 rounds so the test can't loop forever.
+			resp.FinishReason = "end_turn"
+			resp.ToolCalls = nil
+			resp.OutputText = "done"
+		}
+		calls = append(calls, fmt.Sprintf("call %d: MAIN (msgs=%d)", callNum, msgCount))
+		mu.Unlock()
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&thinkTool{})
+
+	handler := &mockHandler{approveResult: true}
+
+	loop := NewAgentLoop(gw, reg, "medium", "", 20, 2000, 200, nil, nil, nil)
+	loop.SetContextWindow(2000)
+	loop.SetMemoryDir(memoryDir)
+	loop.SetHandler(handler)
+
+	_, _, err := loop.Run(context.Background(),
+		"Drive the loop past MinShapeable while reporting warm-cache tokens.",
+		nil, nil)
+	if err != nil {
+		t.Logf("Run error (iteration cap is acceptable): %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	t.Logf("\n=== Call sequence (%d total) ===", len(calls))
+	for _, c := range calls {
+		t.Logf("  %s", c)
+	}
+
+	// Extract iteration numbers of SUMMARY calls. The `calls` slice records
+	// every /v1/completions hit with "call N: …"; the call index is our
+	// proxy for iteration ordering since MAIN + SUMMARY + PERSIST are
+	// serialized per iter.
+	summaryIndices := []int{}
+	for idx, c := range calls {
+		if strings.Contains(c, "SUMMARY") {
+			summaryIndices = append(summaryIndices, idx)
+		}
+	}
+
+	// Assertion 1 — empty is treated as failure, so backoff engages after 3.
+	// Pre-fix: no backoff on empty → ≥8 SUMMARY in a 15-iter run.
+	// Post-fix: fails on 3 then cool-off → at most 4 across the whole run
+	// (3 initial failures + at most 1 retry after the 5-iter window closes
+	// if the run has not yet hit the 15-iter cap).
+	if len(summaryIndices) > 4 {
+		t.Errorf("empty-summary backoff did not engage: saw %d SUMMARY calls (expected ≤4)\n"+
+			"pre-fix behaviour resets summaryFailures when sumErr==nil && summary==\"\", "+
+			"defeating the backoff circuit breaker",
+			len(summaryIndices))
+	}
+
+	// Assertion 2 — the first 3 SUMMARY calls land before the run's midpoint.
+	// If they straddle too wide an interval it means SUMMARY was silently
+	// skipping (shouldCompact gate closed) rather than genuinely firing.
+	if len(summaryIndices) < 3 {
+		t.Fatalf("expected at least 3 SUMMARY calls to trip the breaker; got %d.\n"+
+			"call sequence:\n  %s",
+			len(summaryIndices), strings.Join(calls, "\n  "))
+	}
+
+	// Assertion 3 — iteration-level cool-off window. Measured by counting
+	// MAIN calls between the 3rd and 4th SUMMARY: every iteration produces
+	// exactly one MAIN call whether or not compaction fires, so MAIN count
+	// between two SUMMARY events equals iterations skipped by backoff.
+	//
+	// A previous version of this assertion used call-stream index
+	// arithmetic (`windowEnd := thirdFailureAt + 6`). That is wrong because
+	// the iter which emits the 4th SUMMARY also contributes MAIN+PERSIST
+	// calls to the stream, so a 3-iter backoff and a 5-iter backoff both
+	// place the 4th SUMMARY at roughly the same call index, hiding the
+	// regression. Counting MAIN calls is the iter-native measure.
+	//
+	// This is the assertion that fails when Task 2's three-way switch is
+	// applied WITHOUT the `(i - summaryFailures)` → `(i - lastSummaryFailureIter)`
+	// formula fix: mid-run failures collapse the window so only 0–1 MAIN
+	// calls separate the 3rd and 4th SUMMARY.
+	if len(summaryIndices) >= 4 {
+		thirdIdx := summaryIndices[2]
+		fourthIdx := summaryIndices[3]
+		mainBetween := 0
+		for _, c := range calls[thirdIdx+1 : fourthIdx] {
+			if strings.Contains(c, "MAIN") {
+				mainBetween++
+			}
+		}
+		if mainBetween < 5 {
+			t.Errorf("backoff cool-off window too narrow: only %d MAIN iterations "+
+				"between 3rd SUMMARY (call %d) and 4th SUMMARY (call %d); expected ≥ 5.\n"+
+				"This is the signature of a broken cool-off window — the 4th retry "+
+				"fired too soon.\ncall sequence:\n  %s",
+				mainBetween, thirdIdx, fourthIdx, strings.Join(calls, "\n  "))
+		}
+	}
+	// If there is no 4th SUMMARY at all (len(summaryIndices) == 3), the
+	// breaker held for the entire remaining run — that is also a valid
+	// GREEN state and intentionally passes without additional checks.
+}

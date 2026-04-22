@@ -324,6 +324,32 @@ func TestGenerateSummary_ReturnsUsage(t *testing.T) {
 	}
 }
 
+// TestSummarizeToolResult_RefsPreservedWithLongText verifies that when a
+// tool_result carries both near-limit text AND nested tool_reference blocks,
+// the "Loaded tools: ..." line is NOT silently clipped by the 500-rune cap.
+// Regression guard for the PR-review finding: the original implementation
+// concatenated base text + refs and truncated as one unit, so a long
+// tool_result would eat the refs line. The fix truncates base text first,
+// leaving explicit room for refs.
+func TestSummarizeToolResult_RefsPreservedWithLongText(t *testing.T) {
+	longText := strings.Repeat("a", 490)
+	block := client.ContentBlock{
+		Type: "tool_result",
+		ToolContent: []client.ContentBlock{
+			{Type: "text", Text: longText},
+			{Type: "tool_reference", ToolName: "browser_navigate"},
+			{Type: "tool_reference", ToolName: "github_list_prs"},
+		},
+	}
+	got := summarizeToolResult(block)
+
+	wantRefs := "Loaded tools: browser_navigate, github_list_prs"
+	if !strings.Contains(got, wantRefs) {
+		t.Errorf("expected %q to survive even with long base text; got:\n%s",
+			wantRefs, got)
+	}
+}
+
 // TestSummarizePrompt_RequiresStructuredSections asserts the summarization
 // prompt explicitly instructs the LLM to emit three working-state sections
 // inside <summary>. This is a guardrail against future edits silently

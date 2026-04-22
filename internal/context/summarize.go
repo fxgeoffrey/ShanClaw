@@ -210,7 +210,12 @@ func summarizeToolUse(b client.ContentBlock) string {
 }
 
 func summarizeToolResult(b client.ContentBlock) string {
-	text := strings.TrimSpace(client.ToolResultText(b))
+	// Truncate base text BEFORE appending refs so "Loaded tools: ..." survives
+	// near-limit tool_result bodies. Refs carry the tool_search loaded-schema
+	// names — surfacing them in the summary is the whole point of this helper,
+	// so we keep them in full rather than a second-pass truncate that could
+	// clip them.
+	text := truncateSummaryText(strings.TrimSpace(client.ToolResultText(b)), 450)
 	if refs := toolReferenceNames(b); len(refs) > 0 {
 		refText := "Loaded tools: " + strings.Join(refs, ", ")
 		if text == "" {
@@ -222,10 +227,13 @@ func summarizeToolResult(b client.ContentBlock) string {
 	if text == "" {
 		return ""
 	}
-	return fmt.Sprintf("[tool_result: %s]", truncateSummaryText(text, 500))
+	return fmt.Sprintf("[tool_result: %s]", text)
 }
 
 func toolReferenceNames(b client.ContentBlock) []string {
+	// Comma-ok assertion is safe when ToolContent is a nil interface or carries
+	// any non-[]ContentBlock value (e.g. the string shape — see ToolResultText).
+	// Returns (nil, false) without panicking in both cases.
 	nested, ok := b.ToolContent.([]client.ContentBlock)
 	if !ok {
 		return nil

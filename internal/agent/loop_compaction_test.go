@@ -1262,21 +1262,30 @@ func TestAgentLoop_EmptySummaryTriggersBackoff(t *testing.T) {
 	}
 
 	// Assertion 3 — iteration-level cool-off window. Measured by counting
-	// MAIN calls between the 3rd and 4th SUMMARY: every iteration produces
-	// exactly one MAIN call whether or not compaction fires, so MAIN count
-	// between two SUMMARY events equals iterations skipped by backoff.
+	// MAIN calls between the 3rd and 4th SUMMARY.
 	//
-	// A previous version of this assertion used call-stream index
-	// arithmetic (`windowEnd := thirdFailureAt + 6`). That is wrong because
-	// the iter which emits the 4th SUMMARY also contributes MAIN+PERSIST
-	// calls to the stream, so a 3-iter backoff and a 5-iter backoff both
-	// place the 4th SUMMARY at roughly the same call index, hiding the
-	// regression. Counting MAIN calls is the iter-native measure.
+	// Within one iteration the call order is PERSIST → SUMMARY → MAIN. So for
+	// a correct summaryBackoffIters=5 cool-off, calls[thirdIdx+1 : fourthIdx]
+	// contains:
+	//   • 1 MAIN from iter F itself (same iter as the 3rd SUMMARY — MAIN
+	//     fires after SUMMARY within the iter and is not gated by backoff)
+	//   • 5 MAINs from iters F+1…F+5 (fully backed off — only MAIN fires)
+	//   • 1 PERSIST from iter F+6 (gate re-opens, right before the 4th SUMMARY)
+	// So the expected mainBetween is 6, not 5. The threshold `< 6` strictly
+	// rejects any regression down to summaryBackoffIters=4 (mainBetween=5).
 	//
-	// This is the assertion that fails when Task 2's three-way switch is
+	// A previous version of this assertion used call-stream index arithmetic
+	// (`windowEnd := thirdFailureAt + 6`). That is wrong because the iter
+	// which emits the 4th SUMMARY also contributes MAIN+PERSIST calls to the
+	// stream, so a 3-iter backoff and a 5-iter backoff both place the 4th
+	// SUMMARY at roughly the same call index, hiding the regression. Counting
+	// MAIN calls is the iter-native measure.
+	//
+	// This is also the assertion that fails when Task 2's three-way switch is
 	// applied WITHOUT the `(i - summaryFailures)` → `(i - lastSummaryFailureIter)`
-	// formula fix: mid-run failures collapse the window so only 0–1 MAIN
+	// formula fix: mid-run failures collapse the window so only 0–2 MAIN
 	// calls separate the 3rd and 4th SUMMARY.
+	const expectedMainBetween = 6 // 1 same-iter MAIN + summaryBackoffIters backed-off MAINs
 	if len(summaryIndices) >= 4 {
 		thirdIdx := summaryIndices[2]
 		fourthIdx := summaryIndices[3]
@@ -1286,12 +1295,13 @@ func TestAgentLoop_EmptySummaryTriggersBackoff(t *testing.T) {
 				mainBetween++
 			}
 		}
-		if mainBetween < 5 {
+		if mainBetween < expectedMainBetween {
 			t.Errorf("backoff cool-off window too narrow: only %d MAIN iterations "+
-				"between 3rd SUMMARY (call %d) and 4th SUMMARY (call %d); expected ≥ 5.\n"+
+				"between 3rd SUMMARY (call %d) and 4th SUMMARY (call %d); expected ≥ %d "+
+				"(1 same-iter MAIN + 5 backed-off MAINs).\n"+
 				"This is the signature of a broken cool-off window — the 4th retry "+
 				"fired too soon.\ncall sequence:\n  %s",
-				mainBetween, thirdIdx, fourthIdx, strings.Join(calls, "\n  "))
+				mainBetween, thirdIdx, fourthIdx, expectedMainBetween, strings.Join(calls, "\n  "))
 		}
 	}
 	// If there is no 4th SUMMARY at all (len(summaryIndices) == 3), the

@@ -249,7 +249,7 @@ func toolReferenceNames(b client.ContentBlock) []string {
 
 func compactToolInput(raw json.RawMessage) string {
 	trimmed := strings.TrimSpace(string(raw))
-	if trimmed == "" || trimmed == "null" || trimmed == "{}" {
+	if trimmed == "" || trimmed == "null" || trimmed == "{}" || trimmed == "[]" {
 		return ""
 	}
 	var buf bytes.Buffer

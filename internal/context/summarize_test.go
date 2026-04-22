@@ -324,6 +324,35 @@ func TestGenerateSummary_ReturnsUsage(t *testing.T) {
 	}
 }
 
+// TestCompactToolInput_FiltersEmptyEquivalents verifies that both empty-object
+// ("{}") and empty-array ("[]") inputs are treated as "no args" and omitted
+// from the rendered transcript. Without the "[]" filter, an array-rooted
+// empty input would render as `[tool_call: name []]` — noise that conveys
+// no semantic information.
+func TestCompactToolInput_FiltersEmptyEquivalents(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"empty string", "", ""},
+		{"null literal", "null", ""},
+		{"empty object", "{}", ""},
+		{"empty array", "[]", ""},
+		{"whitespace around null", "  null  ", ""},
+		{"real object input", `{"path":"/tmp/foo"}`, `{"path":"/tmp/foo"}`},
+		{"real array input", `[1,2,3]`, `[1,2,3]`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := compactToolInput([]byte(tt.raw))
+			if got != tt.want {
+				t.Errorf("compactToolInput(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestSummarizeToolResult_RefsPreservedWithLongText verifies that when a
 // tool_result carries both near-limit text AND nested tool_reference blocks,
 // the "Loaded tools: ..." line is NOT silently clipped by the 500-rune cap.

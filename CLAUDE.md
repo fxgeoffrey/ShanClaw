@@ -46,7 +46,7 @@ internal/
     resultshape.go     # tree result shaping and stable change summaries
     microcompact.go    # Tier 2 semantic compaction for large native tool results
     delta.go           # DeltaProvider interface, TemporalDelta (date rollover detection)
-    loopdetect.go      # 9 stuck-loop detectors
+    loopdetect.go      # 9 stuck-loop detectors (dupExempt for use_skill, IsError-aware dup, silent-below-15 for repeatable+result-only)
     readtracker.go     # read-before-edit enforcement
     approval_cache.go  # per-turn approval caching
     normalize.go       # response normalization
@@ -197,6 +197,7 @@ Unknown tools → denied by default (fail-safe).
 - **Playwright `file://` preview bridge** (`internal/tools/filepreview.go`): loopback HTTP server rewrites `browser_navigate(file://…)` → `http://127.0.0.1/<token>/<name>`. Fail-closed allowlist via `AllowRoot(dir)` / `AllowFile(path)`, both symlink-resolved via `filepath.EvalSymlinks`. Daemon populates per-run from effective CWD + user-attached paths so browser reach never exceeds `permissions.CheckFilePath`. Uses `http.ServeContent` (not `http.ServeFile`) to avoid the `index.html` internal redirect. Defense-in-depth: `r.RemoteAddr` loopback check in the handler.
 - **Session sync** (`internal/sync/`): uploads local session JSON to Shannon Cloud once per day (opt-in via `sync.enabled`). Single entry point `sync.Run`; called from daemon ticker and `shan sessions sync` CLI; flock + atomic marker write serialize concurrent callers. Per-session ACK with persistent `marker.failed` bookkeeping; permanent reasons (`size_limit_exceeded`, `load_error`) stay forever and self-heal on session edit.
 - **Memory client** (`internal/memory/`, Phase 2.3): daemon owns sidecar lifecycle (spawn / health / restart / shutdown) and the 24h bundle pull loop. Tool `memory_recall` (`internal/tools/memory.go`) delegates to `memory.Service.Query` via UDS; falls back to `session_search` + MEMORY.md whenever `Service.Status() != Ready`. CLI/TUI use `memory.AttachPolicy` (probe-only, never spawn) and connect via `memory.NewServiceAttached`. Privacy invariant: the resolved API key bytes never reach disk or audit logs (only `sha256[:16]` fingerprint in `<bundle_root>/.tenant_fingerprint`).
+- **Loop detector** (`internal/agent/loopdetect.go`): 9 detectors trigger nudge or force-stop. Key tuning: `dupExemptTools` (currently `use_skill`) skip both ConsecutiveDup and ExactDup entirely (pure idempotent loaders); ConsecutiveDup tail-success skip + all-errors 2x budget lets fail/fail/success retries survive (ExactDup also skips when tail recovered); ExactDup all-errors 2x budget mirrors ConsecutiveDup for spread-out retries; FamilyNoProgress fires force-stop-only at progressCount>=15 for repeatable tools when `sameTopicCount==0` (no intermediate nudge — prevents stacking with rolling-window escalation); nudge escalation in `loop.go` uses a rolling window (`nudgeWindow`: max 3 nudges within trailing 5 iterations) instead of a flat counter.
 
 ### Daemon Approval Protocol
 - **Interactive mode** (default): Tools requiring approval send `approval_request` over WS → Cloud relays to Ptfrog → user responds → `approval_response` relayed back. Agent loop blocks until response.

@@ -513,14 +513,34 @@ func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 			progressCount = sameResultCount
 		}
 
-		if progressCount >= 7 {
-			return LoopForceStop, familyNoProgressMessage(family, progressCount, familyCount, 2)
-		}
-		if progressCount >= 5 {
-			return LoopNudge, familyNoProgressMessage(family, progressCount, familyCount, 1)
-		}
-		if progressCount >= 3 {
-			return LoopNudge, familyNoProgressMessage(family, progressCount, familyCount, 0)
+		// For repeatable tools (browser_*, screenshot, accessibility, computer),
+		// a stable result_sig is a weak "no progress" signal: SPA workflows and
+		// form fills legitimately share the same URL across many operations.
+		// When the strong topic-based signal is absent (sameTopicCount==0), use
+		// a single force-stop threshold at 15 and skip intermediate nudges —
+		// nudges here would stack with the rolling-window escalation (loop.go's
+		// nudges window) and kill long but legitimate form fills.
+		//
+		// Non-repeatable families and repeatable tools with actual topic-signal
+		// collisions still use the original 3/5/7 path.
+		isRepeatable := isRepeatableToolName(ld.repeatableTools, name)
+		repeatableResultOnly := isRepeatable && sameTopicCount == 0
+
+		if repeatableResultOnly {
+			if progressCount >= 15 {
+				return LoopForceStop, familyNoProgressMessage(family, progressCount, familyCount, 2)
+			}
+			// Below 15: silent. No nudge tier — see rationale above.
+		} else {
+			if progressCount >= 7 {
+				return LoopForceStop, familyNoProgressMessage(family, progressCount, familyCount, 2)
+			}
+			if progressCount >= 5 {
+				return LoopNudge, familyNoProgressMessage(family, progressCount, familyCount, 1)
+			}
+			if progressCount >= 3 {
+				return LoopNudge, familyNoProgressMessage(family, progressCount, familyCount, 0)
+			}
 		}
 
 		// Fallback for families without topic/result tracking (e.g., GUI tools

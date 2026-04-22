@@ -1327,3 +1327,73 @@ func TestExactDup_MixedSuccessAndErrorsUsesStrictThreshold(t *testing.T) {
 		t.Fatalf("3 mixed same-args repeats (tail=error) should nudge (strict threshold), got %v", action)
 	}
 }
+
+// TestFamilyNoProgress_RepeatableVaryingArgsUnder15Silent: 14 varying-args
+// browser_snapshot calls on a stable URL. Pre-fix: FamilyNoProgress main
+// path force-stops at progressCount=7. Post-fix: repeatable + no topic
+// signal → force-stop-only-at-15 → silent until pathological threshold.
+//
+// Covers form-fill-equivalent workloads (7-14 same-page ops should all
+// continue — no intermediate nudges that might stack into Task 2's
+// rolling-window escalation).
+func TestFamilyNoProgress_RepeatableVaryingArgsUnder15Silent(t *testing.T) {
+	ld := NewLoopDetector()
+	const url = "https://app.example.com/dashboard"
+	for i := 0; i < 14; i++ {
+		args := fmt.Sprintf(`{"wait":%d}`, i)
+		ld.Record("browser_snapshot", args, false, "", url, false)
+	}
+	action, msg := ld.Check("browser_snapshot")
+	if action != LoopContinue {
+		t.Fatalf("14 varying-args repeatable calls on stable URL must be silent (force-stop-only-at-15), got %v: %s", action, msg)
+	}
+}
+
+// TestFamilyNoProgress_RepeatableFormFillContinues: 10 click + 10 type on a
+// stable URL — representative of a large form fill. Must continue silently
+// (no nudge — nudges feed Task 2 rolling-window escalation).
+func TestFamilyNoProgress_RepeatableFormFillContinues(t *testing.T) {
+	ld := NewLoopDetector()
+	const url = "https://app.example.com/settings"
+	for i := 0; i < 10; i++ {
+		ld.Record("browser_click",
+			fmt.Sprintf(`{"ref":"e%d"}`, i), false, "", url, false)
+		ld.Record("browser_type",
+			fmt.Sprintf(`{"ref":"e%d","text":"v%d"}`, i, i), false, "", url, false)
+	}
+	action, _ := ld.Check("browser_click")
+	if action != LoopContinue {
+		t.Fatalf("10 varying-args browser_click on stable URL (form fill) must continue, got %v", action)
+	}
+}
+
+// TestFamilyNoProgress_RepeatableVaryingArgsExtremeForceStops: 15
+// varying-args snapshots on stable URL — past the raised force-stop
+// threshold. Real pathological polling still caught.
+func TestFamilyNoProgress_RepeatableVaryingArgsExtremeForceStops(t *testing.T) {
+	ld := NewLoopDetector()
+	const url = "https://app.example.com/status"
+	for i := 0; i < 15; i++ {
+		args := fmt.Sprintf(`{"wait":%d}`, i)
+		ld.Record("browser_snapshot", args, false, "", url, false)
+	}
+	action, _ := ld.Check("browser_snapshot")
+	if action != LoopForceStop {
+		t.Fatalf("15 varying-args same-URL snapshots must still force-stop (pathological polling), got %v", action)
+	}
+}
+
+// TestFamilyNoProgress_NonRepeatableOriginalThresholds: web_search family
+// must still hit force-stop at 7 same-topic calls — raised thresholds only
+// apply to repeatable tools.
+func TestFamilyNoProgress_NonRepeatableOriginalThresholds(t *testing.T) {
+	ld := NewLoopDetector()
+	for i := 0; i < 7; i++ {
+		args := fmt.Sprintf(`{"q":"climate change effects %d"}`, i)
+		ld.Record("web_search", args, false, "", "", false)
+	}
+	action, _ := ld.Check("web_search")
+	if action != LoopForceStop {
+		t.Fatalf("7 same-topic web_search must still force-stop (original threshold), got %v", action)
+	}
+}

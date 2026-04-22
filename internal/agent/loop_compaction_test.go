@@ -1238,6 +1238,29 @@ func TestAgentLoop_EmptySummaryTriggersBackoff(t *testing.T) {
 			len(summaryIndices), strings.Join(calls, "\n  "))
 	}
 
+	// Stress-adequacy soft guard — when the breaker holds to end of run
+	// (len(summaryIndices) == 3), Assertion 3 below is skipped entirely via
+	// its len >= 4 guard. That is a valid GREEN state only if the run was
+	// long enough that a 4th SUMMARY could have fired had the cool-off
+	// window been too narrow. If too few MAIN iters actually completed, the
+	// test is passing vacuously — a future bump to MinShapeable() or the
+	// hard-stop condition could silently hollow out Assertion 3 without any
+	// real behavior regression. Count total MAIN iters and flag the gap.
+	mainIterCount := 0
+	for _, c := range calls {
+		if strings.Contains(c, "MAIN") {
+			mainIterCount++
+		}
+	}
+	t.Logf("ran %d MAIN iterations total", mainIterCount)
+	if len(summaryIndices) == 3 && mainIterCount < 12 {
+		t.Errorf("test under-stressed: only %d MAIN iters completed; the breaker holding with "+
+			"exactly 3 SUMMARY may be because the run ended, not because the cool-off is 5 iters. "+
+			"Raise the hard-stop condition (msgCount>=30) or maxIter so the run reaches ≥ 12 MAIN "+
+			"iterations — then Assertion 3 can actually measure the cool-off window.",
+			mainIterCount)
+	}
+
 	// Assertion 3 — iteration-level cool-off window. Measured by counting
 	// MAIN calls between the 3rd and 4th SUMMARY: every iteration produces
 	// exactly one MAIN call whether or not compaction fires, so MAIN count

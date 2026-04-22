@@ -1304,7 +1304,11 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		compactionApplied    bool   // true once messages have been shaped
 		reactiveCompacted    bool   // true once reactive compaction fired (never resets)
 		summaryFailures        int // consecutive summary failures; backs off after 3
-		lastSummaryFailureIter int // iteration of the most recent failure; used by summaryBackedOff distance check. Zero value is fine: the `summaryFailures >= maxSummaryFailures` guard prevents the formula from firing before any real failure.
+		// lastSummaryFailureIter records the iteration of the most recent summary
+		// failure; summaryBackedOff measures the cool-off distance from this iter.
+		// Zero value is fine: the `summaryFailures >= maxSummaryFailures` guard
+		// short-circuits the distance check until a real failure streak writes it.
+		lastSummaryFailureIter int
 		toolSearchFired        bool
 		latestUserText       = buildReanchorText(userMessage, userContent) // most recent real user request — raw prompt plus every current-turn user text block (includes resolved attachment hints); excludes tool results and injected nudges
 		cloudNudgeFired      bool

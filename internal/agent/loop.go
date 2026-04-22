@@ -1298,7 +1298,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		checkpointDone       bool
 		nudges               = newNudgeWindow(maxNudges, nudgeWindowIters)
 		hallucinationNudges  int
-		lastInputTokens      int    // actual input tokens from last LLM response
+		lastPromptTokens     int    // total prompt tokens (input + cache_read + cache_creation) from last LLM response; cached tokens still consume the model's context window
 		lastOutputTokens     int    // actual output tokens from last LLM response
 		compactionSummary    string // cached summary from compaction
 		compactionApplied    bool   // true once messages have been shaped
@@ -1692,8 +1692,8 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		summaryBackedOff := summaryFailures >= maxSummaryFailures && (i-summaryFailures) < summaryBackoffIters
 		if a.contextWindow > 0 && !compactionApplied && !summaryBackedOff && len(messages) > ctxwin.MinShapeable() {
 			shouldCompact := false
-			if lastInputTokens > 0 {
-				shouldCompact = ctxwin.ShouldCompact(lastInputTokens, lastOutputTokens, a.contextWindow)
+			if lastPromptTokens > 0 {
+				shouldCompact = ctxwin.ShouldCompact(lastPromptTokens, lastOutputTokens, a.contextWindow)
 			} else if i == 0 {
 				// First iteration: use heuristic for resumed sessions with large history.
 				// The MinShapeable guard above ensures we only estimate when there's
@@ -2100,7 +2100,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				normalizedUsage.CacheReadTokens, normalizedUsage.CacheCreationTokens,
 				normalizedUsage.InputTokens, ratio)
 		}
-		lastInputTokens = normalizedUsage.InputTokens
+		lastPromptTokens = totalPromptTokens(normalizedUsage)
 		lastOutputTokens = normalizedUsage.OutputTokens
 		if resp.Model != "" {
 			usage.Model = resp.Model
@@ -2109,7 +2109,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		// Allow re-compaction only if context dropped below threshold
 		// (meaning compaction worked). If still over, stay compacted to
 		// avoid repeated summary calls when at the minKeepLast floor.
-		if compactionApplied && !ctxwin.ShouldCompact(lastInputTokens, lastOutputTokens, a.contextWindow) {
+		if compactionApplied && !ctxwin.ShouldCompact(lastPromptTokens, lastOutputTokens, a.contextWindow) {
 			compactionApplied = false
 			compactionSummary = ""
 		}

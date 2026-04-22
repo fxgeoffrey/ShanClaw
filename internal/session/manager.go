@@ -270,9 +270,11 @@ func (m *Manager) RebuildIndex() error {
 	return m.store.RebuildIndex()
 }
 
-// Reset 就地清空指定 session 的对话历史，保留 ID/Title/CreatedAt/CWD/Source/Channel/Usage。
-// 清理：Messages、MessageMeta、RemoteTasks、SummaryCache、SummaryCacheKey、InProgress。
-// 若目标是当前内存 session，同步更新并重置其 runtime (WorkingSet)。
+// Reset clears a session's conversation history in place, preserving
+// ID/Title/CreatedAt/CWD/Source/Channel/Usage.
+// Cleared fields: Messages, MessageMeta, RemoteTasks, SummaryCache,
+// SummaryCacheKey, InProgress. If the target is the in-memory current session,
+// the current pointer is updated and its runtime WorkingSet is reset too.
 func (m *Manager) Reset(id string) error {
 	if id == "" {
 		return fmt.Errorf("session id required")

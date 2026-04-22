@@ -935,6 +935,7 @@ The daemon exposes a localhost-only HTTP server for native app integration and s
 | `/sessions` | GET | List sessions, optional `?agent=` filter |
 | `/sessions/{id}` | GET | Get full session with messages, `?agent=<name>` |
 | `/sessions/{id}/edit` | POST | Truncate history at index, re-run with new content (edit & retry) |
+| `/sessions/{id}/reset` | POST | Clear session history in place (named agent only, `?agent=<name>` required) |
 | `/sessions/search` | GET | Search session history, `?q=<query>&agent=<name>` |
 | `/message` | POST | Send a message to an agent, get reply (supports HITL injection) |
 | `/config/reload` | POST | Reload config, restart watchers and heartbeat managers |

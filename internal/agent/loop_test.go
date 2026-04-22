@@ -880,13 +880,13 @@ func TestFilterOldImages_NoOpWhenUnderLimit(t *testing.T) {
 }
 
 // TestAgentLoop_ConsecutiveDupForceStop verifies the consecutive duplicate detector
-// forces a stop after back-to-back identical tool calls (2→nudge, 3→force stop).
+// forces a stop after back-to-back identical tool calls (3→nudge, 4→force stop).
 func TestAgentLoop_ConsecutiveDupForceStop(t *testing.T) {
 	callCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
-		if callCount <= 3 {
-			// 3 consecutive identical calls: nudge at 2, force stop at 3
+		if callCount <= 4 {
+			// 4 consecutive identical calls: nudge at 3, force stop at 4
 			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
 				toolCall("mock_tool", `{"cmd":"same"}`), 10, 5))
 		} else {
@@ -908,9 +908,9 @@ func TestAgentLoop_ConsecutiveDupForceStop(t *testing.T) {
 	if result != "Stopped due to loop." {
 		t.Errorf("expected force-stop response, got %q", result)
 	}
-	// 3 tool iterations + 1 forced final = 4 LLM calls
-	if callCount != 4 {
-		t.Errorf("expected 4 LLM calls (3 tool + 1 forced), got %d", callCount)
+	// 4 tool iterations + 1 forced final = 5 LLM calls
+	if callCount != 5 {
+		t.Errorf("expected 5 LLM calls (4 tool + 1 forced), got %d", callCount)
 	}
 }
 
@@ -2971,8 +2971,9 @@ func TestForceStop_PreservesRequestConfig(t *testing.T) {
 		mu.Unlock()
 
 		callCount++
-		if callCount <= 3 {
-			// 3 back-to-back identical tool calls → force stop on the 3rd.
+		if callCount <= 4 {
+			// 4 back-to-back identical tool calls → force stop on the 4th
+			// (consecDupThreshold=3: nudge at 3, force-stop at 4).
 			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
 				toolCall("mock_tool", `{"cmd":"same"}`), 10, 5))
 		} else {
@@ -3011,8 +3012,8 @@ func TestForceStop_PreservesRequestConfig(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(requests) < 4 {
-		t.Fatalf("expected at least 4 LLM requests, got %d", len(requests))
+	if len(requests) < 5 {
+		t.Fatalf("expected at least 5 LLM requests, got %d", len(requests))
 	}
 	final := requests[len(requests)-1]
 	if final.MaxTokens != 32000 {
@@ -3046,7 +3047,9 @@ func TestForceStop_EmptyResponseFallback(t *testing.T) {
 	callCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
-		if callCount <= 3 {
+		if callCount <= 4 {
+			// 4 back-to-back identical tool calls → force stop on the 4th
+			// (consecDupThreshold=3: nudge at 3, force-stop at 4).
 			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
 				toolCall("mock_tool", `{"cmd":"same"}`), 10, 5))
 		} else {
@@ -3878,9 +3881,11 @@ func TestForceStopExit_DetectorPath_SynthesisPromptShape(t *testing.T) {
 	llmCallCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		llmCallCount++
-		if llmCallCount == 4 {
+		if llmCallCount == 5 {
 			// Synthesis turn — capture the outbound request body so the
 			// test can assert the prompt shape injected by buildForceStopReason.
+			// With consecDupThreshold=3: nudge at call 3, force-stop at call 4,
+			// synthesis on call 5.
 			body, _ := io.ReadAll(r.Body)
 			synthRequestMu.Lock()
 			synthRequestBody = string(body)
@@ -3888,8 +3893,9 @@ func TestForceStopExit_DetectorPath_SynthesisPromptShape(t *testing.T) {
 			json.NewEncoder(w).Encode(nativeResponse("**Task** — X\n**Done** — Y", "end_turn", nil, 10, 5))
 			return
 		}
-		// Turns 1-3: same tool + same args each time. Detector fires
-		// ConsecutiveDup LoopForceStop after the 3rd identical call.
+		// Turns 1-4: same tool + same args each time. Detector fires
+		// ConsecutiveDup LoopNudge after the 3rd identical call,
+		// then LoopForceStop after the 4th.
 		json.NewEncoder(w).Encode(nativeResponseWithID("", "tool_use",
 			toolCallWithID("mock_tool", `{"same":"args"}`, fmt.Sprintf("t%d", llmCallCount)), 10, 5))
 	}))
@@ -3944,20 +3950,21 @@ func TestForceStopExit_MaxNudgesPath_SynthesisPromptShape(t *testing.T) {
 	llmCallCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		llmCallCount++
-		if llmCallCount <= 6 {
-			// 6 failing-tool calls trigger SameToolError nudges at 4,5,6 →
+		if llmCallCount <= 8 {
+			// 8 failing-tool calls trigger SameToolError nudges at 6,7,8 →
 			// 3 nudges within the rolling window (maxNudges=3, nudgeWindowIters=5)
 			// → runForceStopTurn escalation.
+			// sameToolErrThreshold=6 (v2): nudge fires at errCount >= 6.
 			json.NewEncoder(w).Encode(nativeResponse("", "tool_use",
 				toolCall("failing_tool", fmt.Sprintf(`{"attempt":%d}`, llmCallCount)), 10, 5))
 			return
 		}
-		// 7th LLM call = synthesis turn. Capture body.
+		// 9th LLM call = synthesis turn. Capture body.
 		body, _ := io.ReadAll(r.Body)
 		synthRequestMu.Lock()
 		synthRequestBody = string(body)
 		synthRequestMu.Unlock()
-		json.NewEncoder(w).Encode(nativeResponse("**Task** — retry failed\n**Done** — tried 6 attempts", "end_turn", nil, 10, 5))
+		json.NewEncoder(w).Encode(nativeResponse("**Task** — retry failed\n**Done** — tried 8 attempts", "end_turn", nil, 10, 5))
 	}))
 	defer server.Close()
 
@@ -3977,7 +3984,7 @@ func TestForceStopExit_MaxNudgesPath_SynthesisPromptShape(t *testing.T) {
 	body := synthRequestBody
 	synthRequestMu.Unlock()
 	if body == "" {
-		t.Fatalf("synthesis body not captured; llmCallCount=%d", llmCallCount)
+		t.Fatalf("synthesis body not captured (expected 9 LLM calls); llmCallCount=%d", llmCallCount)
 	}
 
 	wantMarkers := []string{
@@ -4034,7 +4041,9 @@ func TestForceStopExit_DetectorPath_EmitsForceStopAudit(t *testing.T) {
 	llmCallCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		llmCallCount++
-		if llmCallCount <= 3 {
+		if llmCallCount <= 4 {
+			// 4 back-to-back identical tool calls → force stop on the 4th
+			// (consecDupThreshold=3: nudge at 3, force-stop at 4).
 			json.NewEncoder(w).Encode(nativeResponseWithID("", "tool_use",
 				toolCallWithID("mock_tool", `{"same":"args"}`, fmt.Sprintf("t%d", llmCallCount)), 10, 5))
 			return

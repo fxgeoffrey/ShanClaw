@@ -16,11 +16,18 @@ func TestLoopDetector_ConsecutiveDup_Nudge(t *testing.T) {
 		t.Errorf("1 call should not trigger, got %v", action)
 	}
 
-	// 2nd consecutive identical call: nudge (consecDupThreshold=2)
+	// 2nd consecutive identical call: no trigger yet (consecDupThreshold=3)
+	ld.Record("web_search", `{"q":"test"}`, false, "", "", false)
+	action, _ = ld.Check("web_search")
+	if action != LoopContinue {
+		t.Errorf("2 consecutive identical calls should not trigger (consecDupThreshold=3), got %v", action)
+	}
+
+	// 3rd consecutive identical call: nudge (consecDupThreshold=3)
 	ld.Record("web_search", `{"q":"test"}`, false, "", "", false)
 	action, msg := ld.Check("web_search")
 	if action != LoopNudge {
-		t.Errorf("2 consecutive identical calls should nudge, got %v", action)
+		t.Errorf("3 consecutive identical calls should nudge, got %v", action)
 	}
 	if msg == "" {
 		t.Error("nudge should have a message")
@@ -30,13 +37,13 @@ func TestLoopDetector_ConsecutiveDup_Nudge(t *testing.T) {
 func TestLoopDetector_ConsecutiveDup_ForceStop(t *testing.T) {
 	ld := NewLoopDetector()
 
-	// 3 consecutive identical calls: force stop (consecDupThreshold+1)
-	for range 3 {
+	// 4 consecutive identical calls: force stop (consecDupThreshold+1=4)
+	for range 4 {
 		ld.Record("web_search", `{"q":"test"}`, false, "", "", false)
 	}
 	action, _ := ld.Check("web_search")
 	if action != LoopForceStop {
-		t.Errorf("3 consecutive identical calls should force stop, got %v", action)
+		t.Errorf("4 consecutive identical calls should force stop, got %v", action)
 	}
 }
 
@@ -57,50 +64,54 @@ func TestLoopDetector_NonConsecutiveDup_NoFalsePositive(t *testing.T) {
 func TestLoopDetector_WindowDup_Nudge(t *testing.T) {
 	ld := NewLoopDetector()
 
-	// 3 spread-out identical calls: window-based nudge (exactDupThreshold=3)
+	// 5 spread-out identical calls: window-based nudge (exactDupThreshold=5)
 	ld.Record("file_read", `{"file":"main.go"}`, false, "", "", false)
 	ld.Record("file_edit", `{"old":"a","new":"b"}`, false, "", "", false)
 	ld.Record("file_read", `{"file":"main.go"}`, false, "", "", false)
 	ld.Record("file_edit", `{"old":"b","new":"c"}`, false, "", "", false)
 	ld.Record("file_read", `{"file":"main.go"}`, false, "", "", false)
+	ld.Record("file_edit", `{"old":"c","new":"d"}`, false, "", "", false)
+	ld.Record("file_read", `{"file":"main.go"}`, false, "", "", false)
+	ld.Record("file_edit", `{"old":"d","new":"e"}`, false, "", "", false)
+	ld.Record("file_read", `{"file":"main.go"}`, false, "", "", false)
 
 	action, _ := ld.Check("file_read")
 	if action != LoopNudge {
-		t.Errorf("3 spread-out identical calls should trigger window nudge, got %v", action)
+		t.Errorf("5 spread-out identical calls should trigger window nudge, got %v", action)
 	}
 }
 
 func TestLoopDetector_WindowDup_ForceStop(t *testing.T) {
 	ld := NewLoopDetector()
 
-	// 6 spread-out identical calls: window force stop (2× exactDupThreshold)
-	for range 6 {
+	// 10 spread-out identical calls: window force stop (2× exactDupThreshold=10)
+	for range 10 {
 		ld.Record("file_read", `{"file":"main.go"}`, false, "", "", false)
 		ld.Record("file_edit", `{"x":"y"}`, false, "", "", false)
 	}
 	action, _ := ld.Check("file_read")
 	if action != LoopForceStop {
-		t.Errorf("6 spread-out identical calls should force stop, got %v", action)
+		t.Errorf("10 spread-out identical calls should force stop, got %v", action)
 	}
 }
 
 func TestLoopDetector_SameToolError_Nudge(t *testing.T) {
 	ld := NewLoopDetector()
 
-	// 3 errors: no trigger (threshold is 4)
-	for i := range 3 {
+	// 5 errors: no trigger (threshold is 6)
+	for i := range 5 {
 		ld.Record("file_edit", fmt.Sprintf(`{"file":"f%d"}`, i), true, "permission denied", "", false)
 	}
 	action, _ := ld.Check("file_edit")
 	if action != LoopContinue {
-		t.Errorf("3 errors should not trigger, got %v", action)
+		t.Errorf("5 errors should not trigger, got %v", action)
 	}
 
-	// 4th error: nudge
-	ld.Record("file_edit", `{"file":"f4"}`, true, "permission denied", "", false)
+	// 6th error: nudge
+	ld.Record("file_edit", `{"file":"f5"}`, true, "permission denied", "", false)
 	action, msg := ld.Check("file_edit")
 	if action != LoopNudge {
-		t.Errorf("4 errors should trigger nudge, got %v", action)
+		t.Errorf("6 errors should trigger nudge, got %v", action)
 	}
 	if msg == "" {
 		t.Error("nudge should have a message")
@@ -110,36 +121,36 @@ func TestLoopDetector_SameToolError_Nudge(t *testing.T) {
 func TestLoopDetector_SameToolError_ForceStop(t *testing.T) {
 	ld := NewLoopDetector()
 
-	// 8 errors: force stop (2× threshold of 4)
-	for i := range 8 {
+	// 12 errors: force stop (2× threshold of 6)
+	for i := range 12 {
 		ld.Record("file_edit", fmt.Sprintf(`{"file":"f%d"}`, i), true, "permission denied", "", false)
 	}
 	action, _ := ld.Check("file_edit")
 	if action != LoopForceStop {
-		t.Errorf("8 errors should trigger force stop, got %v", action)
+		t.Errorf("12 errors should trigger force stop, got %v", action)
 	}
 }
 
 func TestLoopDetector_NoProgress_Nudge(t *testing.T) {
 	ld := NewLoopDetector()
 
-	// 7 calls with different args: no trigger (threshold is 8)
+	// 11 calls with different args: no trigger (threshold is 12)
 	// Use think (not in any tool family, not semi-repeatable) to test pure
-	// NoProgress detection. bash is semi-repeatable (threshold 12) so it
-	// wouldn't trigger at 8.
-	for i := range 7 {
+	// NoProgress detection. bash is semi-repeatable (threshold 16) so it
+	// wouldn't trigger at 12.
+	for i := range 11 {
 		ld.Record("think", fmt.Sprintf(`{"thought":"idea%d"}`, i), false, "", "", false)
 	}
 	action, _ := ld.Check("think")
 	if action != LoopContinue {
-		t.Errorf("7 calls should not trigger, got %v", action)
+		t.Errorf("11 calls should not trigger, got %v", action)
 	}
 
-	// 8th call: nudge
-	ld.Record("think", `{"thought":"idea8"}`, false, "", "", false)
+	// 12th call: nudge
+	ld.Record("think", `{"thought":"idea12"}`, false, "", "", false)
 	action, _ = ld.Check("think")
 	if action != LoopNudge {
-		t.Errorf("8 calls should trigger nudge, got %v", action)
+		t.Errorf("12 calls should trigger nudge, got %v", action)
 	}
 }
 
@@ -160,11 +171,18 @@ func TestLoopDetector_GUIConsecutiveDupStillDetected(t *testing.T) {
 	ld := NewLoopDetector()
 
 	// Even GUI tools should trigger consecutive-duplicate detection
+	// consecDupThreshold=3 → nudge at 3 consecutive identical calls
 	ld.Record("screenshot", `{}`, false, "", "", false)
 	ld.Record("screenshot", `{}`, false, "", "", false)
 	action, _ := ld.Check("screenshot")
+	if action != LoopContinue {
+		t.Errorf("2 consecutive identical screenshot calls should not trigger (consecDupThreshold=3), got %v", action)
+	}
+
+	ld.Record("screenshot", `{}`, false, "", "", false)
+	action, _ = ld.Check("screenshot")
 	if action != LoopNudge {
-		t.Errorf("2 consecutive identical screenshot calls should nudge, got %v", action)
+		t.Errorf("3 consecutive identical screenshot calls should nudge, got %v", action)
 	}
 }
 
@@ -172,12 +190,13 @@ func TestLoopDetector_SlidingWindow(t *testing.T) {
 	ld := NewLoopDetector()
 	ld.historySize = 5 // small window for testing
 
-	// Fill window with 2 consecutive bash duplicates (triggers consecutive nudge)
+	// Fill window with 3 consecutive bash duplicates (triggers consecutive nudge at consecDupThreshold=3)
+	ld.Record("bash", `{"cmd":"ls"}`, false, "", "", false)
 	ld.Record("bash", `{"cmd":"ls"}`, false, "", "", false)
 	ld.Record("bash", `{"cmd":"ls"}`, false, "", "", false)
 	action, _ := ld.Check("bash")
 	if action != LoopNudge {
-		t.Error("2 consecutive exact dups should nudge")
+		t.Error("3 consecutive exact dups should nudge")
 	}
 
 	// Push old records out of window with 5 different calls
@@ -243,13 +262,16 @@ func TestLoopDetector_ErrorsOnlyCountForSameTool(t *testing.T) {
 
 func TestLoopDetector_WebFamily_SameTopicNudge(t *testing.T) {
 	ld := NewLoopDetector()
-	// 3 web_search calls with varied but same-topic queries → family nudge at 3
+	// 5 web_search calls all normalizing to the "climate world" topic
+	// (only date / filler words differ) → family nudge at 5 (v2 threshold).
 	ld.Record("web_search", `{"query":"world climate today March 2 2026 major headlines"}`, false, "", "", false)
 	ld.Record("web_search", `{"query":"world climate March 2 2026 top headlines latest"}`, false, "", "", false)
 	ld.Record("web_search", `{"query":"world climate today March 2 2026 breaking news"}`, false, "", "", false)
+	ld.Record("web_search", `{"query":"world climate latest update March 2 2026"}`, false, "", "", false)
+	ld.Record("web_search", `{"query":"world climate top headlines current March 2 2026"}`, false, "", "", false)
 	action, msg := ld.Check("web_search")
 	if action != LoopNudge {
-		t.Errorf("3 same-topic web searches should nudge, got %v", action)
+		t.Errorf("5 same-topic web searches should nudge (FamilyNoProgress v2 threshold), got %v", action)
 	}
 	if msg == "" {
 		t.Error("nudge should have a message")
@@ -264,29 +286,34 @@ func TestLoopDetector_WebFamily_CrossToolTopicInheritance(t *testing.T) {
 	ld.Record("web_search", `{"query":"golang tutorial latest"}`, false, "", "", false)
 	ld.Record("web_fetch", `{"url":"https://go.dev/doc/tutorial"}`, false, "", "", false)
 
-	// 2 same-topic (from web_search) + 1 different (web_fetch URL) → not yet 3
+	// 2 same-topic (from web_search) + 1 different (web_fetch URL) → not yet 5
 	action, _ := ld.Check("web_fetch")
 	if action != LoopContinue {
 		t.Errorf("2 same-topic + 1 different should continue, got %v", action)
 	}
 
-	// Add one more same-topic search (only date differs) → 3 same-topic in family → nudge
+	// Add more same-topic searches until nudge at 5 same-topic in family (v2 threshold).
+	// All queries normalize to the "golang tutorial" topic (date/filler stripped).
 	ld.Record("web_search", `{"query":"latest golang tutorial today"}`, false, "", "", false)
+	ld.Record("web_search", `{"query":"golang tutorial top latest"}`, false, "", "", false)
+	ld.Record("web_search", `{"query":"golang tutorial current update"}`, false, "", "", false)
 	action, _ = ld.Check("web_search")
 	if action != LoopNudge {
-		t.Errorf("3 same-topic family calls should nudge, got %v", action)
+		t.Errorf("5 same-topic family calls should nudge (v2 threshold), got %v", action)
 	}
 }
 
 func TestLoopDetector_WebFamily_ResultSigDedup(t *testing.T) {
 	ld := NewLoopDetector()
-	// 3 calls returning the same domains → no new info → nudge
+	// 5 calls returning the same domains → no new info → nudge at 5 (v2 threshold)
 	ld.Record("web_search", `{"query":"ai research papers"}`, false, "", "reuters.com,bbc.com", false)
 	ld.Record("web_search", `{"query":"ai research latest papers"}`, false, "", "reuters.com,bbc.com", false)
 	ld.Record("web_search", `{"query":"ai research papers review"}`, false, "", "reuters.com,bbc.com", false)
+	ld.Record("web_search", `{"query":"ai research 2026"}`, false, "", "reuters.com,bbc.com", false)
+	ld.Record("web_search", `{"query":"latest ai research papers"}`, false, "", "reuters.com,bbc.com", false)
 	action, _ := ld.Check("web_search")
 	if action != LoopNudge {
-		t.Errorf("3 calls with same result signature should nudge, got %v", action)
+		t.Errorf("5 calls with same result signature should nudge, got %v", action)
 	}
 }
 
@@ -295,9 +322,12 @@ func TestLoopDetector_WebFamily_AlternatingSearchFetchStillNudges(t *testing.T) 
 
 	// Mixed web workflows should still nudge when alternating tools keep
 	// returning the same source and no new information is being gathered.
+	// v2: nudge at 5 same-result-sig calls in the family.
 	ld.Record("web_search", `{"query":"go tutorial official"}`, false, "", "go.dev", false)
 	ld.Record("web_fetch", `{"url":"https://go.dev/doc/tutorial"}`, false, "", "go.dev", false)
 	ld.Record("web_search", `{"query":"golang tutorial latest official"}`, false, "", "go.dev", false)
+	ld.Record("web_fetch", `{"url":"https://go.dev/doc/effective_go"}`, false, "", "go.dev", false)
+	ld.Record("web_search", `{"query":"golang official tutorial guide"}`, false, "", "go.dev", false)
 
 	action, _ := ld.Check("web_search")
 	if action != LoopNudge {
@@ -359,8 +389,8 @@ func TestLoopDetector_NonWebToolUnchanged(t *testing.T) {
 }
 
 // TestLoopDetector_RealWorldWebLoop replays the actual bug that prompted this fix:
-// 8 web_search calls with varied "world news" queries, then web_fetch calls.
-// The detector should catch it much earlier than the original ~15 calls.
+// many web_search calls with varied "world news" queries, then web_fetch calls.
+// v2 thresholds: nudge fires at 5 same-topic, force-stop fires at 12 same-topic.
 func TestLoopDetector_RealWorldWebLoop(t *testing.T) {
 	ld := NewLoopDetector()
 
@@ -373,6 +403,11 @@ func TestLoopDetector_RealWorldWebLoop(t *testing.T) {
 		`{"query":"world news March 2 2026 top headlines"}`,
 		`{"query":"world news today March 2 2026 top headlines"}`,
 		`{"query":"world news March 2 2026 top headlines Reuters AP BBC Al Jazeera CNN"}`,
+		`{"query":"world news March 2 2026 latest updates"}`,
+		`{"query":"world news March 2 2026 breaking"}`,
+		`{"query":"world news March 2 2026 Reuters AP"}`,
+		`{"query":"world news March 2 2026 BBC CNN Al Jazeera"}`,
+		`{"query":"world news March 2 2026 top stories"}`,
 	}
 
 	var firstNudge, firstForceStop int
@@ -387,11 +422,12 @@ func TestLoopDetector_RealWorldWebLoop(t *testing.T) {
 		}
 	}
 
-	if firstNudge == 0 || firstNudge > 3 {
-		t.Errorf("expected first nudge by call 3, got %d", firstNudge)
+	// v2: nudge at progressCount>=5, force-stop at progressCount>=12
+	if firstNudge == 0 || firstNudge > 5 {
+		t.Errorf("expected first nudge by call 5, got %d", firstNudge)
 	}
-	if firstForceStop == 0 || firstForceStop > 7 {
-		t.Errorf("expected force stop by call 7, got %d", firstForceStop)
+	if firstForceStop == 0 || firstForceStop > 12 {
+		t.Errorf("expected force stop by call 12, got %d", firstForceStop)
 	}
 }
 
@@ -496,39 +532,41 @@ func TestLoopDetector_ToolModeSwitch_NoNudgeAfterNonGUITool(t *testing.T) {
 func TestLoopDetector_RealWorldWebLoop_CrossTool(t *testing.T) {
 	ld := NewLoopDetector()
 
-	// 3 searches on same topic (all normalize to "climate world")
+	// All queries normalize to the "climate world" topic — only filler / date
+	// variations so the topic hash stays stable across all calls.
+	// 5 searches on same topic → nudge at 5 (v2 threshold)
 	ld.Record("web_search", `{"query":"world climate today March 2 2026"}`, false, "", "", false)
 	ld.Record("web_search", `{"query":"world climate March 2 2026 latest"}`, false, "", "", false)
 	ld.Record("web_search", `{"query":"world climate today latest headlines"}`, false, "", "", false)
+	ld.Record("web_search", `{"query":"world climate top breaking news"}`, false, "", "", false)
+	ld.Record("web_search", `{"query":"world climate current update major"}`, false, "", "", false)
 
-	// Should already be nudging (3 same-topic)
 	action, _ := ld.Check("web_search")
 	if action != LoopNudge {
-		t.Errorf("expected nudge after 3 same-topic searches, got %v", action)
+		t.Errorf("expected nudge after 5 same-topic searches, got %v", action)
 	}
 
-	// Switch to web_fetch then back — same-topic counter continues via family lookup
-	// Only filler/date variations so topic hash stays the same
+	// Switch to web_fetch then back — same-topic counter continues via family lookup.
+	// web_fetch URL is treated as its own topic, then we add more same-topic searches.
 	ld.Record("web_fetch", `{"url":"https://reuters.com/world/climate"}`, false, "", "", false)
-	ld.Record("web_search", `{"query":"world climate 2026"}`, false, "", "", false)
 	ld.Record("web_search", `{"query":"world climate today"}`, false, "", "", false)
 	ld.Record("web_search", `{"query":"world climate latest"}`, false, "", "", false)
+	ld.Record("web_search", `{"query":"world climate top current"}`, false, "", "", false)
 
-	// 3 original + 3 more same-topic web_search = 6 same-topic + web_fetch = 7 family
-	// But force stop requires progressCount >= 7, so need 7 same-topic.
-	// The 6 web_search calls all share "climate world" topic.
-	// web_fetch has different topic (URL). So progressCount = 6, not 7.
-	// 6 >= 5 → stronger nudge (not force stop).
+	// 5 original + 3 more same-topic web_search = 8 same-topic → stronger nudge (stage 1)
 	action, _ = ld.Check("web_search")
 	if action != LoopNudge {
-		t.Errorf("expected nudge after 6 same-topic web calls, got %v", action)
+		t.Errorf("expected nudge after 8 same-topic web calls, got %v", action)
 	}
 
-	// One more same-topic → 7 same-topic → force stop
-	ld.Record("web_search", `{"query":"world climate current"}`, false, "", "", false)
+	// Add more same-topic calls until force stop at progressCount >= 12.
+	ld.Record("web_search", `{"query":"world climate breaking"}`, false, "", "", false)
+	ld.Record("web_search", `{"query":"world climate update"}`, false, "", "", false)
+	ld.Record("web_search", `{"query":"world climate news today"}`, false, "", "", false)
+	ld.Record("web_search", `{"query":"world climate headlines major"}`, false, "", "", false)
 	action, _ = ld.Check("web_search")
 	if action != LoopForceStop {
-		t.Errorf("expected force stop after 7 same-topic web calls, got %v", action)
+		t.Errorf("expected force stop after 12 same-topic web calls, got %v", action)
 	}
 }
 
@@ -652,20 +690,20 @@ func TestLoopDetector_SleepDetection_IgnoreNonBash(t *testing.T) {
 func TestLoopDetector_SearchEscalation_Nudge(t *testing.T) {
 	ld := NewLoopDetector()
 
-	// 4 consecutive unproductive search calls: no trigger yet
-	for i := 0; i < 4; i++ {
+	// 6 consecutive unproductive search calls: no trigger yet (threshold is 7)
+	for i := 0; i < 6; i++ {
 		ld.Record("grep", fmt.Sprintf(`{"pattern":"term%d"}`, i), false, "", "", true)
 	}
 	action, _ := ld.Check("grep")
 	if action != LoopContinue {
-		t.Errorf("4 unproductive search calls should not trigger, got %v", action)
+		t.Errorf("6 unproductive search calls should not trigger, got %v", action)
 	}
 
-	// 5th unproductive search call: nudge
-	ld.Record("grep", `{"pattern":"term5"}`, false, "", "", true)
+	// 7th unproductive search call: nudge
+	ld.Record("grep", `{"pattern":"term6"}`, false, "", "", true)
 	action, msg := ld.Check("grep")
 	if action != LoopNudge {
-		t.Errorf("5 unproductive search calls should nudge, got %v", action)
+		t.Errorf("7 unproductive search calls should nudge, got %v", action)
 	}
 	if msg == "" {
 		t.Error("nudge should have a message")
@@ -675,8 +713,8 @@ func TestLoopDetector_SearchEscalation_Nudge(t *testing.T) {
 func TestLoopDetector_SearchEscalation_ForceStop(t *testing.T) {
 	ld := NewLoopDetector()
 
-	// 8 consecutive unproductive search calls (mixed grep/glob): force stop
-	for i := 0; i < 8; i++ {
+	// 12 consecutive unproductive search calls (mixed grep/glob): force stop
+	for i := 0; i < 12; i++ {
 		tool := "grep"
 		if i%2 == 1 {
 			tool = "glob"
@@ -685,7 +723,7 @@ func TestLoopDetector_SearchEscalation_ForceStop(t *testing.T) {
 	}
 	action, _ := ld.Check("glob")
 	if action != LoopForceStop {
-		t.Errorf("8 unproductive search calls should force stop, got %v", action)
+		t.Errorf("12 unproductive search calls should force stop, got %v", action)
 	}
 }
 
@@ -708,16 +746,18 @@ func TestLoopDetector_SearchEscalation_NoFalsePositive(t *testing.T) {
 func TestLoopDetector_SearchEscalation_MixedSearchTools(t *testing.T) {
 	ld := NewLoopDetector()
 
-	// 5 unproductive mixed grep+glob calls: nudge
+	// 7 unproductive mixed grep+glob calls: nudge (v2 threshold)
 	ld.Record("grep", `{"pattern":"foo"}`, false, "", "", true)
 	ld.Record("glob", `{"pattern":"**/*.go"}`, false, "", "", true)
 	ld.Record("grep", `{"pattern":"bar"}`, false, "", "", true)
 	ld.Record("glob", `{"pattern":"**/*.ts"}`, false, "", "", true)
 	ld.Record("grep", `{"pattern":"baz"}`, false, "", "", true)
+	ld.Record("glob", `{"pattern":"**/*.json"}`, false, "", "", true)
+	ld.Record("grep", `{"pattern":"qux"}`, false, "", "", true)
 
 	action, msg := ld.Check("grep")
 	if action != LoopNudge {
-		t.Errorf("5 unproductive mixed search calls should nudge, got %v", action)
+		t.Errorf("7 unproductive mixed search calls should nudge, got %v", action)
 	}
 	if msg == "" {
 		t.Error("nudge should have a message")
@@ -758,14 +798,17 @@ func TestLoopDetector_SearchEscalation_ProductiveSearchesDontHitNoProgress(t *te
 func TestLoopDetector_BrowserFamilyNoProgress(t *testing.T) {
 	ld := NewLoopDetector()
 
-	// Simulate 3 browser calls with the same URL (same topic hash) but different
+	// Simulate 5 browser calls with the same URL (same topic hash) but different
 	// extra fields to produce different ArgsHash and avoid ConsecutiveDup detector.
+	// v2: FamilyNoProgress nudge at progressCount >= 5.
 	ld.Record("browser", `{"action":"navigate","url":"https://jd.com/search?q=huawei","wait":1}`, false, "", "", false)
 	ld.Record("browser", `{"action":"navigate","url":"https://jd.com/search?q=huawei","wait":2}`, false, "", "", false)
 	ld.Record("browser", `{"action":"navigate","url":"https://jd.com/search?q=huawei","wait":3}`, false, "", "", false)
+	ld.Record("browser", `{"action":"navigate","url":"https://jd.com/search?q=huawei","wait":4}`, false, "", "", false)
+	ld.Record("browser", `{"action":"navigate","url":"https://jd.com/search?q=huawei","wait":5}`, false, "", "", false)
 	action, msg := ld.Check("browser")
 	if action != LoopNudge {
-		t.Errorf("3 same-topic browser calls should nudge, got %v", action)
+		t.Errorf("5 same-topic browser calls should nudge, got %v", action)
 	}
 	if strings.Contains(msg, "searched") || strings.Contains(msg, "query") {
 		t.Errorf("browser-family nudge should not use search vocabulary, got: %s", msg)
@@ -855,52 +898,52 @@ func TestLoopDetector_BrowserSnapshotInterleavedRepeatable(t *testing.T) {
 }
 
 // TestLoopDetector_SemiRepeatable_BashHigherThreshold verifies that bash
-// gets the elevated NoProgress threshold (12) instead of the generic (8),
+// gets the elevated NoProgress threshold (16) instead of the generic (12),
 // so multi-step scripting workflows (fetch → process → install → build)
 // aren't killed before completing. The exact-dup, same-error, and sleep
 // detectors still catch real loops at their own lower thresholds.
 func TestLoopDetector_SemiRepeatable_BashHigherThreshold(t *testing.T) {
 	ld := NewLoopDetector()
 
-	// 8 distinct bash calls — would nudge with the generic threshold,
-	// but should be Continue with the semi-repeatable threshold of 12.
-	for i := range 8 {
+	// 12 distinct bash calls — would nudge with the generic threshold (12),
+	// but should be Continue with the semi-repeatable threshold of 16.
+	for i := range 12 {
 		ld.Record("bash", fmt.Sprintf(`{"command":"step_%d"}`, i), false, "", "", false)
 	}
 	action, _ := ld.Check("bash")
 	if action != LoopContinue {
-		t.Errorf("8 distinct bash calls should Continue (semi-repeatable threshold 12), got %v", action)
+		t.Errorf("12 distinct bash calls should Continue (semi-repeatable threshold 16), got %v", action)
 	}
 
-	// 11 calls — still under 12.
-	for i := 8; i < 11; i++ {
+	// 15 calls — still under 16.
+	for i := 12; i < 15; i++ {
 		ld.Record("bash", fmt.Sprintf(`{"command":"step_%d"}`, i), false, "", "", false)
 	}
 	action, _ = ld.Check("bash")
 	if action != LoopContinue {
-		t.Errorf("11 distinct bash calls should Continue, got %v", action)
+		t.Errorf("15 distinct bash calls should Continue, got %v", action)
 	}
 
-	// 12th call → nudge.
-	ld.Record("bash", `{"command":"step_12"}`, false, "", "", false)
+	// 16th call → nudge.
+	ld.Record("bash", `{"command":"step_16"}`, false, "", "", false)
 	action, _ = ld.Check("bash")
 	if action != LoopNudge {
-		t.Errorf("12 bash calls should nudge, got %v", action)
+		t.Errorf("16 bash calls should nudge, got %v", action)
 	}
 }
 
 // TestLoopDetector_SemiRepeatable_NonBashUnchanged verifies that the generic
-// NoProgress threshold (8) still applies to non-semi-repeatable tools like
-// file_write, think, etc. — unchanged from before.
+// NoProgress threshold (12) still applies to non-semi-repeatable tools like
+// file_write, think, etc. — unchanged from the v1 bash-only relaxation.
 func TestLoopDetector_SemiRepeatable_NonBashUnchanged(t *testing.T) {
 	ld := NewLoopDetector()
 
-	for i := range 8 {
+	for i := range 12 {
 		ld.Record("think", fmt.Sprintf(`{"thought":"idea_%d"}`, i), false, "", "", false)
 	}
 	action, _ := ld.Check("think")
 	if action != LoopNudge {
-		t.Errorf("8 think calls should nudge at generic threshold, got %v", action)
+		t.Errorf("12 think calls should nudge at generic threshold, got %v", action)
 	}
 }
 
@@ -935,15 +978,15 @@ func TestLoopDetector_BrowserMultiToolFlowNoFalsePositive(t *testing.T) {
 func TestLoopDetector_BrowserSameToolStillDetected(t *testing.T) {
 	ld := NewLoopDetector()
 	sameResultSig := "https://chatgpt.com"
-	// Two back-to-back identical calls hit the consecutive-duplicate
-	// detector at threshold 2 → nudge. A third would force-stop, which is
+	// Three back-to-back identical calls hit the consecutive-duplicate
+	// detector at threshold 3 → nudge. A fourth would force-stop, which is
 	// also correct behavior but not what this test locks in.
-	for i := 0; i < 2; i++ {
+	for i := 0; i < 3; i++ {
 		ld.Record("browser_click", `{"ref":"e120","element":"plus"}`, false, "", sameResultSig, false)
 	}
 	action, _ := ld.Check("browser_click")
 	if action != LoopNudge {
-		t.Errorf("2 consecutive identical browser_click calls should nudge, got %v", action)
+		t.Errorf("3 consecutive identical browser_click calls should nudge, got %v", action)
 	}
 }
 
@@ -951,15 +994,16 @@ func TestLoopDetector_BrowserSameToolStillDetected(t *testing.T) {
 // load-bearing polling guard after the repeatable-result-only relaxation:
 // repeated browser_snapshot calls with identical args must still be stopped by
 // the duplicate detectors instead of silently inheriting the raised threshold.
+// With consecDupThreshold=3, force-stop fires at consecDupThreshold+1=4.
 func TestLoopDetector_BrowserSnapshotConsecutiveDupStillForceStops(t *testing.T) {
 	ld := NewLoopDetector()
 	const pageURL = "https://example.com/app"
-	for range 3 {
+	for range 4 {
 		ld.Record("browser_snapshot", `{}`, false, "", pageURL, false)
 	}
 	action, msg := ld.Check("browser_snapshot")
 	if action != LoopForceStop {
-		t.Fatalf("3 identical browser_snapshot calls must still force-stop via duplicate detection, got %v: %s", action, msg)
+		t.Fatalf("4 identical browser_snapshot calls must still force-stop via duplicate detection, got %v: %s", action, msg)
 	}
 }
 
@@ -1105,20 +1149,21 @@ func TestLoopDetector_NoProgress_MCPIdenticalArgs_StillStops(t *testing.T) {
 // TestLoopDetector_NoProgress_GenericToolUniqueArgs_StillNudges_Regression
 // pins the core constraint of Phase 1: the uniqueness gate must NOT relax
 // generic NoProgress detection for tools outside the batchTolerant set.
-// `think` (not in batchTolerant, not semi-repeatable) called 8 times with
+// `think` (not in batchTolerant, not semi-repeatable) called 12 times with
 // distinct argsJSON must still nudge — catching "spinning on thought
 // variations without progress" is the generic path's load-bearing role.
+// v2: noProgressThreshold=12, so nudge fires at call 12.
 func TestLoopDetector_NoProgress_GenericToolUniqueArgs_StillNudges_Regression(t *testing.T) {
 	ld := NewLoopDetector()
 	// Explicitly NOT populating batchTolerant — this test must behave the
 	// same whether the field is nil or empty.
 
-	for i := range 8 {
+	for i := range 12 {
 		ld.Record("think", fmt.Sprintf(`{"thought":"idea%d"}`, i), false, "", "", false)
 	}
 	action, msg := ld.Check("think")
 	if action != LoopNudge {
-		t.Fatalf("8 unique-args think calls must still nudge (generic path unchanged), got %v (%s)", action, msg)
+		t.Fatalf("12 unique-args think calls must still nudge (generic path unchanged), got %v (%s)", action, msg)
 	}
 }
 
@@ -1183,22 +1228,23 @@ func TestLoopDetector_UseSkill_RepeatedNeverFiresAnyDup(t *testing.T) {
 
 // TestLoopDetector_UseSkill_ExemptionScopedToSelf guards against the
 // dupExempt entry leaking into other tools. After 5 use_skill calls
-// (which would normally trip ExactDup), records 3 same-args web_search
+// (which would normally trip ExactDup), records 4 same-args web_search
 // calls — those must still force-stop. This catches the regression
 // where an over-broad exemption (e.g. checking against the whole
 // dupExemptTools map outside the name-scoped path) would suppress
 // legitimate signals on adjacent tools.
+// With consecDupThreshold=3, force-stop fires at consecCount >= 4.
 func TestLoopDetector_UseSkill_ExemptionScopedToSelf(t *testing.T) {
 	ld := NewLoopDetector()
 	for range 5 {
 		ld.Record("use_skill", `{"skill_name":"kocoro"}`, false, "", "", false)
 	}
-	for range 3 {
+	for range 4 {
 		ld.Record("web_search", `{"q":"climate"}`, false, "", "", false)
 	}
 	action, _ := ld.Check("web_search")
 	if action != LoopForceStop {
-		t.Fatalf("web_search ×3 same args must still force-stop after use_skill exemption activity, got %v", action)
+		t.Fatalf("web_search ×4 same args must still force-stop after use_skill exemption activity, got %v", action)
 	}
 }
 
@@ -1252,41 +1298,43 @@ func TestConsecutiveDup_FailFailSuccessRetry(t *testing.T) {
 // legitimate "spinning on identical successful results" case still
 // triggers. Rule 1 doesn't apply (no error in run), Rule 2 doesn't apply
 // (not all errors) → original strict threshold.
+// With consecDupThreshold=3: nudge at 3, force-stop at 4.
 func TestConsecutiveDup_ThreeSuccessfulSameArgsStillStops(t *testing.T) {
 	ld := NewLoopDetector()
-	for range 3 {
+	for range 4 {
 		ld.Record("web_search", `{"q":"climate"}`, false, "", "", false)
 	}
 	action, _ := ld.Check("web_search")
 	if action != LoopForceStop {
-		t.Fatalf("3 successful identical web_search must still force-stop, got %v", action)
+		t.Fatalf("4 successful identical web_search must still force-stop, got %v", action)
 	}
 }
 
-// TestConsecutiveDup_FourErrorsNudgesNotForceStop: 4 same-args fails is
-// past the success threshold (3) but should now use Rule 2's 2x
-// threshold (4 nudge, 5 force-stop). At 4 errors → nudge, not force-stop.
+// TestConsecutiveDup_FourErrorsNudgesNotForceStop: 6 same-args fails uses
+// Rule 2's 2x threshold (6 nudge, 7 force-stop). At 6 errors → nudge, not force-stop.
+// consecDupThreshold=3 → all-errors budget = 2x = 6/7.
 func TestConsecutiveDup_FourErrorsNudgesNotForceStop(t *testing.T) {
 	ld := NewLoopDetector()
-	for range 4 {
+	for range 6 {
 		ld.Record("browser_click", `{"ref":"e1"}`, true, "element not found", "", false)
 	}
 	action, _ := ld.Check("browser_click")
 	if action != LoopNudge {
-		t.Fatalf("4 same-args consecutive errors should nudge (error budget 4/5), got %v", action)
+		t.Fatalf("6 same-args consecutive errors should nudge (error budget 6/7), got %v", action)
 	}
 }
 
-// TestConsecutiveDup_FiveAllErrorsForceStops: 5 same-args all-error hits
+// TestConsecutiveDup_FiveAllErrorsForceStops: 7 same-args all-error hits
 // the 2x force-stop budget. No tail success, no recovery — real stuck loop.
+// consecDupThreshold=3 → all-errors budget = 2x = 6 nudge / 7 force-stop.
 func TestConsecutiveDup_FiveAllErrorsForceStops(t *testing.T) {
 	ld := NewLoopDetector()
-	for range 5 {
+	for range 7 {
 		ld.Record("browser_click", `{"ref":"e1"}`, true, "element not found", "", false)
 	}
 	action, _ := ld.Check("browser_click")
 	if action != LoopForceStop {
-		t.Fatalf("5 same-args consecutive errors should force-stop (2x budget), got %v", action)
+		t.Fatalf("7 same-args consecutive errors should force-stop (2x budget), got %v", action)
 	}
 }
 
@@ -1308,19 +1356,19 @@ func TestExactDup_SixAllErrorsSpreadNotForceStop(t *testing.T) {
 	}
 }
 
-// TestExactDup_SixAllSuccessSpreadStillForceStops: 6 spread-out same-args
-// successes (no errors) uses the original threshold → force-stop at 6.
+// TestExactDup_SixAllSuccessSpreadStillForceStops: 10 spread-out same-args
+// successes (no errors) uses the original threshold → force-stop at 2×exactDupThreshold=10.
 // This is real spin, not flaky retry.
 func TestExactDup_SixAllSuccessSpreadStillForceStops(t *testing.T) {
 	ld := NewLoopDetector()
-	for i := 0; i < 6; i++ {
+	for i := 0; i < 10; i++ {
 		ld.Record("file_read", `{"file":"main.go"}`, false, "", "", false)
 		ld.Record("file_edit",
 			fmt.Sprintf(`{"old":"a%d","new":"b%d"}`, i, i), false, "", "", false)
 	}
 	action, _ := ld.Check("file_read")
 	if action != LoopForceStop {
-		t.Fatalf("6 spread-out same-args successes must still force-stop (original budget), got %v", action)
+		t.Fatalf("10 spread-out same-args successes must still force-stop (2×exactDupThreshold budget), got %v", action)
 	}
 }
 
@@ -1330,17 +1378,22 @@ func TestExactDup_SixAllSuccessSpreadStillForceStops(t *testing.T) {
 // with identical args is spin.
 // Final call in sequence is an error (so tail-success recovery skip does
 // NOT apply — recovery requires tail=success AND errCount>0).
+// With exactDupThreshold=5: nudge fires at dupCount >= 5 (strict, mixed).
 func TestExactDup_MixedSuccessAndErrorsUsesStrictThreshold(t *testing.T) {
 	ld := NewLoopDetector()
-	// 3 same-args: fail, success, fail — mixed, tail=error → strict threshold → nudge at 3
+	// 5 same-args repeats with mixed success/error, tail=error → strict threshold → nudge at 5
 	ld.Record("browser_click", `{"ref":"e1"}`, true, "element not found", "", false)
 	ld.Record("browser_snapshot", `{}`, false, "", "sigA", false)
 	ld.Record("browser_click", `{"ref":"e1"}`, false, "", "", false)
 	ld.Record("browser_snapshot", `{}`, false, "", "sigB", false)
 	ld.Record("browser_click", `{"ref":"e1"}`, true, "element not found", "", false)
+	ld.Record("browser_snapshot", `{}`, false, "", "sigC", false)
+	ld.Record("browser_click", `{"ref":"e1"}`, false, "", "", false)
+	ld.Record("browser_snapshot", `{}`, false, "", "sigD", false)
+	ld.Record("browser_click", `{"ref":"e1"}`, true, "element not found", "", false)
 	action, _ := ld.Check("browser_click")
 	if action != LoopNudge {
-		t.Fatalf("3 mixed same-args repeats (tail=error) should nudge (strict threshold), got %v", action)
+		t.Fatalf("5 mixed same-args repeats (tail=error) should nudge (strict threshold), got %v", action)
 	}
 }
 
@@ -1435,16 +1488,21 @@ func TestFamilyNoProgress_RepeatableVaryingArgsExtremeForceStops(t *testing.T) {
 }
 
 // TestFamilyNoProgress_NonRepeatableOriginalThresholds: web_search family
-// must still hit force-stop at 7 same-topic calls — raised thresholds only
-// apply to repeatable tools.
+// must still hit force-stop at 12 same-topic calls (v2 threshold).
+// Raised thresholds apply uniformly; repeatable tools have a separate
+// result-only path with a higher threshold.
 func TestFamilyNoProgress_NonRepeatableOriginalThresholds(t *testing.T) {
 	ld := NewLoopDetector()
-	for i := 0; i < 7; i++ {
-		args := fmt.Sprintf(`{"q":"climate change effects %d"}`, i)
+	// All 12 queries normalize to the "change climate effects" topic
+	// (only filler words differ).
+	fillers := []string{"today", "latest", "top", "current", "major", "breaking",
+		"news", "update", "headlines", "recent", "today latest", "top current"}
+	for _, f := range fillers {
+		args := fmt.Sprintf(`{"q":"climate change effects %s"}`, f)
 		ld.Record("web_search", args, false, "", "", false)
 	}
 	action, _ := ld.Check("web_search")
 	if action != LoopForceStop {
-		t.Fatalf("7 same-topic web_search must still force-stop (original threshold), got %v", action)
+		t.Fatalf("12 same-topic web_search must still force-stop (v2 threshold), got %v", action)
 	}
 }

@@ -260,6 +260,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("DELETE /sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("PATCH /sessions/{id}", s.handlePatchSession)
 	mux.HandleFunc("POST /sessions/{id}/edit", s.handleEditMessage)
+	mux.HandleFunc("POST /sessions/{id}/reset", s.handleResetSession)
 	mux.HandleFunc("GET /sessions/{id}/summary", s.handleSessionSummary)
 	mux.HandleFunc("GET /sessions/search", s.handleSessionSearch)
 	mux.HandleFunc("GET /permissions", s.handlePermissions)
@@ -782,6 +783,57 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// handleResetSession clears a named-agent session's conversation history in
+// place while preserving ID/Title/CWD and other metadata.
+// Query: ?agent=<name> (required) — default-agent sessions should be discarded
+// via DELETE /sessions/{id} instead; this endpoint is only for named agents
+// whose routing identity must survive the wipe.
+// Active runs are cancelled before the history is cleared.
+//
+// Known race (matches handleEditMessage): CancelBySessionID only fires the
+// cancel signal and does not wait for the agent loop to exit. If the loop is
+// in a mid-turn checkpoint save, its Save() may land after Reset(), leaving
+// InProgress set or partial history re-applied. Callers should ensure no run
+// is active before invoking /reset; a second /reset clears any residue. A
+// proper barrier belongs in SessionCache and is out of scope here.
+func (s *Server) handleResetSession(w http.ResponseWriter, r *http.Request) {
+	if s.deps == nil {
+		writeError(w, http.StatusInternalServerError, "daemon deps not configured")
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "session id required")
+		return
+	}
+	if id != filepath.Base(id) || strings.ContainsAny(id, `/\`) {
+		writeError(w, http.StatusBadRequest, "invalid session id")
+		return
+	}
+	agentName := r.URL.Query().Get("agent")
+	if agentName == "" {
+		writeError(w, http.StatusBadRequest, "agent query parameter is required; use DELETE /sessions/{id} to discard a default-agent session")
+		return
+	}
+	if err := agents.ValidateAgentName(agentName); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	s.deps.SessionCache.CancelBySessionID(id)
+
+	mgr := s.deps.SessionCache.GetOrCreateManager(s.deps.SessionCache.SessionsDir(agentName))
+	if err := mgr.Reset(id); err != nil {
+		if os.IsNotExist(err) {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("session %q not found", id))
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "reset", "id": id})
 }
 
 func (s *Server) handlePatchSession(w http.ResponseWriter, r *http.Request) {

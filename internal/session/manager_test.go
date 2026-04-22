@@ -198,3 +198,135 @@ func TestManager_WorkingSet_IsScopedPerSession(t *testing.T) {
 		t.Fatal("resumed first session should retain its working set")
 	}
 }
+
+func TestManager_Reset_ClearsHistoryInPlace(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManager(dir)
+	defer m.Close()
+
+	// Seed a session with messages, meta, summary cache, and usage.
+	sess := m.NewSession()
+	origID := sess.ID
+	sess.Title = "Kept title"
+	sess.CWD = "/keep/here"
+	sess.Source = "slack"
+	sess.Channel = "C123"
+	sess.Messages = []client.Message{
+		{Role: "user", Content: client.NewTextContent("hello")},
+		{Role: "assistant", Content: client.NewTextContent("hi")},
+	}
+	sess.MessageMeta = []MessageMeta{{Source: "local"}, {Source: "local"}}
+	sess.RemoteTasks = []string{"task-1"}
+	sess.SummaryCache = "cached summary"
+	sess.SummaryCacheKey = "key-1"
+	sess.InProgress = true
+	if err := m.Save(); err != nil {
+		t.Fatalf("seed save failed: %v", err)
+	}
+	m.AddUsage(origID, UsageSummary{InputTokens: 100, CostUSD: 0.5})
+	if err := m.Save(); err != nil {
+		t.Fatalf("seed usage save failed: %v", err)
+	}
+
+	if err := m.Reset(origID); err != nil {
+		t.Fatalf("Reset failed: %v", err)
+	}
+
+	cur := m.Current()
+	if cur == nil || cur.ID != origID {
+		t.Fatalf("current session should still be %q, got %+v", origID, cur)
+	}
+	if cur.Title != "Kept title" {
+		t.Errorf("Title should be preserved, got %q", cur.Title)
+	}
+	if cur.CWD != "/keep/here" {
+		t.Errorf("CWD should be preserved, got %q", cur.CWD)
+	}
+	if cur.Source != "slack" || cur.Channel != "C123" {
+		t.Errorf("Source/Channel should be preserved, got %q/%q", cur.Source, cur.Channel)
+	}
+	if cur.Usage == nil || cur.Usage.InputTokens != 100 {
+		t.Errorf("Usage should be preserved, got %+v", cur.Usage)
+	}
+	if len(cur.Messages) != 0 {
+		t.Errorf("Messages should be cleared, got %d", len(cur.Messages))
+	}
+	if len(cur.MessageMeta) != 0 {
+		t.Errorf("MessageMeta should be cleared, got %d", len(cur.MessageMeta))
+	}
+	if len(cur.RemoteTasks) != 0 {
+		t.Errorf("RemoteTasks should be cleared, got %d", len(cur.RemoteTasks))
+	}
+	if cur.SummaryCache != "" || cur.SummaryCacheKey != "" {
+		t.Errorf("Summary cache should be cleared, got %q/%q", cur.SummaryCache, cur.SummaryCacheKey)
+	}
+	if cur.InProgress {
+		t.Error("InProgress should be cleared")
+	}
+
+	// Reload from disk to confirm persistence.
+	m2 := NewManager(dir)
+	defer m2.Close()
+	loaded, err := m2.Load(origID)
+	if err != nil {
+		t.Fatalf("reload failed: %v", err)
+	}
+	if len(loaded.Messages) != 0 {
+		t.Errorf("persisted messages should be cleared, got %d", len(loaded.Messages))
+	}
+	if loaded.Title != "Kept title" {
+		t.Errorf("persisted title should be preserved, got %q", loaded.Title)
+	}
+	if loaded.Usage == nil || loaded.Usage.InputTokens != 100 {
+		t.Errorf("persisted usage should be preserved, got %+v", loaded.Usage)
+	}
+}
+
+func TestManager_Reset_NotFound(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManager(dir)
+	defer m.Close()
+
+	err := m.Reset("does-not-exist")
+	if err == nil {
+		t.Fatal("expected error for missing session")
+	}
+}
+
+func TestManager_Reset_EmptyID(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManager(dir)
+	defer m.Close()
+
+	if err := m.Reset(""); err == nil {
+		t.Fatal("expected error for empty id")
+	}
+}
+
+func TestManager_Reset_ResetsWorkingSet(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManager(dir)
+	defer m.Close()
+
+	sess := m.NewSession()
+	if err := m.Save(); err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+	ws := m.WorkingSet(sess.ID)
+	ws.Add("browser_click", client.Tool{Name: "browser_click"})
+	if !ws.Contains("browser_click") {
+		t.Fatal("seed: working set should contain browser_click")
+	}
+
+	if err := m.Reset(sess.ID); err != nil {
+		t.Fatalf("Reset failed: %v", err)
+	}
+
+	wsAfter := m.WorkingSet(sess.ID)
+	if wsAfter == nil {
+		t.Fatal("working set should exist after reset")
+	}
+	if wsAfter.Contains("browser_click") {
+		t.Error("working set should be cleared after reset")
+	}
+}

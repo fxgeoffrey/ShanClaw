@@ -27,7 +27,7 @@ cmd/
 
 internal/
   daemon/                # ── PRIMARY PRODUCTION PATH ──
-    server.go          # HTTP API server (agent CRUD, config, instructions, session edit/retry, reload)
+    server.go          # HTTP API server (agent CRUD, config, instructions, session edit/retry/reset, reload)
     runner.go          # Agent run orchestration, session routing, output format profiles
     client.go          # WebSocket client with reconnect, bounded concurrency
     router.go          # SessionKey, SessionCache, route locking

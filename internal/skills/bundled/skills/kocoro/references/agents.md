@@ -60,6 +60,12 @@ Agents are specialized AI assistants that you configure for specific tasks or pe
 - Response: `{"status": "updated"}`
 - Notes: Command name becomes a slash command the agent recognizes (e.g., `/report`).
 
+### Reset agent session history (in place)
+- Method: POST
+- Path: /sessions/{id}/reset?agent={name}
+- Response: `{"status": "reset", "id": "..."}`
+- Notes: Clears the session's conversation history while keeping the session ID, title, CWD, source, channel, and cumulative usage. Cancels any active run on that session first. The `agent` query parameter is REQUIRED — default-agent sessions do not use this endpoint; delete and recreate them via `DELETE /sessions/{id}` instead. Use when the user says "reset", "clear history", or "start over" on a named agent whose routing identity must survive the wipe.
+
 ## Common Scenarios
 
 ### "Create an email writer agent"

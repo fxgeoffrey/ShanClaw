@@ -281,6 +281,7 @@ Type `/` in the TUI to see the interactive command menu:
 | `/session resume <n>` | Resume session by number or ID |
 | `/search <query>` | Search session history (keyword, phrase, stemming) |
 | `/clear` | New session + clear screen |
+| `/reset` | Clear current session history in place (keeps ID, title, CWD) |
 | `/compact [instructions]` | Compress context and keep a summary |
 | `/doctor` | Run diagnostic checks |
 | `/permissions` | Show or manage tool permissions |
@@ -934,6 +935,7 @@ The daemon exposes a localhost-only HTTP server for native app integration and s
 | `/sessions` | GET | List sessions, optional `?agent=` filter |
 | `/sessions/{id}` | GET | Get full session with messages, `?agent=<name>` |
 | `/sessions/{id}/edit` | POST | Truncate history at index, re-run with new content (edit & retry) |
+| `/sessions/{id}/reset` | POST | Clear session history in place (named agent only, `?agent=<name>` required) |
 | `/sessions/search` | GET | Search session history, `?q=<query>&agent=<name>` |
 | `/message` | POST | Send a message to an agent, get reply (supports HITL injection) |
 | `/config/reload` | POST | Reload config, restart watchers and heartbeat managers |

@@ -2092,7 +2092,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			// Anthropic: input_tokens excludes cached tokens; they're additive.
 			// Total prompt = input + cache_read + cache_creation.
 			ratio := float64(0)
-			totalPrompt := normalizedUsage.InputTokens + normalizedUsage.CacheReadTokens + normalizedUsage.CacheCreationTokens
+			totalPrompt := totalPromptTokens(normalizedUsage)
 			if totalPrompt > 0 {
 				ratio = float64(normalizedUsage.CacheReadTokens) / float64(totalPrompt) * 100
 			}

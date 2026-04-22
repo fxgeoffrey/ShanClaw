@@ -40,6 +40,11 @@ Rules:
 - Be factual and brief. The goal is continuation, not exposition.
 - If a section has no content, omit its header rather than writing "none" or "N/A".
 - Do not add sections beyond the five above.
+- If the conversation does not fit the five-section structure (e.g. very short,
+  error-dominated, or tool_search-heavy), put a single plain-prose paragraph
+  summarising the work so far inside <summary>…</summary> instead of the five
+  labeled sections. Never return an empty response — an empty summary silently
+  skips context compaction and wastes the analysis pass.
 
 Format your response as:
 <analysis>

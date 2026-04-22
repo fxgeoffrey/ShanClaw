@@ -238,6 +238,12 @@ func TestExtractSummary(t *testing.T) {
 			"",
 			"analysis",
 		},
+		{
+			"structured summary preserves section headers",
+			"<analysis>walkthrough</analysis>\n<summary>\n## Current task & next steps\nFixing the bug.\n\n## Open files / important reads\ninternal/agent/loop.go — core loop\n</summary>",
+			"## Open files",
+			"walkthrough",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -110,10 +110,9 @@ func extractSummary(raw string) string {
 	raw = strings.TrimSpace(raw)
 
 	// Try to extract <summary>...</summary>
-	if start := strings.Index(raw, "<summary>"); start >= 0 {
-		after := raw[start+len("<summary>"):]
-		if end := strings.Index(after, "</summary>"); end >= 0 {
-			return strings.TrimSpace(after[:end])
+	if _, after, found := strings.Cut(raw, "<summary>"); found {
+		if content, _, ok := strings.Cut(after, "</summary>"); ok {
+			return strings.TrimSpace(content)
 		}
 		// Opening tag but no closing — take everything after the tag
 		return strings.TrimSpace(after)
@@ -122,17 +121,17 @@ func extractSummary(raw string) string {
 	// No <summary> tags — strip <analysis>...</analysis> and return remainder
 	result := raw
 	for {
-		start := strings.Index(result, "<analysis>")
-		if start < 0 {
+		before, rest, found := strings.Cut(result, "<analysis>")
+		if !found {
 			break
 		}
-		end := strings.Index(result, "</analysis>")
-		if end < 0 {
+		_, afterClose, closed := strings.Cut(rest, "</analysis>")
+		if !closed {
 			// Opening tag but no closing — strip from <analysis> onward
-			result = result[:start]
+			result = before
 			break
 		}
-		result = result[:start] + result[end+len("</analysis>"):]
+		result = before + afterClose
 	}
 
 	result = strings.TrimSpace(result)

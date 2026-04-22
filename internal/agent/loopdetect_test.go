@@ -1310,10 +1310,10 @@ func TestConsecutiveDup_ThreeSuccessfulSameArgsStillStops(t *testing.T) {
 	}
 }
 
-// TestConsecutiveDup_FourErrorsNudgesNotForceStop: 6 same-args fails uses
+// TestConsecutiveDup_SixErrorsNudgesNotForceStop: 6 same-args fails uses
 // Rule 2's 2x threshold (6 nudge, 7 force-stop). At 6 errors → nudge, not force-stop.
 // consecDupThreshold=3 → all-errors budget = 2x = 6/7.
-func TestConsecutiveDup_FourErrorsNudgesNotForceStop(t *testing.T) {
+func TestConsecutiveDup_SixErrorsNudgesNotForceStop(t *testing.T) {
 	ld := NewLoopDetector()
 	for range 6 {
 		ld.Record("browser_click", `{"ref":"e1"}`, true, "element not found", "", false)
@@ -1336,6 +1336,34 @@ func TestConsecutiveDup_FiveAllErrorsForceStops(t *testing.T) {
 	if action != LoopForceStop {
 		t.Fatalf("7 same-args consecutive errors should force-stop (2x budget), got %v", action)
 	}
+}
+
+// TestExactDup_RecoveryThenSecondSpinNotSkipped locks the invariant that
+// `latestRecoveredAfterSameArgsErrors` requires the LATEST call to be
+// success. A pattern of "errors → success → more errors" should NOT be
+// treated as recovered when the latest call is back to error — the
+// detector must count the new error streak fresh.
+//
+// Regression guard: if a future refactor of latestRecoveredAfterSameArgsErrors
+// caches "we recovered earlier" and skips ExactDup forever, this test breaks.
+func TestExactDup_RecoveryThenSecondSpinNotSkipped(t *testing.T) {
+	ld := NewLoopDetector()
+	// Phase 1: 4 same-args errors
+	for range 4 {
+		ld.Record("browser_click", `{"ref":"e1"}`, true, "element not found", "", false)
+	}
+	// Phase 2: 1 success (the "recovery" the helper looks for)
+	ld.Record("browser_click", `{"ref":"e1"}`, false, "", "", false)
+	// Phase 3: latest is now an error again. ExactDup must count the
+	// 5 same-args errors (4 + this new one) at strict v2 threshold (5 nudge)
+	// — exactRecovered must be false because latest is an error.
+	ld.Record("browser_click", `{"ref":"e1"}`, true, "element not found", "", false)
+	action, _ := ld.Check("browser_click")
+	if action == LoopContinue {
+		t.Fatalf("post-recovery spin (4err + success + 1err) must NOT be silently skipped, got LoopContinue")
+	}
+	// Either LoopNudge or LoopForceStop is acceptable here — what we're
+	// proving is that recovery does NOT cache and disable the detector.
 }
 
 // TestExactDup_SixAllErrorsSpreadNotForceStop: 6 spread-out same-args

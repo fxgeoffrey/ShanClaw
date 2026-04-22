@@ -130,6 +130,10 @@ var repeatableGUITools = map[string]bool{
 //
 // Adding a tool here is a stronger exemption than repeatableGUITools —
 // think carefully before extending.
+//
+// IMMUTABLE AT RUNTIME: this map is shared across all LoopDetector
+// instances. Do NOT mutate it after package init. Modify only by
+// editing the literal below.
 var dupExemptTools = map[string]bool{
 	"use_skill": true,
 }

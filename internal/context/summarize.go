@@ -1,7 +1,9 @@
 package context
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -172,22 +174,90 @@ func messageText(m client.Message) string {
 	// Block content — serialize each block type
 	var sb strings.Builder
 	for _, b := range m.Content.Blocks() {
-		switch b.Type {
-		case "text":
-			sb.WriteString(b.Text)
-		case "tool_use":
-			fmt.Fprintf(&sb, "[tool_call: %s]", b.Name)
-		case "tool_result":
-			text := client.ToolResultText(b)
-			if text != "" {
-				// Truncate long tool results for the summary (rune-safe)
-				if r := []rune(text); len(r) > 500 {
-					text = string(r[:500]) + "..."
-				}
-				fmt.Fprintf(&sb, "[tool_result: %s]", text)
-			}
+		if text := summarizeContentBlock(b); text != "" {
+			sb.WriteString(text)
+			sb.WriteString(" ")
 		}
-		sb.WriteString(" ")
 	}
 	return strings.TrimSpace(sb.String())
+}
+
+func summarizeContentBlock(b client.ContentBlock) string {
+	switch b.Type {
+	case "text":
+		return b.Text
+	case "tool_use":
+		return summarizeToolUse(b)
+	case "tool_result":
+		return summarizeToolResult(b)
+	case "tool_reference":
+		if b.ToolName != "" {
+			return fmt.Sprintf("[tool_reference: %s]", b.ToolName)
+		}
+	}
+	return ""
+}
+
+func summarizeToolUse(b client.ContentBlock) string {
+	if b.Name == "" {
+		return ""
+	}
+	args := compactToolInput(b.Input)
+	if args == "" {
+		return fmt.Sprintf("[tool_call: %s]", b.Name)
+	}
+	return fmt.Sprintf("[tool_call: %s %s]", b.Name, args)
+}
+
+func summarizeToolResult(b client.ContentBlock) string {
+	text := strings.TrimSpace(client.ToolResultText(b))
+	if refs := toolReferenceNames(b); len(refs) > 0 {
+		refText := "Loaded tools: " + strings.Join(refs, ", ")
+		if text == "" {
+			text = refText
+		} else {
+			text += "\n" + refText
+		}
+	}
+	if text == "" {
+		return ""
+	}
+	return fmt.Sprintf("[tool_result: %s]", truncateSummaryText(text, 500))
+}
+
+func toolReferenceNames(b client.ContentBlock) []string {
+	nested, ok := b.ToolContent.([]client.ContentBlock)
+	if !ok {
+		return nil
+	}
+	names := make([]string, 0, len(nested))
+	for _, child := range nested {
+		if child.Type == "tool_reference" && child.ToolName != "" {
+			names = append(names, child.ToolName)
+		}
+	}
+	return names
+}
+
+func compactToolInput(raw json.RawMessage) string {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" || trimmed == "{}" {
+		return ""
+	}
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, raw); err == nil {
+		return truncateSummaryText(buf.String(), 240)
+	}
+	return truncateSummaryText(trimmed, 240)
+}
+
+func truncateSummaryText(text string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	r := []rune(text)
+	if len(r) <= maxRunes {
+		return text
+	}
+	return string(r[:maxRunes]) + "..."
 }

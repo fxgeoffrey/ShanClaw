@@ -159,6 +159,52 @@ func TestGenerateSummary(t *testing.T) {
 			t.Error("transcript should include tool_result content")
 		}
 	})
+
+	t.Run("includes tool metadata needed for structured continuation summary", func(t *testing.T) {
+		mock := &mockCompleter{
+			response: &client.CompletionResponse{
+				OutputText: "Structured summary with loaded tools and active skill.",
+			},
+		}
+
+		assistantBlocks := []client.ContentBlock{
+			client.NewToolUseBlock("read1", "file_read", []byte(`{"path":"/tmp/foo.go","offset":10}`)),
+			client.NewToolUseBlock("skill1", "use_skill", []byte(`{"skill_name":"test-driven-development"}`)),
+			client.NewToolUseBlock("search1", "tool_search", []byte(`{"query":"select:browser_navigate,github_list_prs"}`)),
+		}
+		resultBlocks := []client.ContentBlock{
+			client.NewToolResultBlock("read1", "  11 | package main", false),
+			client.NewToolResultBlock("skill1", "Write the failing test first.", false),
+			client.NewToolResultBlockWithBlocks("search1", []client.ContentBlock{
+				{Type: "tool_reference", ToolName: "browser_navigate"},
+				{Type: "tool_reference", ToolName: "github_list_prs"},
+			}, false),
+		}
+
+		messages := []client.Message{
+			{Role: "system", Content: client.NewTextContent("system")},
+			{Role: "user", Content: client.NewTextContent("continue the task after compaction")},
+			{Role: "assistant", Content: client.NewBlockContent(assistantBlocks)},
+			{Role: "user", Content: client.NewBlockContent(resultBlocks)},
+		}
+
+		_, _, err := GenerateSummary(context.Background(), mock, messages)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		transcript := mock.lastReq.Messages[1].Content.Text()
+		for _, needle := range []string{
+			`"/tmp/foo.go"`,
+			`"skill_name":"test-driven-development"`,
+			"browser_navigate",
+			"github_list_prs",
+		} {
+			if !strings.Contains(transcript, needle) {
+				t.Errorf("transcript should include %q, got:\n%s", needle, transcript)
+			}
+		}
+	})
 }
 
 func TestGenerateSummaryReturnsUsage(t *testing.T) {

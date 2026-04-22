@@ -15,19 +15,36 @@ Phase 1 — Write a chronological analysis inside <analysis> tags:
 - Note every user correction, decision, or preference change
 - Track files read, modified, or created
 - Record errors, blockers, and their resolutions
+- Note which skills were activated via use_skill and any tool_search schema loads
 
-Phase 2 — Write the final summary inside <summary> tags:
-- Distill the analysis into what a continuation needs to know
-- Preserve user corrections and decisions (these are highest priority)
-- Include current task state and next steps
-- Be factual and brief
+Phase 2 — Write the final summary inside <summary> tags. The summary MUST contain these labeled sections in this order:
+
+## Current task & next steps
+What the user is working on and what the model was about to do when compacted.
+
+## User corrections & decisions
+Every correction, preference, or explicit decision the user made. Highest-priority content — never omit.
+
+## Open files / important reads
+Files the model has read this session and still needs awareness of. List one per line as "path — one-line purpose" (e.g. "internal/agent/loop.go — core agentic loop being modified"). Do NOT include file contents; only paths + purpose. Omit files that were only glanced at and are no longer relevant.
+
+## Active skill policies
+Skills activated via use_skill whose guidance still applies. One bullet per skill: "skill-name — one-line what-it-enforces" (e.g. "test-driven-development — write failing test before implementation"). Do NOT reproduce SKILL.md bodies.
+
+## Loaded tool capabilities
+Tools whose schemas were pulled in via tool_search this session. One comma-separated line (e.g. "Loaded: linear_search_issues, linear_create_issue, github_list_prs"). Omit this section entirely if tool_search was never called.
+
+Rules:
+- Be factual and brief. The goal is continuation, not exposition.
+- If a section has no content, omit its header rather than writing "none" or "N/A".
+- Do not add sections beyond the five above.
 
 Format your response as:
 <analysis>
 [chronological walkthrough]
 </analysis>
 <summary>
-[concise summary for continuation]
+[structured summary with the sections above]
 </summary>`
 
 // Completer is the interface for making LLM completion calls.

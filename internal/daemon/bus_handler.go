@@ -66,10 +66,40 @@ func (h *busEventHandler) OnUsage(u agent.TurnUsage) {
 		"ts":                 nowISO(),
 	})
 }
-func (h *busEventHandler) OnCloudAgent(agentID, status, message string)           {}
-func (h *busEventHandler) OnCloudProgress(completed, total int)                   {}
-func (h *busEventHandler) OnCloudPlan(planType, content string, needsReview bool) {}
-func (h *busEventHandler) OnRunStatus(code, detail string)                        {}
+const maxCloudPlanContent = 2048
+
+func (h *busEventHandler) OnCloudAgent(agentID, status, message string) {
+	h.emitJSON(EventCloudAgent, map[string]any{
+		"agent_id":   agentID,
+		"status":     status,
+		"message":    audit.RedactSecrets(message),
+		"session_id": h.sessionID,
+	})
+}
+
+func (h *busEventHandler) OnCloudProgress(completed, total int) {
+	h.emitJSON(EventCloudProgress, map[string]any{
+		"completed":  completed,
+		"total":      total,
+		"session_id": h.sessionID,
+	})
+}
+
+func (h *busEventHandler) OnCloudPlan(planType, content string, needsReview bool) {
+	// Redact first (regex windows must see full content), then truncate.
+	redacted := audit.RedactSecrets(content)
+	if len(redacted) > maxCloudPlanContent {
+		redacted = redacted[:maxCloudPlanContent] + "… (truncated)"
+	}
+	h.emitJSON(EventCloudPlan, map[string]any{
+		"type":         planType,
+		"content":      redacted,
+		"needs_review": needsReview,
+		"session_id":   h.sessionID,
+	})
+}
+
+func (h *busEventHandler) OnRunStatus(code, detail string) {}
 
 // truncate returns s truncated to max bytes. We prefer bytes over runes
 // because bus event payloads are byte-budgeted (ring buffer capacity).

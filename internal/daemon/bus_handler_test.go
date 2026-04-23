@@ -178,3 +178,61 @@ func TestBusEventHandlerOnToolResultTruncatesPreview(t *testing.T) {
 		t.Fatalf("preview len = %d, want ≤ 200", len(p.Preview))
 	}
 }
+
+func TestBusEventHandlerOnToolResultPropagatesIsError(t *testing.T) {
+	h, bus := newTestHandler(t)
+	ch := bus.Subscribe()
+	defer bus.Unsubscribe(ch)
+
+	h.OnToolResult("bash", "", agent.ToolResult{
+		Content: "command not found",
+		IsError: true,
+	}, 5*time.Millisecond)
+
+	got := drain(t, ch, 1)
+	if len(got) != 1 {
+		t.Fatalf("want 1 event, got %d", len(got))
+	}
+	var p struct {
+		IsError bool `json:"is_error"`
+	}
+	if err := json.Unmarshal(got[0].Payload, &p); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !p.IsError {
+		t.Fatalf("is_error = false, want true")
+	}
+}
+
+func TestBusEventHandlerOnToolCallRedactsSecretSpanningTruncation(t *testing.T) {
+	h, bus := newTestHandler(t)
+	ch := bus.Subscribe()
+	defer bus.Unsubscribe(ch)
+
+	// AKIA is fixed-length (`AKIA[0-9A-Z]{16}` = exactly 20 chars), unlike
+	// `Bearer ...` which is greedy and would match a truncated fragment too.
+	// Position it to straddle the 200-byte cap: 185 filler + 20 secret + tail.
+	// truncate-then-redact would see only "AKIA" + 15 chars, miss the {16}
+	// requirement, and leak the prefix. redact-then-truncate matches the full
+	// pattern before truncation, substitutes [REDACTED], and truncates cleanly.
+	input := strings.Repeat("a", 185) + "AKIAABCDEFGHIJKLMNOP" + strings.Repeat("z", 100)
+	h.OnToolCall("bash", input)
+
+	got := drain(t, ch, 1)
+	if len(got) != 1 {
+		t.Fatalf("want 1 event")
+	}
+	var p struct {
+		Args string `json:"args"`
+	}
+	_ = json.Unmarshal(got[0].Payload, &p)
+	if strings.Contains(p.Args, "AKIAABCDE") {
+		t.Fatalf("secret leaked across truncation boundary: %q", p.Args)
+	}
+	if !strings.Contains(p.Args, "[REDACTED]") {
+		t.Fatalf("expected [REDACTED] marker, got %q", p.Args)
+	}
+	if len(p.Args) > 200 {
+		t.Fatalf("args len = %d, want ≤ 200", len(p.Args))
+	}
+}

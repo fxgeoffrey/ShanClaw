@@ -349,3 +349,9 @@ func TestEventBusEmitToPartialDelivery(t *testing.T) {
 		t.Errorf("expected 1 delivery (to fast only), got %d", delivered)
 	}
 }
+
+func TestEventUsageConstant(t *testing.T) {
+	if EventUsage != "usage" {
+		t.Fatalf("EventUsage = %q, want %q", EventUsage, "usage")
+	}
+}

@@ -87,3 +87,16 @@ func (m *multiHandler) SetSessionID(id string) {
 		}
 	}
 }
+
+// OnRunStatus propagates watchdog/retry events to wrapped handlers that
+// implement agent.RunStatusHandler. The method is present on multiHandler
+// itself (even though it's optional for arbitrary EventHandlers) so that
+// the agent loop's type assertion `a.handler.(RunStatusHandler)` succeeds
+// when the loop handler is a multiHandler.
+func (m *multiHandler) OnRunStatus(code, detail string) {
+	for _, h := range m.handlers {
+		if rsh, ok := h.(agent.RunStatusHandler); ok {
+			rsh.OnRunStatus(code, detail)
+		}
+	}
+}

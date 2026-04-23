@@ -144,3 +144,36 @@ func TestMultiHandlerItselfImplementsSetSessionID(t *testing.T) {
 		t.Fatal("multiHandler does not satisfy SetSessionID(string) interface")
 	}
 }
+
+// runStatusSpy implements agent.RunStatusHandler (and agent.EventHandler via the
+// embedded usageSpy). Used to verify multiHandler.OnRunStatus propagates via
+// type assertion.
+type runStatusSpy struct {
+	usageSpy
+	calls []string // "code:detail"
+}
+
+func (s *runStatusSpy) OnRunStatus(code, detail string) {
+	s.calls = append(s.calls, code+":"+detail)
+}
+
+func TestMultiHandlerOnRunStatusPropagatesToImplementers(t *testing.T) {
+	rsh := &runStatusSpy{}
+	plain := &plainSpy{}
+	m := &multiHandler{handlers: []agent.EventHandler{rsh, plain}}
+
+	m.OnRunStatus("idle_soft", "15s idle")
+
+	if len(rsh.calls) != 1 || rsh.calls[0] != "idle_soft:15s idle" {
+		t.Fatalf("rsh.calls = %+v", rsh.calls)
+	}
+	// plain has no OnRunStatus — call must not panic and not affect rsh.
+}
+
+// Verify multiHandler satisfies agent.RunStatusHandler. The watchdog in the
+// agent loop does `a.handler.(RunStatusHandler)` type assertion at
+// runner.go:917-935; with multiHandler in the chain, the assertion must
+// succeed so the watchdog can emit soft/hard idle events.
+func TestMultiHandlerSatisfiesRunStatusHandlerInterface(t *testing.T) {
+	var _ agent.RunStatusHandler = (*multiHandler)(nil) // compile-time check
+}

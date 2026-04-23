@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/agent"
@@ -27,9 +28,30 @@ func (h *busEventHandler) OnText(text string)                      {}
 func (h *busEventHandler) OnStreamDelta(delta string)              {}
 func (h *busEventHandler) OnApprovalNeeded(tool, args string) bool { return false }
 
-// Stubs — filled in by subsequent tasks.
-func (h *busEventHandler) OnToolCall(name, args string) {}
+// OnToolCall emits a "running" event when a tool is invoked. Args are redacted
+// (secrets) and truncated (size budget) before emission.
+func (h *busEventHandler) OnToolCall(name, args string) {
+	h.emitJSON(EventToolStatus, map[string]any{
+		"tool":       name,
+		"status":     "running",
+		"args":       redactAndTruncate(args, 200),
+		"session_id": h.sessionID,
+		"ts":         nowISO(),
+	})
+}
+
+// OnToolResult emits a "completed" event when a tool finishes. The result
+// preview is extracted from Content or ContentBlocks, redacted, and truncated.
 func (h *busEventHandler) OnToolResult(name, args string, result agent.ToolResult, elapsed time.Duration) {
+	h.emitJSON(EventToolStatus, map[string]any{
+		"tool":       name,
+		"status":     "completed",
+		"elapsed_ms": elapsed.Milliseconds(),
+		"is_error":   result.IsError,
+		"preview":    redactAndTruncate(toolResultPreview(result), 200),
+		"session_id": h.sessionID,
+		"ts":         nowISO(),
+	})
 }
 func (h *busEventHandler) OnUsage(u agent.TurnUsage)                              {}
 func (h *busEventHandler) OnCloudAgent(agentID, status, message string)           {}
@@ -69,3 +91,27 @@ func (h *busEventHandler) emitJSON(eventType string, payload any) {
 
 // nowISO returns the current wall time in RFC3339 for the `ts` field.
 func nowISO() string { return time.Now().UTC().Format(time.RFC3339) }
+
+// toolResultPreview returns a plain-text preview of the tool result. Prefers
+// the canonical `Content` string; falls back to concatenating text from the
+// structured `ContentBlocks` when `Content` is empty (some tools only populate
+// the structured path). The full result is NEVER included — bus is a
+// notification channel; Desktop pulls full content via the session endpoints.
+func toolResultPreview(r agent.ToolResult) string {
+	if r.Content != "" {
+		return r.Content
+	}
+	var b strings.Builder
+	for _, block := range r.ContentBlocks {
+		if block.Type == "text" {
+			if b.Len() > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(block.Text)
+			if b.Len() >= 200 {
+				break
+			}
+		}
+	}
+	return b.String()
+}

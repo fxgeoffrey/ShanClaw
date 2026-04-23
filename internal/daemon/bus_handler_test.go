@@ -138,19 +138,19 @@ func TestBusEventHandlerOnToolResultEmitsCompleted(t *testing.T) {
 	}
 
 	var p struct {
-		Tool      string `json:"tool"`
-		Status    string `json:"status"`
-		ElapsedMS int64  `json:"elapsed_ms"`
-		IsError   bool   `json:"is_error"`
-		Preview   string `json:"preview"`
-		SessionID string `json:"session_id"`
+		Tool      string  `json:"tool"`
+		Status    string  `json:"status"`
+		Elapsed   float64 `json:"elapsed"`
+		IsError   bool    `json:"is_error"`
+		Preview   string  `json:"preview"`
+		SessionID string  `json:"session_id"`
 	}
 	_ = json.Unmarshal(got[0].Payload, &p)
 	if p.Status != "completed" {
 		t.Fatalf("status = %q, want completed", p.Status)
 	}
-	if p.ElapsedMS != 1234 {
-		t.Fatalf("elapsed_ms = %d", p.ElapsedMS)
+	if p.Elapsed != 1.234 {
+		t.Fatalf("elapsed = %v, want 1.234", p.Elapsed)
 	}
 	if p.IsError {
 		t.Fatalf("is_error = true, want false")

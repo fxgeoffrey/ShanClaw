@@ -46,7 +46,7 @@ func (h *busEventHandler) OnToolResult(name, args string, result agent.ToolResul
 	h.emitJSON(EventToolStatus, map[string]any{
 		"tool":       name,
 		"status":     "completed",
-		"elapsed_ms": elapsed.Milliseconds(),
+		"elapsed":    elapsed.Seconds(),
 		"is_error":   result.IsError,
 		"preview":    redactAndTruncate(toolResultPreview(result), 200),
 		"session_id": h.sessionID,

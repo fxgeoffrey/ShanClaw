@@ -10,6 +10,31 @@ ALL blocks, and identifies barriers (friction) and opportunities (engagement).
 - `page_type`: Classified page type
 - `language`: CHINESE | ENGLISH | JAPANESE (default ENGLISH)
 - `segment` (optional): Audience/filter context (e.g. "新訪問者", "Instagram流量")
+- `brand_context` (optional): Business-context card produced by Phase 0b/0c. Schema in
+  `references/discovery.md`. Absent or `source: none` → behave as pre-discovery workflow.
+
+## Brand Context Handling
+
+When `brand_context` is present and `source != "none"`:
+
+- **Framing**: Open the report with one sentence tying the analysis to
+  `brand_context.primary_goal` (e.g. "Framed against your stated goal of driving free-trial
+  signups, …"). If `segment` is also present, keep the segment framing sentence from
+  "Segment Handling" below; the two sentences can coexist.
+- **Narrative voice**: If `brand_context.brand_voice` is set, mirror that register when writing
+  `insight` and `insight_summary`. Do NOT invent block copy.
+- **Known problems**: Treat `brand_context.known_problems[]` as user-stated hypotheses. The
+  narrative may confirm or complicate them, but every claim still needs metric evidence
+  (dwell / exit / impression). Never write "as you suspected, X is the problem" without data.
+- **Barrier / opportunity priority**: Prefer surfacing barriers that relate to
+  `brand_context.primary_goal` or `known_problems` first, provided their metric evidence is
+  comparable to other candidates. This is a tie-breaker, not a filter — do not suppress a
+  strong metric-driven finding because it isn't in `known_problems`.
+- **Sources footnote**: If `brand_context.research_refs` is non-empty, a small "Sources
+  consulted" footnote listing those URLs may be appended at the end of the report.
+
+Hard rule: `brand_context` influences **phrasing and priority**, never **evidence**. Any
+conclusion must still cite metric evidence from `base_metric` or `block_data[]`.
 
 ## Segment Handling
 

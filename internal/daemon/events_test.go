@@ -355,3 +355,51 @@ func TestEventUsageConstant(t *testing.T) {
 		t.Fatalf("EventUsage = %q, want %q", EventUsage, "usage")
 	}
 }
+
+// TestRingReplayAfterMidTurnEvents simulates a realistic mid-turn event
+// sequence and verifies that a reconnecting subscriber (via EventsSince(0))
+// sees all of them in order. This exercises the ring buffer under the
+// new higher event volume introduced by issue #71 (tool_status, usage,
+// cloud_*, run_status add ~20-35 events per turn on top of the previous ~5).
+func TestRingReplayAfterMidTurnEvents(t *testing.T) {
+	bus := NewEventBus()
+
+	// Seed a realistic turn: message, tool×6 (running+completed), usage×3,
+	// cloud_agent×2, cloud_progress×3, run_status×1, agent_reply.
+	eventsToSeed := []struct {
+		typ     string
+		payload string
+	}{
+		{EventMessageReceived, `{"session_id":"s1"}`},
+		{EventToolStatus, `{"session_id":"s1","tool":"bash","status":"running"}`},
+		{EventToolStatus, `{"session_id":"s1","tool":"bash","status":"completed"}`},
+		{EventToolStatus, `{"session_id":"s1","tool":"read","status":"running"}`},
+		{EventToolStatus, `{"session_id":"s1","tool":"read","status":"completed"}`},
+		{EventToolStatus, `{"session_id":"s1","tool":"grep","status":"running"}`},
+		{EventToolStatus, `{"session_id":"s1","tool":"grep","status":"completed"}`},
+		{EventUsage, `{"session_id":"s1","llm_calls":1,"input_tokens":1000}`},
+		{EventCloudAgent, `{"session_id":"s1","agent_id":"r1","status":"running"}`},
+		{EventCloudProgress, `{"session_id":"s1","completed":1,"total":3}`},
+		{EventCloudProgress, `{"session_id":"s1","completed":2,"total":3}`},
+		{EventCloudProgress, `{"session_id":"s1","completed":3,"total":3}`},
+		{EventCloudAgent, `{"session_id":"s1","agent_id":"r1","status":"completed"}`},
+		{EventUsage, `{"session_id":"s1","llm_calls":2,"input_tokens":1500}`},
+		{EventRunStatus, `{"session_id":"s1","code":"idle_soft"}`},
+		{EventUsage, `{"session_id":"s1","llm_calls":3,"input_tokens":1800}`},
+		{EventAgentReply, `{"session_id":"s1","text":"done"}`},
+	}
+
+	for _, e := range eventsToSeed {
+		bus.Emit(Event{Type: e.typ, Payload: []byte(e.payload)})
+	}
+
+	got := bus.EventsSince(0)
+	if len(got) != len(eventsToSeed) {
+		t.Fatalf("EventsSince returned %d events, want %d", len(got), len(eventsToSeed))
+	}
+	for i, e := range eventsToSeed {
+		if got[i].Type != e.typ {
+			t.Fatalf("event %d: type %q, want %q", i, got[i].Type, e.typ)
+		}
+	}
+}

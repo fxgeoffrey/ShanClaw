@@ -747,6 +747,12 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 	}
 	ctx = cwdctx.WithSessionCWD(ctx, effectiveCWD)
 
+	// Wrap the transport handler with a bus-emitting handler so every run
+	// publishes progress events regardless of transport. See
+	// docs/superpowers/specs/2026-04-23-event-bus-progress-coverage-design.md.
+	bus := &busEventHandler{deps: deps, agent: agentName}
+	handler = &multiHandler{handlers: []agent.EventHandler{handler, bus}}
+
 	// Notify handler of resolved session ID so it can include it in EventBus payloads.
 	if setter, ok := handler.(interface{ SetSessionID(string) }); ok {
 		setter.SetSessionID(sess.ID)

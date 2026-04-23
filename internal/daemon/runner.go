@@ -1268,13 +1268,6 @@ func generateMessageID() string {
 	return "msg-" + hex.EncodeToString(b)
 }
 
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
-}
-
 func closeRouteDone(done chan struct{}) {
 	if done == nil {
 		return

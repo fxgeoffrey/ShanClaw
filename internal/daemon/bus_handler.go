@@ -1,0 +1,71 @@
+package daemon
+
+import (
+	"encoding/json"
+	"time"
+
+	"github.com/Kocoro-lab/ShanClaw/internal/agent"
+	"github.com/Kocoro-lab/ShanClaw/internal/audit"
+)
+
+// busEventHandler implements agent.EventHandler (and agent.RunStatusHandler)
+// by forwarding callbacks to deps.EventBus. It is intended to be composed
+// with a transport-specific handler (sseEventHandler or daemonEventHandler)
+// via multiHandler so bus emission is exactly-once regardless of transport.
+type busEventHandler struct {
+	deps      *ServerDeps
+	sessionID string
+	agent     string
+}
+
+// SetSessionID captures the session ID post-session-resolution so every bus
+// event carries it. Matches the optional interface checked by RunAgent.
+func (h *busEventHandler) SetSessionID(id string) { h.sessionID = id }
+
+// No-op passthroughs — bus emits only the progress signals, not text/delta.
+func (h *busEventHandler) OnText(text string)                      {}
+func (h *busEventHandler) OnStreamDelta(delta string)              {}
+func (h *busEventHandler) OnApprovalNeeded(tool, args string) bool { return false }
+
+// Stubs — filled in by subsequent tasks.
+func (h *busEventHandler) OnToolCall(name, args string) {}
+func (h *busEventHandler) OnToolResult(name, args string, result agent.ToolResult, elapsed time.Duration) {
+}
+func (h *busEventHandler) OnUsage(u agent.TurnUsage)                              {}
+func (h *busEventHandler) OnCloudAgent(agentID, status, message string)           {}
+func (h *busEventHandler) OnCloudProgress(completed, total int)                   {}
+func (h *busEventHandler) OnCloudPlan(planType, content string, needsReview bool) {}
+func (h *busEventHandler) OnRunStatus(code, detail string)                        {}
+
+// truncate returns s truncated to max bytes. We prefer bytes over runes
+// because bus event payloads are byte-budgeted (ring buffer capacity).
+// Multibyte characters at the boundary get cut cleanly at a byte index.
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max]
+}
+
+// redactAndTruncate applies audit.RedactSecrets first (so regex windows see
+// the full content) then truncates. Used for tool_status args/preview
+// and cloud_agent.message.
+func redactAndTruncate(s string, max int) string {
+	return truncate(audit.RedactSecrets(s), max)
+}
+
+// emitJSON marshals payload and emits to the bus, tolerating marshal errors
+// silently (bus is non-critical path; missing events are preferable to panics).
+func (h *busEventHandler) emitJSON(eventType string, payload any) {
+	if h.deps == nil || h.deps.EventBus == nil {
+		return
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	h.deps.EventBus.Emit(Event{Type: eventType, Payload: data})
+}
+
+// nowISO returns the current wall time in RFC3339 for the `ts` field.
+func nowISO() string { return time.Now().UTC().Format(time.RFC3339) }

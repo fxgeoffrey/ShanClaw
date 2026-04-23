@@ -99,3 +99,48 @@ func TestMultiHandlerApprovalORsResults(t *testing.T) {
 func TestMultiHandlerSatisfiesEventHandlerInterface(t *testing.T) {
 	var _ agent.EventHandler = (*multiHandler)(nil)
 }
+
+// sessIDSpy implements agent.EventHandler (via embedded spyHandler) AND SetSessionID.
+// Used to verify multiHandler.SetSessionID propagates via type assertion.
+type sessIDSpy struct {
+	usageSpy
+	receivedID string
+}
+
+func (s *sessIDSpy) SetSessionID(id string) { s.receivedID = id }
+
+// plainSpy does NOT implement SetSessionID — used to verify the type assertion
+// skips handlers cleanly rather than panicking.
+type plainSpy struct {
+	usageSpy
+}
+
+func TestMultiHandlerSetSessionIDPropagatesToImplementers(t *testing.T) {
+	setter := &sessIDSpy{}
+	plain := &plainSpy{}
+	m := &multiHandler{handlers: []agent.EventHandler{setter, plain}}
+
+	m.SetSessionID("sess_abc")
+
+	if setter.receivedID != "sess_abc" {
+		t.Fatalf("setter.receivedID = %q, want sess_abc", setter.receivedID)
+	}
+	// plain has no SetSessionID; surviving the call without panic is the assertion.
+	// Also verify the plain spy still receives base callbacks — the SetSessionID
+	// bypass must not break the normal fan-out.
+	m.OnText("x")
+	if plain.text != 1 {
+		t.Fatalf("plain.text = %d, want 1 — SetSessionID bypass must not break fan-out", plain.text)
+	}
+}
+
+// RunAgent type-asserts the top-level handler against the optional SetSessionID
+// interface. multiHandler must itself satisfy that optional interface so the
+// RunAgent assertion succeeds when the injected handler is a *multiHandler.
+func TestMultiHandlerItselfImplementsSetSessionID(t *testing.T) {
+	m := &multiHandler{}
+	_, ok := interface{}(m).(interface{ SetSessionID(string) })
+	if !ok {
+		t.Fatal("multiHandler does not satisfy SetSessionID(string) interface")
+	}
+}

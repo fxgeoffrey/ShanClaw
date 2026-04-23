@@ -75,3 +75,15 @@ func (m *multiHandler) OnCloudPlan(planType, content string, needsReview bool) {
 		h.OnCloudPlan(planType, content, needsReview)
 	}
 }
+
+// SetSessionID propagates the session ID to every wrapped handler that
+// implements the optional interface. Handlers that don't implement it are
+// skipped silently — matching how RunAgent itself type-asserts the top-level
+// handler (runner.go SetSessionID injection path).
+func (m *multiHandler) SetSessionID(id string) {
+	for _, h := range m.handlers {
+		if setter, ok := h.(interface{ SetSessionID(string) }); ok {
+			setter.SetSessionID(id)
+		}
+	}
+}

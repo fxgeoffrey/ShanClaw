@@ -270,6 +270,7 @@ func TestBusEventHandlerOnUsageEmitsSnapshot(t *testing.T) {
 		LLMCalls         int     `json:"llm_calls"`
 		Model            string  `json:"model"`
 		SessionID        string  `json:"session_id"`
+		TS               string  `json:"ts"`
 	}
 	_ = json.Unmarshal(got[0].Payload, &p)
 	if p.InputTokens != 1200 || p.OutputTokens != 450 {
@@ -286,5 +287,11 @@ func TestBusEventHandlerOnUsageEmitsSnapshot(t *testing.T) {
 	}
 	if p.SessionID != "sess_test" {
 		t.Fatalf("session_id = %q", p.SessionID)
+	}
+	if p.CostUSD != 0.012 {
+		t.Fatalf("cost_usd = %v, want 0.012", p.CostUSD)
+	}
+	if p.TS == "" {
+		t.Fatalf("ts missing")
 	}
 }

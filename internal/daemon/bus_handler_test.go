@@ -419,3 +419,35 @@ func TestBusEventHandlerOnCloudPlanShortContentNotTruncated(t *testing.T) {
 		t.Fatalf("needs_review = true, want false")
 	}
 }
+
+func TestBusEventHandlerOnRunStatus(t *testing.T) {
+	h, bus := newTestHandler(t)
+	ch := bus.Subscribe()
+	defer bus.Unsubscribe(ch)
+
+	h.OnRunStatus("idle_soft", "no LLM activity for 15s (phase=awaiting_llm)")
+
+	got := drain(t, ch, 1)
+	if len(got) != 1 || got[0].Type != EventRunStatus {
+		t.Fatalf("events = %+v", got)
+	}
+	var p struct {
+		Code      string `json:"code"`
+		Detail    string `json:"detail"`
+		SessionID string `json:"session_id"`
+		Agent     string `json:"agent"`
+	}
+	_ = json.Unmarshal(got[0].Payload, &p)
+	if p.Code != "idle_soft" {
+		t.Fatalf("code = %q", p.Code)
+	}
+	if !strings.Contains(p.Detail, "no LLM activity") {
+		t.Fatalf("detail = %q", p.Detail)
+	}
+	if p.SessionID != "sess_test" {
+		t.Fatalf("session_id = %q", p.SessionID)
+	}
+	if p.Agent != "coding" {
+		t.Fatalf("agent = %q, want 'coding'", p.Agent)
+	}
+}

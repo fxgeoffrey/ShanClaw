@@ -100,7 +100,14 @@ func (h *busEventHandler) OnCloudPlan(planType, content string, needsReview bool
 	})
 }
 
-func (h *busEventHandler) OnRunStatus(code, detail string) {}
+func (h *busEventHandler) OnRunStatus(code, detail string) {
+	h.emitJSON(EventRunStatus, map[string]any{
+		"code":       code,
+		"detail":     detail,
+		"session_id": h.sessionID,
+		"agent":      h.agent,
+	})
+}
 
 // truncate returns s truncated to max bytes. We prefer bytes over runes
 // because bus event payloads are byte-budgeted (ring buffer capacity).

@@ -236,3 +236,55 @@ func TestBusEventHandlerOnToolCallRedactsSecretSpanningTruncation(t *testing.T) 
 		t.Fatalf("args len = %d, want ≤ 200", len(p.Args))
 	}
 }
+
+func TestBusEventHandlerOnUsageEmitsSnapshot(t *testing.T) {
+	h, bus := newTestHandler(t)
+	ch := bus.Subscribe()
+	defer bus.Unsubscribe(ch)
+
+	u := agent.TurnUsage{
+		InputTokens:         1200,
+		OutputTokens:        450,
+		CostUSD:             0.012,
+		LLMCalls:            3,
+		Model:               "claude-sonnet-4-6",
+		CacheReadTokens:     800,
+		CacheCreationTokens: 0,
+	}
+	h.OnUsage(u)
+
+	got := drain(t, ch, 1)
+	if len(got) != 1 {
+		t.Fatalf("want 1 event, got %d", len(got))
+	}
+	if got[0].Type != EventUsage {
+		t.Fatalf("type = %q, want %q", got[0].Type, EventUsage)
+	}
+
+	var p struct {
+		InputTokens      int     `json:"input_tokens"`
+		OutputTokens     int     `json:"output_tokens"`
+		CacheReadTokens  int     `json:"cache_read_tokens"`
+		CacheWriteTokens int     `json:"cache_write_tokens"`
+		CostUSD          float64 `json:"cost_usd"`
+		LLMCalls         int     `json:"llm_calls"`
+		Model            string  `json:"model"`
+		SessionID        string  `json:"session_id"`
+	}
+	_ = json.Unmarshal(got[0].Payload, &p)
+	if p.InputTokens != 1200 || p.OutputTokens != 450 {
+		t.Fatalf("tokens = %+v", p)
+	}
+	if p.CacheReadTokens != 800 || p.CacheWriteTokens != 0 {
+		t.Fatalf("cache tokens = %+v", p)
+	}
+	if p.LLMCalls != 3 {
+		t.Fatalf("llm_calls = %d, want 3", p.LLMCalls)
+	}
+	if p.Model != "claude-sonnet-4-6" {
+		t.Fatalf("model = %q", p.Model)
+	}
+	if p.SessionID != "sess_test" {
+		t.Fatalf("session_id = %q", p.SessionID)
+	}
+}

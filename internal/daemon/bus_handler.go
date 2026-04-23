@@ -53,7 +53,19 @@ func (h *busEventHandler) OnToolResult(name, args string, result agent.ToolResul
 		"ts":         nowISO(),
 	})
 }
-func (h *busEventHandler) OnUsage(u agent.TurnUsage)                              {}
+func (h *busEventHandler) OnUsage(u agent.TurnUsage) {
+	h.emitJSON(EventUsage, map[string]any{
+		"input_tokens":       u.InputTokens,
+		"output_tokens":      u.OutputTokens,
+		"cache_read_tokens":  u.CacheReadTokens,
+		"cache_write_tokens": u.CacheCreationTokens,
+		"cost_usd":           u.CostUSD,
+		"llm_calls":          u.LLMCalls,
+		"model":              u.Model,
+		"session_id":         h.sessionID,
+		"ts":                 nowISO(),
+	})
+}
 func (h *busEventHandler) OnCloudAgent(agentID, status, message string)           {}
 func (h *busEventHandler) OnCloudProgress(completed, total int)                   {}
 func (h *busEventHandler) OnCloudPlan(planType, content string, needsReview bool) {}

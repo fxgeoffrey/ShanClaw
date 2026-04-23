@@ -66,6 +66,7 @@ func (h *busEventHandler) OnUsage(u agent.TurnUsage) {
 		"ts":                 nowISO(),
 	})
 }
+
 const maxCloudPlanContent = 2048
 
 func (h *busEventHandler) OnCloudAgent(agentID, status, message string) {

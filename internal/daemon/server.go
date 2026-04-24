@@ -2506,8 +2506,14 @@ func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// hidden: true is display-only — the skill is still loaded and invokable
+	// via use_skill. Admin/management UIs can pass ?include_hidden=true.
+	includeHidden := r.URL.Query().Get("include_hidden") == "true"
 	metas := make([]skills.SkillMeta, 0, len(list))
 	for _, skill := range list {
+		if skill.Hidden && !includeHidden {
+			continue
+		}
 		meta := skill.ToMeta()
 		meta.RequiredSecrets = skill.RequiredSecrets()
 		meta.ConfiguredSecrets = s.secretsStore.ConfiguredKeys(skill.Slug)
@@ -2562,6 +2568,10 @@ func (s *Server) handleInstallSkill(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetSkill(w http.ResponseWriter, r *http.Request) {
+	// Intentionally does NOT filter by skill.Hidden — single-skill lookup is
+	// for callers that already know the slug (admin UIs, kocoro secrets
+	// management). Hidden is a browse-list display filter, not an access
+	// control. Do not add a hidden check here without revisiting handleListSkills.
 	name := r.PathValue("name")
 	if err := skills.ValidateSkillName(name); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -2592,6 +2602,7 @@ func (s *Server) handleGetSkill(w http.ResponseWriter, r *http.Request) {
 				Compatibility:      skill.Compatibility,
 				Metadata:           skill.Metadata,
 				StickyInstructions: skill.StickyInstructions,
+				Hidden:             skill.Hidden,
 				StickySnippet:      skill.StickySnippetOverride,
 			}
 			if len(skill.AllowedTools) > 0 {

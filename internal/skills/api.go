@@ -26,6 +26,7 @@ type SkillDetail struct {
 	Metadata          map[string]any `json:"metadata,omitempty"`
 	AllowedTools      []string       `json:"allowed_tools,omitempty"`
 	StickyInstructions bool          `json:"sticky_instructions,omitempty"`
+	Hidden            bool           `json:"hidden,omitempty"`
 	StickySnippet     string         `json:"sticky_snippet,omitempty"`
 	RequiredSecrets   []SecretSpec   `json:"required_secrets,omitempty"`
 	ConfiguredSecrets []string       `json:"configured_secrets,omitempty"`
@@ -56,6 +57,7 @@ func WriteGlobalSkill(shannonDir string, skill *Skill) error {
 		Compatibility:      skill.Compatibility,
 		Metadata:           skill.Metadata,
 		StickyInstructions: skill.StickyInstructions,
+		Hidden:             skill.Hidden,
 	}
 	if len(skill.AllowedTools) > 0 {
 		fm.AllowedTools = strings.Join(skill.AllowedTools, " ")

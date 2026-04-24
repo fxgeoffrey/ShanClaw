@@ -40,6 +40,10 @@ type Skill struct {
 	// drift. Set via frontmatter `sticky-instructions: true`. Intended for
 	// policy skills (e.g. kocoro) whose guidance must survive compaction.
 	StickyInstructions bool   `json:"sticky_instructions,omitempty"`
+	// Hidden excludes the skill from the default GET /skills listing so
+	// frontends hide it from users. Display-only: loader, discovery, and
+	// use_skill are unaffected. Opt-in via frontmatter `hidden: true`.
+	Hidden          bool           `json:"hidden,omitempty"`
 	// StickySnippet is the RESOLVED reinjection body used at runtime. It
 	// comes from StickySnippetOverride when set, else from the heuristic
 	// body extractor, else from Description. Capped to 400 chars. Not
@@ -65,6 +69,7 @@ type SkillMeta struct {
 	Source            string       `json:"source,omitempty"`
 	InstallSource     string       `json:"install_source"`
 	MarketplaceSlug   string       `json:"marketplace_slug,omitempty"`
+	Hidden            bool         `json:"hidden,omitempty"`
 	RequiredSecrets   []SecretSpec `json:"required_secrets,omitempty"`
 	ConfiguredSecrets []string     `json:"configured_secrets,omitempty"`
 }
@@ -78,6 +83,7 @@ func (s *Skill) ToMeta() SkillMeta {
 		Source:          s.Source,
 		InstallSource:   s.InstallSource,
 		MarketplaceSlug: s.MarketplaceSlug,
+		Hidden:          s.Hidden,
 	}
 }
 

@@ -103,7 +103,7 @@ func buildStaticSystem(opts PromptOptions) string {
 	// 1. Base prompt (persona + core rules — unlimited)
 	sb.WriteString(opts.BasePrompt)
 
-	// 1b. Language policy. Byte-stable across all sessions and users so it joins
+	// Language policy. Byte-stable across all sessions and users so it joins
 	// the cacheable system prefix. Pairs with the shorter per-turn reminder in
 	// VolatileContext which re-anchors the rule against long-session drift.
 	sb.WriteString("\n\n## Language\n")
@@ -265,6 +265,11 @@ func buildVolatileContext(opts PromptOptions) string {
 	// System section. Byte-stable (same text every turn) so it does not fragment
 	// any per-turn cache, but positioning near the user message anchors against
 	// drift when long sessions accumulate English tool output.
+	//
+	// On turn 0 "the language already established" is vacuous — nothing has been
+	// established yet. The static System section's "Match the user's language on
+	// first contact" rule handles that case; this reminder takes over from turn 1
+	// onward when there's actually an established language to stay consistent with.
 	sb.WriteString("\n\n## Language\n")
 	sb.WriteString("Respond in the language already established with the user in this session. " +
 		"If the user has not asked for a different language, stay consistent — do not switch even when tool output, " +

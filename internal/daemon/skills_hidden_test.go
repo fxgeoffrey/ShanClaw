@@ -89,6 +89,9 @@ func TestHandleGetSkill_HiddenStillFetchable(t *testing.T) {
 	if detail.Slug != "kocoro" {
 		t.Errorf("slug = %q, want kocoro", detail.Slug)
 	}
+	if !detail.Hidden {
+		t.Error("detail.Hidden = false, want true — single-skill lookup must expose the hidden flag so admin/management UIs can see it")
+	}
 }
 
 // decodeSkillSlugs returns the Slug of every skill in the list response.

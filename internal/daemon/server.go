@@ -2602,6 +2602,7 @@ func (s *Server) handleGetSkill(w http.ResponseWriter, r *http.Request) {
 				Compatibility:      skill.Compatibility,
 				Metadata:           skill.Metadata,
 				StickyInstructions: skill.StickyInstructions,
+				Hidden:             skill.Hidden,
 				StickySnippet:      skill.StickySnippetOverride,
 			}
 			if len(skill.AllowedTools) > 0 {

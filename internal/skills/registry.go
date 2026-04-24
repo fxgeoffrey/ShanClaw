@@ -51,6 +51,10 @@ type Skill struct {
 	// a heuristic choice into the SKILL.md file. Empty means "let the
 	// heuristic pick".
 	StickySnippetOverride string `json:"-"`
+	// Hidden excludes the skill from the default GET /skills listing so
+	// frontends hide it from users. Display-only: loader, discovery, and
+	// use_skill are unaffected. Opt-in via frontmatter `hidden: true`.
+	Hidden          bool           `json:"hidden,omitempty"`
 	Source          string         `json:"-"`
 	InstallSource   string         `json:"-"`
 	MarketplaceSlug string         `json:"-"`
@@ -65,6 +69,7 @@ type SkillMeta struct {
 	Source            string       `json:"source,omitempty"`
 	InstallSource     string       `json:"install_source"`
 	MarketplaceSlug   string       `json:"marketplace_slug,omitempty"`
+	Hidden            bool         `json:"hidden,omitempty"`
 	RequiredSecrets   []SecretSpec `json:"required_secrets,omitempty"`
 	ConfiguredSecrets []string     `json:"configured_secrets,omitempty"`
 }
@@ -78,6 +83,7 @@ func (s *Skill) ToMeta() SkillMeta {
 		Source:          s.Source,
 		InstallSource:   s.InstallSource,
 		MarketplaceSlug: s.MarketplaceSlug,
+		Hidden:          s.Hidden,
 	}
 }
 

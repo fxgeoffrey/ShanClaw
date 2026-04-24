@@ -56,6 +56,12 @@ type skillFrontmatter struct {
 	// omitempty so skills that never set it don't gain a noisy
 	// `sticky-instructions: false` line on re-save.
 	StickyInstructions bool `yaml:"sticky-instructions,omitempty"`
+	// Hidden, when true, excludes the skill from the default GET /skills
+	// listing so frontends don't show it to users. Display-only flag — the
+	// skill still loads, still participates in discovery, still invokable
+	// via use_skill. Intended for policy/internal skills like kocoro that
+	// the LLM must keep using but users should not see.
+	Hidden bool `yaml:"hidden,omitempty"`
 	// StickySnippet, when set, overrides the auto-extracted snippet so
 	// authors can pin the precise guidance to re-inject. Essential for
 	// skills where the first paragraph is boilerplate ("You help users ...")
@@ -181,6 +187,7 @@ func loadSkillMD(path, dirName, source string) (*Skill, error) {
 		StickyInstructions:    fm.StickyInstructions,
 		StickySnippet:         snippet,
 		StickySnippetOverride: override,
+		Hidden:                fm.Hidden,
 		Source:                source,
 	}, nil
 }

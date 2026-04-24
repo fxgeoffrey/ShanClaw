@@ -2506,8 +2506,18 @@ func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Skills marked `hidden: true` in frontmatter are filtered from the
+	// default list so user-facing frontends (Desktop, TUI pickers) don't
+	// show internal/policy skills like kocoro. Hidden is display-only —
+	// the loader still loaded them, use_skill still invokes them, and
+	// skill discovery still sees them. Admin/management contexts can pass
+	// ?include_hidden=true to see everything.
+	includeHidden := r.URL.Query().Get("include_hidden") == "true"
 	metas := make([]skills.SkillMeta, 0, len(list))
 	for _, skill := range list {
+		if skill.Hidden && !includeHidden {
+			continue
+		}
 		meta := skill.ToMeta()
 		meta.RequiredSecrets = skill.RequiredSecrets()
 		meta.ConfiguredSecrets = s.secretsStore.ConfiguredKeys(skill.Slug)

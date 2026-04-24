@@ -382,6 +382,44 @@ func TestLoadSkills_StickyInstructions_DefaultFalse(t *testing.T) {
 	}
 }
 
+func TestLoadSkills_Hidden_OptIn(t *testing.T) {
+	tmp := t.TempDir()
+	createSkillDir(t, tmp, "kocoro", "---\nname: kocoro\ndescription: Policy skill\nhidden: true\n---\n# Body")
+
+	loaded, err := LoadSkills(SkillSource{Dir: tmp, Source: "global"})
+	if err != nil {
+		t.Fatalf("LoadSkills: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(loaded))
+	}
+	if !loaded[0].Hidden {
+		t.Error("Hidden = false, want true when frontmatter sets hidden: true")
+	}
+	if !loaded[0].ToMeta().Hidden {
+		t.Error("SkillMeta.Hidden = false, want true — ToMeta must propagate the flag")
+	}
+}
+
+func TestLoadSkills_Hidden_DefaultFalse(t *testing.T) {
+	tmp := t.TempDir()
+	createSkillDir(t, tmp, "plain", "---\nname: plain\ndescription: Plain skill\n---\n# Body")
+
+	loaded, err := LoadSkills(SkillSource{Dir: tmp, Source: "global"})
+	if err != nil {
+		t.Fatalf("LoadSkills: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("expected 1, got %d", len(loaded))
+	}
+	if loaded[0].Hidden {
+		t.Error("Hidden should default to false when frontmatter omits it")
+	}
+	if loaded[0].ToMeta().Hidden {
+		t.Error("SkillMeta.Hidden should default to false")
+	}
+}
+
 func TestLoadSkills_StickySnippet_TruncatedTo400(t *testing.T) {
 	tmp := t.TempDir()
 	// Build a long first paragraph (>400 chars) to exercise the cap.

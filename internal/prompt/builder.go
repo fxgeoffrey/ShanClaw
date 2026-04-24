@@ -103,6 +103,19 @@ func buildStaticSystem(opts PromptOptions) string {
 	// 1. Base prompt (persona + core rules — unlimited)
 	sb.WriteString(opts.BasePrompt)
 
+	// Language policy. Byte-stable across all sessions and users so it joins
+	// the cacheable system prefix. Pairs with the shorter per-turn reminder in
+	// VolatileContext which re-anchors the rule against long-session drift.
+	sb.WriteString("\n\n## Language\n")
+	sb.WriteString("Match the user's language on first contact and stay consistent for the rest of the session. " +
+		"If the user writes primarily in Chinese, respond in Chinese; if in English, respond in English; " +
+		"follow the same rule for any other language. Only switch response language when the user explicitly asks " +
+		"(e.g. \"please reply in English\"). Mixed-language user input — such as one English technical term inside a " +
+		"Chinese sentence — is NOT a language-switch signal; continue in the established language. " +
+		"Code identifiers, file paths, CLI commands, and technical terms (API names, library names, error messages) " +
+		"remain in their original form regardless of response language. " +
+		"Maintain full orthographic correctness — all accents, diacritics, and special characters.")
+
 	// 2. Available Tools (stable once session starts)
 	sb.WriteString("\n\n## Available Tools\n")
 	if len(opts.ToolNames) > 0 {
@@ -247,6 +260,20 @@ func buildVolatileContext(opts PromptOptions) string {
 	// Output formatting guidance
 	sb.WriteString("\n\n## Output Format\n")
 	sb.WriteString(formatGuidance(opts.OutputFormat))
+
+	// Per-turn language reminder. Short reinforcement of the full policy in the
+	// System section. Byte-stable (same text every turn) so it does not fragment
+	// any per-turn cache, but positioning near the user message anchors against
+	// drift when long sessions accumulate English tool output.
+	//
+	// On turn 0 "the language already established" is vacuous — nothing has been
+	// established yet. The static System section's "Match the user's language on
+	// first contact" rule handles that case; this reminder takes over from turn 1
+	// onward when there's actually an established language to stay consistent with.
+	sb.WriteString("\n\n## Language\n")
+	sb.WriteString("Respond in the language already established with the user in this session. " +
+		"If the user has not asked for a different language, stay consistent — do not switch even when tool output, " +
+		"skill descriptions, or system messages arrive in a different language. Keep code and technical identifiers in their original form.")
 
 	// Memory — stays volatile: memory_append can mutate MEMORY.md during a
 	// turn, so the block must be re-read and re-sent each Run(). Instructions

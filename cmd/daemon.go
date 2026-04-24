@@ -593,10 +593,6 @@ func (h *daemonEventHandler) Usage() agent.AccumulatedUsage { return h.usage.Sna
 func (h *daemonEventHandler) ResetUsage() { h.usage.Reset() }
 
 func (h *daemonEventHandler) OnToolCall(name string, args string) {
-	if h.deps.EventBus != nil {
-		payload, _ := json.Marshal(map[string]interface{}{"tool": name, "status": "running", "session_id": h.sessionID})
-		h.deps.EventBus.Emit(daemon.Event{Type: daemon.EventToolStatus, Payload: payload})
-	}
 	// Skip cloud_delegate — it has its own streaming path via SendProgressWithWorkflow.
 	// Forwarding it as a daemon event would conflict (creates a daemon: stream that
 	// never receives WORKFLOW_COMPLETED from the Temporal workflow).
@@ -610,10 +606,6 @@ func (h *daemonEventHandler) OnToolCall(name string, args string) {
 }
 func (h *daemonEventHandler) OnToolResult(name string, args string, result agent.ToolResult, elapsed time.Duration) {
 	log.Printf("daemon: tool %s completed (%.1fs)", name, elapsed.Seconds())
-	if h.deps.EventBus != nil {
-		payload, _ := json.Marshal(map[string]interface{}{"tool": name, "status": "completed", "elapsed": elapsed.Seconds(), "session_id": h.sessionID})
-		h.deps.EventBus.Emit(daemon.Event{Type: daemon.EventToolStatus, Payload: payload})
-	}
 	if h.wsClient != nil && h.messageID != "" && name != "cloud_delegate" {
 		if err := h.wsClient.SendEvent(h.messageID, "TOOL_COMPLETED", "", map[string]interface{}{"tool": name, "elapsed": elapsed.Seconds()}); err != nil {
 			log.Printf("daemon: event forward failed: %v", err)
@@ -637,39 +629,16 @@ func (h *daemonEventHandler) OnStreamDelta(delta string) {
 func (h *daemonEventHandler) OnUsage(usage agent.TurnUsage) {
 	h.usage.Add(usage)
 }
-func (h *daemonEventHandler) OnCloudAgent(agentID, status, message string) {
-	if h.deps.EventBus != nil {
-		payload, _ := json.Marshal(map[string]string{"agent_id": agentID, "status": status, "message": message})
-		h.deps.EventBus.Emit(daemon.Event{Type: daemon.EventCloudAgent, Payload: payload})
-	}
-}
-func (h *daemonEventHandler) OnCloudProgress(completed, total int) {
-	if h.deps.EventBus != nil {
-		payload, _ := json.Marshal(map[string]int{"completed": completed, "total": total})
-		h.deps.EventBus.Emit(daemon.Event{Type: daemon.EventCloudProgress, Payload: payload})
-	}
-}
-func (h *daemonEventHandler) OnCloudPlan(planType, content string, needsReview bool) {
-	if h.deps.EventBus != nil {
-		payload, _ := json.Marshal(map[string]interface{}{"type": planType, "content": content, "needs_review": needsReview})
-		h.deps.EventBus.Emit(daemon.Event{Type: daemon.EventCloudPlan, Payload: payload})
-	}
-}
+func (h *daemonEventHandler) OnCloudAgent(agentID, status, message string)           {}
+func (h *daemonEventHandler) OnCloudProgress(completed, total int)                   {}
+func (h *daemonEventHandler) OnCloudPlan(planType, content string, needsReview bool) {}
 
-// OnRunStatus forwards watchdog soft/hard events (and other turn-level
-// status signals) to the daemon event bus so SSE/desktop subscribers can
-// render "still working, upstream slow" hints during silent stalls.
-func (h *daemonEventHandler) OnRunStatus(code, detail string) {
-	if h.deps.EventBus != nil {
-		payload, _ := json.Marshal(map[string]string{
-			"code":       code,
-			"detail":     detail,
-			"session_id": h.sessionID,
-			"agent":      h.agent,
-		})
-		h.deps.EventBus.Emit(daemon.Event{Type: daemon.EventRunStatus, Payload: payload})
-	}
-}
+// OnRunStatus satisfies agent.RunStatusHandler on daemonEventHandler. Actual
+// bus emission now happens in busEventHandler (see multiHandler wiring in
+// runner.go). This implementation is a no-op but must remain so the type
+// assertion for RunStatusHandler continues to match the daemonEventHandler
+// alongside any future WS-specific forwarding we add.
+func (h *daemonEventHandler) OnRunStatus(code, detail string) {}
 
 func (h *daemonEventHandler) OnApprovalNeeded(tool string, args string) bool {
 	if h.autoApprove {

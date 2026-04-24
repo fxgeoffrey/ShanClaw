@@ -278,8 +278,12 @@ func (t *CloudDelegateTool) Run(ctx context.Context, argsJSON string) (agent.Too
 			}
 
 		case "DATA_PROCESSING":
+			// Use a semantic label for pre-planning / data prep. Was "synthesis",
+			// which confusingly implies the final summarization step and also
+			// collides with Shannon Cloud's real `synthesis` agent ID (line ~213
+			// filter). `preparing` reflects what DATA_PROCESSING actually is.
 			if msg := event.Message; msg != "" && len(msg) <= 150 && t.handler != nil {
-				t.handler.OnCloudAgent("synthesis", "processing", msg)
+				t.handler.OnCloudAgent("preparing", "processing", msg)
 			}
 
 		// --- Internal plumbing — silently ignore ---

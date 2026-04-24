@@ -1288,7 +1288,16 @@ type sseEventHandler struct {
 func (h *sseEventHandler) Usage() agent.AccumulatedUsage { return h.usage.Snapshot() }
 
 func (h *sseEventHandler) OnToolCall(name string, args string) {
-	data := mustJSON(map[string]interface{}{"tool": name, "status": "running"})
+	// Match bus payload: redact-first, then truncate. `audit.RedactSecrets ∘
+	// truncate` is wrong — a secret that straddles the byte-200 boundary
+	// gets chopped into a fragment before the redaction regex sees it, and
+	// then leaks through SSE. See redactAndTruncate + the boundary
+	// regression test in bus_handler_test.go.
+	data := mustJSON(map[string]interface{}{
+		"tool":   name,
+		"status": "running",
+		"args":   redactAndTruncate(args, 200),
+	})
 	fmt.Fprintf(h.w, "event: tool\ndata: %s\n\n", data)
 	h.flusher.Flush()
 }
@@ -1296,11 +1305,14 @@ func (h *sseEventHandler) OnToolCall(name string, args string) {
 func (h *sseEventHandler) OnToolResult(name string, args string, result agent.ToolResult, elapsed time.Duration) {
 	// SSE is request-scoped (one tool stream per HTTP request), so session_id
 	// is intentionally omitted here; session correlation is handled at the client
-	// session boundary.
+	// session boundary. `is_error` and `preview` mirror the bus payload so the
+	// Desktop foreground pill can render errors / a short result preview.
 	data := mustJSON(map[string]interface{}{
-		"tool":    name,
-		"status":  "completed",
-		"elapsed": elapsed.Seconds(),
+		"tool":     name,
+		"status":   "completed",
+		"elapsed":  elapsed.Seconds(),
+		"is_error": result.IsError,
+		"preview":  redactAndTruncate(toolResultPreview(result), 200),
 	})
 	fmt.Fprintf(h.w, "event: tool\ndata: %s\n\n", data)
 	h.flusher.Flush()

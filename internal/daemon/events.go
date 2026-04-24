@@ -14,6 +14,7 @@ const (
 	EventAgentError       = "agent_error"
 	EventHeartbeatAlert   = "heartbeat_alert"
 	EventToolStatus       = "tool_status"
+	EventUsage            = "usage" // per-LLM-call usage snapshot for the run
 	EventCloudAgent       = "cloud_agent"
 	EventCloudProgress    = "cloud_progress"
 	EventCloudPlan        = "cloud_plan"

@@ -1288,13 +1288,15 @@ type sseEventHandler struct {
 func (h *sseEventHandler) Usage() agent.AccumulatedUsage { return h.usage.Snapshot() }
 
 func (h *sseEventHandler) OnToolCall(name string, args string) {
-	// Include redacted+truncated args so the Desktop's tool pill can show
-	// what the tool is working on (matches bus payload shape — see
-	// busEventHandler.OnToolCall at bus_handler.go).
+	// Match bus payload: redact-first, then truncate. `audit.RedactSecrets ∘
+	// truncate` is wrong — a secret that straddles the byte-200 boundary
+	// gets chopped into a fragment before the redaction regex sees it, and
+	// then leaks through SSE. See redactAndTruncate + the boundary
+	// regression test in bus_handler_test.go.
 	data := mustJSON(map[string]interface{}{
 		"tool":   name,
 		"status": "running",
-		"args":   audit.RedactSecrets(truncate(args, 200)),
+		"args":   redactAndTruncate(args, 200),
 	})
 	fmt.Fprintf(h.w, "event: tool\ndata: %s\n\n", data)
 	h.flusher.Flush()
@@ -1305,26 +1307,12 @@ func (h *sseEventHandler) OnToolResult(name string, args string, result agent.To
 	// is intentionally omitted here; session correlation is handled at the client
 	// session boundary. `is_error` and `preview` mirror the bus payload so the
 	// Desktop foreground pill can render errors / a short result preview.
-	preview := result.Content
-	if preview == "" {
-		for _, block := range result.ContentBlocks {
-			if block.Type == "text" {
-				if preview != "" {
-					preview += "\n"
-				}
-				preview += block.Text
-				if len(preview) >= 200 {
-					break
-				}
-			}
-		}
-	}
 	data := mustJSON(map[string]interface{}{
 		"tool":     name,
 		"status":   "completed",
 		"elapsed":  elapsed.Seconds(),
 		"is_error": result.IsError,
-		"preview":  audit.RedactSecrets(truncate(preview, 200)),
+		"preview":  redactAndTruncate(toolResultPreview(result), 200),
 	})
 	fmt.Fprintf(h.w, "event: tool\ndata: %s\n\n", data)
 	h.flusher.Flush()

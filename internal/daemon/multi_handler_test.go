@@ -36,10 +36,6 @@ func (s *spyHandler) OnCloudAgent(id, status, msg string)              { s.cloud
 func (s *spyHandler) OnCloudProgress(done, total int)                  { s.cloudProgress++ }
 func (s *spyHandler) OnCloudPlan(pt, content string, needsReview bool) { s.cloudPlan++ }
 
-// Extra: make sure OnUsage is fanned out too. The counter lives here so the test
-// can assert it without making spyHandler carry dead receive-only fields.
-func (s *spyHandler) bumpUsage() { s.usage++ }
-
 // usageSpy wraps spyHandler with a real OnUsage that increments the counter.
 type usageSpy struct {
 	spyHandler

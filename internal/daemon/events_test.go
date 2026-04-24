@@ -350,12 +350,6 @@ func TestEventBusEmitToPartialDelivery(t *testing.T) {
 	}
 }
 
-func TestEventUsageConstant(t *testing.T) {
-	if EventUsage != "usage" {
-		t.Fatalf("EventUsage = %q, want %q", EventUsage, "usage")
-	}
-}
-
 // TestRingReplayAfterMidTurnEvents simulates a realistic mid-turn event
 // sequence and verifies that a reconnecting subscriber (via EventsSince(0))
 // sees all of them in order. This exercises the ring buffer under the

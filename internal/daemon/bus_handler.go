@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/agent"
 	"github.com/Kocoro-lab/ShanClaw/internal/audit"
@@ -87,10 +88,11 @@ func (h *busEventHandler) OnCloudProgress(completed, total int) {
 }
 
 func (h *busEventHandler) OnCloudPlan(planType, content string, needsReview bool) {
-	// Redact first (regex windows must see full content), then truncate.
+	// Redact first (regex windows must see full content), then truncate on
+	// a rune boundary via the shared helper before appending the marker.
 	redacted := audit.RedactSecrets(content)
 	if len(redacted) > maxCloudPlanContent {
-		redacted = redacted[:maxCloudPlanContent] + "… (truncated)"
+		redacted = truncate(redacted, maxCloudPlanContent) + "… (truncated)"
 	}
 	h.emitJSON(EventCloudPlan, map[string]any{
 		"type":         planType,
@@ -109,12 +111,21 @@ func (h *busEventHandler) OnRunStatus(code, detail string) {
 	})
 }
 
-// truncate returns s truncated to max bytes. We prefer bytes over runes
-// because bus event payloads are byte-budgeted (ring buffer capacity).
-// Multibyte characters at the boundary get cut cleanly at a byte index.
+// truncate returns s truncated to at most max bytes, but never slicing
+// mid-rune — a byte-cut inside a multi-byte UTF-8 sequence produces invalid
+// UTF-8 that JSON marshalling and downstream consumers (Desktop WKWebView,
+// browsers subscribing to /events) reject or render as U+FFFD. We still
+// cap on bytes (ring buffer capacity is byte-budgeted) but step back so
+// the cut lands at a rune boundary. RuneStart returns true for ASCII and
+// first bytes of multi-byte sequences; continuation bytes (0b10xxxxxx)
+// fail the check, so we step past them. Max 3 decrements (UTF-8 runes are
+// ≤ 4 bytes), so this is O(1) regardless of the string prefix contents.
 func truncate(s string, max int) string {
 	if len(s) <= max {
 		return s
+	}
+	for max > 0 && !utf8.RuneStart(s[max]) {
+		max--
 	}
 	return s[:max]
 }

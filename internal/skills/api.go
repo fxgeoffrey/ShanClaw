@@ -57,6 +57,7 @@ func WriteGlobalSkill(shannonDir string, skill *Skill) error {
 		Compatibility:      skill.Compatibility,
 		Metadata:           skill.Metadata,
 		StickyInstructions: skill.StickyInstructions,
+		Hidden:             skill.Hidden,
 	}
 	if len(skill.AllowedTools) > 0 {
 		fm.AllowedTools = strings.Join(skill.AllowedTools, " ")

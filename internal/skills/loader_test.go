@@ -719,4 +719,61 @@ func TestWriteGlobalSkill_RoundTripsSticky(t *testing.T) {
 			t.Errorf("plain skill gained noisy sticky-snippet: line:\n%s", raw)
 		}
 	})
+
+	// Case D: hidden=true must survive the write→load cycle. Without this,
+	// PUT /skills/{slug} on a hidden skill would silently strip hidden:true
+	// from disk, making the skill reappear in the list on next reload.
+	t.Run("hidden flag preserved", func(t *testing.T) {
+		err := WriteGlobalSkill(shannonDir, &Skill{
+			Name:        "policy-hidden",
+			Description: "Hidden policy",
+			Prompt:      "# Policy\n\nbody",
+			Hidden:      true,
+		})
+		if err != nil {
+			t.Fatalf("WriteGlobalSkill: %v", err)
+		}
+		raw, err := os.ReadFile(filepath.Join(shannonDir, "skills", "policy-hidden", "SKILL.md"))
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if !strings.Contains(string(raw), "hidden: true") {
+			t.Errorf("WriteGlobalSkill dropped hidden flag:\n%s", raw)
+		}
+		loaded, _ := LoadSkills(SkillSource{Dir: filepath.Join(shannonDir, "skills"), Source: SourceGlobal})
+		var s *Skill
+		for _, x := range loaded {
+			if x.Name == "policy-hidden" {
+				s = x
+				break
+			}
+		}
+		if s == nil {
+			t.Fatal("policy-hidden not reloaded")
+		}
+		if !s.Hidden {
+			t.Error("Hidden flag lost on round-trip")
+		}
+	})
+
+	// Case E: hidden omitted or false → no noisy `hidden: false` line in
+	// the written frontmatter, consistent with Case C's treatment of
+	// sticky-instructions.
+	t.Run("hidden false omitted", func(t *testing.T) {
+		err := WriteGlobalSkill(shannonDir, &Skill{
+			Name:        "policy-visible",
+			Description: "Visible policy",
+			Prompt:      "# Policy\n\nbody",
+		})
+		if err != nil {
+			t.Fatalf("WriteGlobalSkill: %v", err)
+		}
+		raw, err := os.ReadFile(filepath.Join(shannonDir, "skills", "policy-visible", "SKILL.md"))
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if strings.Contains(string(raw), "hidden:") {
+			t.Errorf("visible skill gained noisy hidden: line:\n%s", raw)
+		}
+	})
 }

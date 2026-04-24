@@ -2938,8 +2938,8 @@ func TestNamedAgentPromptIncludesCoreRules(t *testing.T) {
 
 	// Default agent prompt composition should also include core rules.
 	defaultComposed := defaultPersona + coreOperationalRules
-	if !strings.Contains(defaultComposed, "You are Shannon") {
-		t.Error("default composed prompt should contain Shannon persona")
+	if !strings.Contains(defaultComposed, "You are Kocoro") {
+		t.Error("default composed prompt should contain Kocoro persona")
 	}
 	for _, s := range required {
 		if !strings.Contains(defaultComposed, s) {

@@ -58,7 +58,7 @@ func TestWalkthrough_ScheduleContext(t *testing.T) {
 	// tool-level code gets.
 	snapshotMsgs := []client.Message{
 		// System message — must be skipped by extractConversationContext.
-		{Role: "system", Content: client.NewTextContent("You are Shannon, an AI assistant...")},
+		{Role: "system", Content: client.NewTextContent("You are Kocoro, an AI assistant...")},
 
 		// Older real user turn.
 		{Role: "user", Content: client.NewTextContent("Watch staging deploys every weekday morning and ping me if anything looks off.")},
@@ -202,7 +202,7 @@ func TestWalkthrough_ScheduleContext(t *testing.T) {
 	mustNotContain := map[string]string{
 		"INTERNAL SPILL":     "tool_result spill path leaked into captured context",
 		".shannon/tmp":       "internal spill path fragment leaked",
-		"You are Shannon":    "system message leaked into captured context",
+		"You are Kocoro":     "system message leaked into captured context",
 		"tu1":                "raw tool_use ID leaked",
 	}
 	for needle, reason := range mustNotContain {

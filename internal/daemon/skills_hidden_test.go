@@ -41,12 +41,12 @@ func TestHandleListSkills_HiddenFiltering(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("default list status = %d, body = %s", rr.Code, rr.Body.String())
 	}
-	names := decodeSkillNames(t, rr.Body.Bytes())
-	if slices.Contains(names, "kocoro") {
-		t.Errorf("default list unexpectedly contains hidden skill: %v", names)
+	slugs := decodeSkillSlugs(t, rr.Body.Bytes())
+	if slices.Contains(slugs, "kocoro") {
+		t.Errorf("default list unexpectedly contains hidden skill: %v", slugs)
 	}
-	if !slices.Contains(names, "visible") {
-		t.Errorf("default list missing non-hidden skill: %v", names)
+	if !slices.Contains(slugs, "visible") {
+		t.Errorf("default list missing non-hidden skill: %v", slugs)
 	}
 
 	// With ?include_hidden=true — hidden skill should re-appear.
@@ -56,16 +56,46 @@ func TestHandleListSkills_HiddenFiltering(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("include_hidden list status = %d, body = %s", rr.Code, rr.Body.String())
 	}
-	names = decodeSkillNames(t, rr.Body.Bytes())
-	if !slices.Contains(names, "kocoro") {
-		t.Errorf("include_hidden=true list missing hidden skill: %v", names)
+	slugs = decodeSkillSlugs(t, rr.Body.Bytes())
+	if !slices.Contains(slugs, "kocoro") {
+		t.Errorf("include_hidden=true list missing hidden skill: %v", slugs)
 	}
-	if !slices.Contains(names, "visible") {
-		t.Errorf("include_hidden=true list missing non-hidden skill: %v", names)
+	if !slices.Contains(slugs, "visible") {
+		t.Errorf("include_hidden=true list missing non-hidden skill: %v", slugs)
 	}
 }
 
-func decodeSkillNames(t *testing.T, raw []byte) []string {
+// TestHandleGetSkill_HiddenStillFetchable guards against a future refactor
+// accidentally filtering single-skill lookup by `hidden`. Hidden is a
+// browse-list display filter only — callers that know the slug must still
+// be able to read the skill detail (admin UIs, kocoro secrets management).
+func TestHandleGetSkill_HiddenStillFetchable(t *testing.T) {
+	shannonDir := t.TempDir()
+	writeSkillFile(t, shannonDir, "kocoro", "---\nname: kocoro\ndescription: Hidden policy skill\nhidden: true\n---\n# Body")
+
+	s := &Server{deps: &ServerDeps{ShannonDir: shannonDir, AgentsDir: t.TempDir()}}
+
+	req := httptest.NewRequest("GET", "/skills/kocoro", nil)
+	req.SetPathValue("name", "kocoro")
+	rr := httptest.NewRecorder()
+	s.handleGetSkill(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("hidden skill lookup status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var detail skills.SkillDetail
+	if err := json.Unmarshal(rr.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("unmarshal detail: %v", err)
+	}
+	if detail.Slug != "kocoro" {
+		t.Errorf("slug = %q, want kocoro", detail.Slug)
+	}
+}
+
+// decodeSkillSlugs returns the Slug of every skill in the list response.
+// Decoding by Slug (not Name) keeps checks precise — `name` is a free-form
+// display label that can diverge from the slug (e.g. CJK or uppercase
+// display names), while Slug is the URL-safe on-disk identifier.
+func decodeSkillSlugs(t *testing.T, raw []byte) []string {
 	t.Helper()
 	var body struct {
 		Skills []skills.SkillMeta `json:"skills"`
@@ -73,10 +103,10 @@ func decodeSkillNames(t *testing.T, raw []byte) []string {
 	if err := json.Unmarshal(raw, &body); err != nil {
 		t.Fatalf("unmarshal skills list: %v", err)
 	}
-	names := make([]string, 0, len(body.Skills))
+	slugs := make([]string, 0, len(body.Skills))
 	for _, s := range body.Skills {
-		names = append(names, s.Name)
+		slugs = append(slugs, s.Slug)
 	}
-	return names
+	return slugs
 }
 

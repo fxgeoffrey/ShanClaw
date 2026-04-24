@@ -2506,12 +2506,8 @@ func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Skills marked `hidden: true` in frontmatter are filtered from the
-	// default list so user-facing frontends (Desktop, TUI pickers) don't
-	// show internal/policy skills like kocoro. Hidden is display-only —
-	// the loader still loaded them, use_skill still invokes them, and
-	// skill discovery still sees them. Admin/management contexts can pass
-	// ?include_hidden=true to see everything.
+	// hidden: true is display-only — the skill is still loaded and invokable
+	// via use_skill. Admin/management UIs can pass ?include_hidden=true.
 	includeHidden := r.URL.Query().Get("include_hidden") == "true"
 	metas := make([]skills.SkillMeta, 0, len(list))
 	for _, skill := range list {
@@ -2572,6 +2568,10 @@ func (s *Server) handleInstallSkill(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetSkill(w http.ResponseWriter, r *http.Request) {
+	// Intentionally does NOT filter by skill.Hidden — single-skill lookup is
+	// for callers that already know the slug (admin UIs, kocoro secrets
+	// management). Hidden is a browse-list display filter, not an access
+	// control. Do not add a hidden check here without revisiting handleListSkills.
 	name := r.PathValue("name")
 	if err := skills.ValidateSkillName(name); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())

@@ -40,6 +40,10 @@ type Skill struct {
 	// drift. Set via frontmatter `sticky-instructions: true`. Intended for
 	// policy skills (e.g. kocoro) whose guidance must survive compaction.
 	StickyInstructions bool   `json:"sticky_instructions,omitempty"`
+	// Hidden excludes the skill from the default GET /skills listing so
+	// frontends hide it from users. Display-only: loader, discovery, and
+	// use_skill are unaffected. Opt-in via frontmatter `hidden: true`.
+	Hidden          bool           `json:"hidden,omitempty"`
 	// StickySnippet is the RESOLVED reinjection body used at runtime. It
 	// comes from StickySnippetOverride when set, else from the heuristic
 	// body extractor, else from Description. Capped to 400 chars. Not
@@ -51,10 +55,6 @@ type Skill struct {
 	// a heuristic choice into the SKILL.md file. Empty means "let the
 	// heuristic pick".
 	StickySnippetOverride string `json:"-"`
-	// Hidden excludes the skill from the default GET /skills listing so
-	// frontends hide it from users. Display-only: loader, discovery, and
-	// use_skill are unaffected. Opt-in via frontmatter `hidden: true`.
-	Hidden          bool           `json:"hidden,omitempty"`
 	Source          string         `json:"-"`
 	InstallSource   string         `json:"-"`
 	MarketplaceSlug string         `json:"-"`

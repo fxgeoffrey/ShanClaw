@@ -1,12 +1,19 @@
 package skills
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 
+	"github.com/Kocoro-lab/ShanClaw/internal/skills/bundled"
 	"gopkg.in/yaml.v3"
 )
 
@@ -148,22 +155,213 @@ func IsDownloadable(name string) bool {
 // builtinSkills are skills that are auto-installed on startup.
 // Unlike other bundled skills (which require manual installation),
 // these are always available without user action.
-var builtinSkills = []string{"kocoro"}
+var builtinSkills = []string{"kocoro", "kocoro-generative-ui"}
 
-// EnsureBuiltinSkills auto-installs builtin skills from the embedded binary
-// to the global skills directory. Idempotent — skips if already installed.
-// Called at daemon/TUI startup alongside agents.EnsureBuiltins.
+// EnsureBuiltinSkills syncs every builtin skill in the global skills directory
+// against the binary's embed.FS. For each builtin: hash the embed.FS tree and
+// the on-disk tree; if they differ (including disk dir missing), wipe and
+// rewrite from embed.FS atomically. If they match, leave the directory alone.
+//
+// Content-addressed by design — there is no version sidecar to drift, no disk
+// cache layer (`bundled-skills/`) to go stale on dev builds, and no edge case
+// where the binary upgraded but the on-disk SKILL.md didn't. Two consequences
+// the previous version-sidecar design tolerated and this design rejects:
+//
+//   - User edits to builtin skills are wiped on next startup. Builtins are
+//     daemon-managed; users who want to customize should fork under a
+//     different skill name.
+//   - Every startup pays a sha256 walk over the on-disk subtree (~15 small
+//     markdown files). The embed-side hashes are memoized per-process so
+//     repeat callers (daemon + TUI in the same binary) only pay the disk walk.
+//
+// Concurrent callers (daemon and TUI cold-starting at the same time) are
+// serialized through `~/.shannon/skills/.builtin.lock` — without it, both
+// would race on `RemoveAll(destDir)` followed by per-file `.tmp` renames and
+// could leave a partial tree until the next startup re-ran the overlay.
+//
+// The benefit: deleting `~/.shannon/skills/kocoro` self-heals, regardless of
+// build-time version metadata. Mirrors agents.EnsureBuiltins's intent without
+// inheriting its dev-build fragility.
+//
+// Called at daemon/TUI/CLI startup alongside agents.EnsureBuiltins.
 func EnsureBuiltinSkills(shannonDir string) error {
+	globalSkills := filepath.Join(shannonDir, "skills")
+	if err := os.MkdirAll(globalSkills, 0700); err != nil {
+		return err
+	}
+
+	lockPath := filepath.Join(globalSkills, ".builtin.lock")
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return fmt.Errorf("open builtin lock: %w", err)
+	}
+	defer lockFile.Close()
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("lock builtin: %w", err)
+	}
+	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+
+	// Best-effort cleanup of the legacy version sidecar from the previous
+	// design. Safe to ignore errors — it is purely informational and an
+	// existing one no longer affects behavior.
+	_ = os.Remove(filepath.Join(globalSkills, "_builtin.version"))
+
 	for _, name := range builtinSkills {
-		destDir := filepath.Join(shannonDir, "skills", name)
-		if _, err := os.Stat(filepath.Join(destDir, "SKILL.md")); err == nil {
-			continue // already installed
+		destDir := filepath.Join(globalSkills, name)
+		match, err := builtinMatchesEmbed(name, destDir)
+		if err != nil {
+			return fmt.Errorf("compare builtin skill %s: %w", name, err)
 		}
-		if err := installFromBundled(shannonDir, name, destDir); err != nil {
+		if match {
+			continue
+		}
+		if err := overlayBuiltinFromEmbed(name, destDir); err != nil {
 			return fmt.Errorf("install builtin skill %s: %w", name, err)
 		}
 	}
 	return nil
+}
+
+// builtinMatchesEmbed returns true when destDir is byte-for-byte identical to
+// the embed.FS subtree at skills/<name>/. A missing destDir counts as a
+// mismatch (triggers install). Hashes file relative paths and contents so a
+// reference file that exists only on disk (e.g. an orphan from a previous
+// bundled version) also counts as a mismatch and gets wiped on overlay.
+func builtinMatchesEmbed(name, destDir string) (bool, error) {
+	embedHash, err := hashEmbedBuiltin(name)
+	if err != nil {
+		return false, fmt.Errorf("hash embed: %w", err)
+	}
+	diskHash, err := hashDirIfPresent(destDir)
+	if err != nil {
+		return false, fmt.Errorf("hash disk: %w", err)
+	}
+	if diskHash == "" {
+		return false, nil
+	}
+	return embedHash == diskHash, nil
+}
+
+// hashEmbedBuiltin returns the sha256 of the embed.FS subtree at
+// skills/<name>/, memoized per name for the lifetime of the process. The
+// embed.FS contents are baked into the binary, so the hash is invariant —
+// recomputing it on every EnsureBuiltinSkills call would be wasted work
+// when daemon and TUI are linked into the same binary or when the function
+// is called multiple times in tests.
+func hashEmbedBuiltin(name string) (string, error) {
+	hashOnceMu.Lock()
+	fn, ok := hashOnce[name]
+	if !ok {
+		fn = sync.OnceValues(func() (string, error) { return computeEmbedBuiltinHash(name) })
+		hashOnce[name] = fn
+	}
+	hashOnceMu.Unlock()
+	return fn()
+}
+
+var (
+	hashOnceMu sync.Mutex
+	hashOnce   = make(map[string]func() (string, error))
+)
+
+// computeEmbedBuiltinHash walks bundled.FS at skills/<name>/ and returns a
+// sha256 over (relative path, content length, content) for every file. Path
+// and length framing prevents prefix collisions and rename ambiguity.
+func computeEmbedBuiltinHash(name string) (string, error) {
+	root := "skills/" + name
+	h := sha256.New()
+	err := fs.WalkDir(bundled.FS, root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		data, err := bundled.FS.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(h, "%s\x00%d\x00", filepath.ToSlash(rel), len(data))
+		h.Write(data)
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// hashDirIfPresent walks dir on disk with the same framing as hashEmbedBuiltin.
+// Returns ("", nil) when dir does not exist so the caller can distinguish
+// "missing" from "present but empty".
+func hashDirIfPresent(dir string) (string, error) {
+	if _, err := os.Stat(dir); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", nil
+		}
+		return "", err
+	}
+	h := sha256.New()
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(h, "%s\x00%d\x00", filepath.ToSlash(rel), len(data))
+		h.Write(data)
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// overlayBuiltinFromEmbed replaces destDir with the contents of bundled.FS at
+// skills/<name>/. destDir is wiped first so orphan files from a prior bundled
+// version (e.g. a reference file that was renamed or removed) don't linger.
+// Per-file atomic writes (temp + rename) bound the partial-state window to a
+// single file; the next startup re-hashes and self-heals if interrupted.
+func overlayBuiltinFromEmbed(name, destDir string) error {
+	if err := os.RemoveAll(destDir); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(destDir, 0700); err != nil {
+		return err
+	}
+	root := "skills/" + name
+	return fs.WalkDir(bundled.FS, root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(destDir, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0700)
+		}
+		data, err := bundled.FS.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return atomicWrite(target, data)
+	})
 }
 
 // InstallSkill installs a downloadable skill to the global skills directory

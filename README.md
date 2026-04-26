@@ -857,7 +857,7 @@ cat > ~/.shannon/agents/reviewer/_attached.yaml << 'EOF'
 EOF
 ```
 
-Attached skill names are resolved from installed skills in `~/.shannon/skills/`. Bundled skills must be installed before they can be attached to an agent.
+Attached skill names are resolved from installed skills in `~/.shannon/skills/`. Bundled skills must be installed before they can be attached to an agent — except for two **auto-installed builtins** that the daemon syncs from the binary on every startup: `kocoro` (platform / HTTP API configuration assistant) and `kocoro-generative-ui` (inline visualization assistant for Kocoro Desktop's sandboxed `html-artifact` widgets — hidden from end-user listings, still callable via `use_skill`). Builtins are daemon-managed: editing their on-disk SKILL.md gets overwritten on next startup; fork under a different skill name if you need to customize.
 
 Skills are listed in the system prompt (name + description only). The LLM activates a skill by calling the `use_skill` tool, which returns the full SKILL.md body — progressive disclosure that keeps prompt size small.
 

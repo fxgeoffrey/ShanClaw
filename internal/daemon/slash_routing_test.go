@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -567,5 +569,274 @@ func TestTryLockRouteWithManager_EmptyKey(t *testing.T) {
 	}
 	if entry != nil {
 		t.Error("expected nil entry for empty key")
+	}
+}
+
+// readSessionsInDir loads every <id>.json session file from sessionsDir,
+// sorted by ModTime ascending so callers can reason about ordering. The
+// helper tolerates non-session files in the directory by skipping unmarshal
+// errors.
+func readSessionsInDir(t *testing.T, sessionsDir string) []session.Session {
+	t.Helper()
+	entries, err := os.ReadDir(sessionsDir)
+	if err != nil {
+		t.Fatalf("read sessions dir %q: %v", sessionsDir, err)
+	}
+	type entryWithMod struct {
+		name    string
+		modTime time.Time
+	}
+	var ordered []entryWithMod
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		ordered = append(ordered, entryWithMod{entry.Name(), info.ModTime()})
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		return ordered[i].modTime.Before(ordered[j].modTime)
+	})
+	var sessions []session.Session
+	for _, ow := range ordered {
+		data, err := os.ReadFile(filepath.Join(sessionsDir, ow.name))
+		if err != nil {
+			continue
+		}
+		var sess session.Session
+		if err := json.Unmarshal(data, &sess); err != nil {
+			continue
+		}
+		sessions = append(sessions, sess)
+	}
+	return sessions
+}
+
+// TestHandleMessage_SlashWarmResume_ReusesRoutedSession verifies that a second
+// slash on the same routed lane resumes the prior run's session via
+// route.sessionID — instead of creating a fresh session each time.
+//
+// Without the warm-resume case in the resolution switch, the second call
+// falls through to `default: sessMgr.NewSession()` and creates a second
+// session file, fragmenting local transcript continuity.
+func TestHandleMessage_SlashWarmResume_ReusesRoutedSession(t *testing.T) {
+	_, gwSrv := newFakeGateway(t, researchSSEEvents, "ok")
+	srv := newSlashTestServer(t, gwSrv.URL)
+
+	// Use a slack-channel route so the route key is "default:slack:%23dev"
+	// (non-agent route). Both requests share the same source+channel so
+	// EnsureRouteKey produces the same RouteKey on each request.
+	body1 := `{"text":"/research first query","source":"slack","channel":"#dev"}`
+	body2 := `{"text":"/research second query","source":"slack","channel":"#dev"}`
+
+	for i, body := range []string{body1, body2} {
+		req, _ := http.NewRequest(http.MethodPost,
+			fmt.Sprintf("http://127.0.0.1:%d/message", srv.Port()),
+			strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "text/event-stream")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("request %d: %v", i+1, err)
+		}
+		// Drain the stream so the deferred unlock runs before we issue request 2.
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+
+	// Default sessions dir (route key "default:slack:%23dev" maps to "" agent).
+	sessionsDir := srv.deps.SessionCache.SessionsDir("")
+	sessions := readSessionsInDir(t, sessionsDir)
+
+	if len(sessions) != 1 {
+		var ids []string
+		for _, s := range sessions {
+			ids = append(ids, s.ID)
+		}
+		t.Fatalf("expected exactly 1 session file (warm resume), got %d (ids=%v)", len(sessions), ids)
+	}
+
+	sess := sessions[0]
+	// Should contain both pairs of (user + assistant) = 4 messages.
+	if got := len(sess.Messages); got != 4 {
+		var roles []string
+		for _, m := range sess.Messages {
+			roles = append(roles, m.Role+":"+m.Content.Text())
+		}
+		t.Fatalf("expected 4 messages (2 user+assistant pairs), got %d: %v", got, roles)
+	}
+
+	// Verify the order: user1, assistant1, user2, assistant2.
+	expectedRoles := []string{"user", "assistant", "user", "assistant"}
+	for i, want := range expectedRoles {
+		if sess.Messages[i].Role != want {
+			t.Errorf("message %d: role=%q, want %q", i, sess.Messages[i].Role, want)
+		}
+	}
+	if !strings.Contains(sess.Messages[0].Content.Text(), "first query") {
+		t.Errorf("expected first user message to contain 'first query', got %q", sess.Messages[0].Content.Text())
+	}
+	if !strings.Contains(sess.Messages[2].Content.Text(), "second query") {
+		t.Errorf("expected second user message to contain 'second query', got %q", sess.Messages[2].Content.Text())
+	}
+}
+
+// TestHandleMessage_SlashConcurrent_SerializesViaRouteLock verifies that two
+// concurrent slash requests on the same route serialize via the route lock:
+// the first acquires the lock and runs to completion, the second sees busy
+// and fails fast with reason="active_run_not_ready" — without persisting its
+// user message (because RunSlashWorkflow returns ErrSlashRouteBusy before
+// any sessMgr.Save()).
+func TestHandleMessage_SlashConcurrent_SerializesViaRouteLock(t *testing.T) {
+	// Fake Gateway whose SSE response blocks until the test releases it.
+	// Buffered channel so both `release <- struct{}{}` sends succeed even if
+	// goroutine 2 never reaches the SSE handler (it bounces at lock acquisition).
+	release := make(chan struct{}, 4)
+	var submitCount atomic.Int32
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/tasks/stream":
+			n := submitCount.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			id := fmt.Sprintf("wf-%d", n)
+			json.NewEncoder(w).Encode(map[string]any{"workflow_id": id, "task_id": id})
+
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/stream/sse":
+			// Block until released so goroutine 1's lock stays held while
+			// goroutine 2 fires.
+			<-release
+			w.Header().Set("Content-Type", "text/event-stream")
+			f, _ := w.(http.Flusher)
+			fmt.Fprintf(w, "event: AGENT_STARTED\ndata: %s\n\n", `{"agent_id":"r"}`)
+			if f != nil {
+				f.Flush()
+			}
+			fmt.Fprintf(w, "event: thread.message.completed\ndata: %s\n\n", `{"response":"ok"}`)
+			if f != nil {
+				f.Flush()
+			}
+			fmt.Fprintf(w, "event: WORKFLOW_COMPLETED\ndata: %s\n\n", `{}`)
+			if f != nil {
+				f.Flush()
+			}
+
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/tasks/"):
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"task_id": "t-test", "result": "ok"})
+
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer gateway.Close()
+
+	srv := newSlashTestServer(t, gateway.URL)
+
+	type result struct {
+		body string
+		err  error
+	}
+	doRequest := func() result {
+		req, _ := http.NewRequest(http.MethodPost,
+			fmt.Sprintf("http://127.0.0.1:%d/message", srv.Port()),
+			strings.NewReader(`{"text":"/research foo","source":"slack","channel":"#dev"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "text/event-stream")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return result{err: err}
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return result{body: string(b)}
+	}
+
+	ch := make(chan result, 2)
+	// Goroutine 1 fires first and blocks in the SSE stream.
+	go func() { ch <- doRequest() }()
+
+	// Wait until goroutine 1 has acquired the route lock and submitted to
+	// gateway. Polling is more reliable than a fixed sleep.
+	deadline := time.Now().Add(2 * time.Second)
+	for submitCount.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if submitCount.Load() < 1 {
+		t.Fatal("goroutine 1 did not submit to gateway in time")
+	}
+
+	// Now poll until goroutine 1 actually holds the route lock. The route key
+	// for slack:#dev is "default:slack:%23dev". TryLock against the same key
+	// returning busy means we know goroutine 1's RunSlashWorkflow has acquired
+	// the lock and the second request will see busy too.
+	const routeKey = "default:slack:%23dev"
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		_, busy := srv.deps.SessionCache.TryLockRouteWithManager(routeKey, srv.deps.SessionCache.SessionsDir(""))
+		if busy {
+			break
+		}
+		// Got the lock; release it so goroutine 1 can keep running. (TryLock
+		// returns the entry locked when busy=false — must unlock to avoid
+		// disturbing the test setup.)
+		srv.deps.SessionCache.UnlockRoute(routeKey)
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Goroutine 2 fires now — must hit the busy path and bounce immediately.
+	go func() { ch <- doRequest() }()
+
+	// Give goroutine 2 a moment to land at the lock and bounce.
+	time.Sleep(50 * time.Millisecond)
+
+	// Release goroutine 1's SSE stream so it completes.
+	release <- struct{}{}
+	// Extra release in case the SSE handler is somehow re-entered (defensive).
+	release <- struct{}{}
+
+	var bodies [2]string
+	for i := 0; i < 2; i++ {
+		r := <-ch
+		if r.err != nil {
+			t.Fatalf("request %d: %v", i, r.err)
+		}
+		bodies[i] = r.body
+	}
+
+	// Exactly one body should be the successful "done" workflow.
+	// Exactly one body should contain "active_run_not_ready".
+	var doneCount, busyCount int
+	for _, b := range bodies {
+		if strings.Contains(b, "event: done") && strings.Contains(b, `"reply":"ok"`) {
+			doneCount++
+		}
+		if strings.Contains(b, "active_run_not_ready") {
+			busyCount++
+		}
+	}
+	if doneCount != 1 || busyCount != 1 {
+		t.Fatalf("expected 1 done + 1 active_run_not_ready, got done=%d busy=%d\nbody[0]=%q\nbody[1]=%q",
+			doneCount, busyCount, bodies[0], bodies[1])
+	}
+
+	// Transcript integrity: only ONE pair (user + assistant) should be on disk.
+	// The losing request's user message must NOT have been appended — RunSlashWorkflow
+	// returns ErrSlashRouteBusy BEFORE sessMgr.Save() runs.
+	sessionsDir := srv.deps.SessionCache.SessionsDir("")
+	sessions := readSessionsInDir(t, sessionsDir)
+	if len(sessions) != 1 {
+		t.Fatalf("expected exactly 1 session file, got %d", len(sessions))
+	}
+	if got := len(sessions[0].Messages); got != 2 {
+		var roles []string
+		for _, m := range sessions[0].Messages {
+			roles = append(roles, m.Role)
+		}
+		t.Fatalf("expected exactly 2 messages on disk (user+assistant from winner), got %d: roles=%v",
+			got, roles)
 	}
 }

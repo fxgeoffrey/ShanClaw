@@ -1311,14 +1311,26 @@ func RunSlashWorkflow(ctx context.Context, deps *ServerDeps, req RunAgentRequest
 
 	// Use the same route-key + lock machinery RunAgent uses (runner.go:611-660),
 	// but fail fast instead of canceling or waiting for an active route.
+	// `route` is hoisted out of the locking block so the resolution switch
+	// below can warm-resume from route.sessionID across slash invocations.
 	var sessMgr *session.Manager
+	var route *routeEntry
 	if req.RouteKey != "" {
-		route, busy := deps.SessionCache.TryLockRouteWithManager(req.RouteKey, sessionsDir)
+		var busy bool
+		route, busy = deps.SessionCache.TryLockRouteWithManager(req.RouteKey, sessionsDir)
 		if busy {
 			return nil, ErrSlashRouteBusy
 		}
 		sessMgr = route.manager
+		// Publish run state so concurrent regular POST /message calls on the same
+		// route see "active run in progress" via InjectMessage (returns InjectBusy)
+		// instead of falling through to start a parallel RunAgent. Mirrors
+		// RunAgent's pattern at runner.go:621-624 / 629-631.
+		routeDone := make(chan struct{})
+		deps.SessionCache.SetRouteRunState(req.RouteKey, routeDone, nil, "")
 		defer func() {
+			deps.SessionCache.ClearRouteRunState(req.RouteKey)
+			closeRouteDone(routeDone)
 			if current := sessMgr.Current(); current != nil {
 				route.sessionID = current.ID
 			}
@@ -1333,7 +1345,8 @@ func RunSlashWorkflow(ctx context.Context, deps *ServerDeps, req RunAgentRequest
 		}()
 	}
 
-	// Resume / new-session — mirrors RunAgent's switch at runner.go:659-687.
+	// Resume / new-session — mirrors RunAgent's switch at runner.go:659-687
+	// (SessionID > NewSession > warm-resume > agent cold-start > default new).
 	switch {
 	case req.SessionID != "":
 		if _, err := sessMgr.Resume(req.SessionID); err != nil {
@@ -1341,6 +1354,15 @@ func RunSlashWorkflow(ctx context.Context, deps *ServerDeps, req RunAgentRequest
 		}
 	case req.NewSession || req.RouteKey == "":
 		sessMgr.NewSession()
+	case route != nil && route.sessionID != "":
+		// Warm resume: a prior run on this route stored its session ID; reuse it
+		// so subsequent slash calls on the same routed lane (default:source:channel
+		// or agent:foo) append to one continuous local transcript instead of
+		// forking a fresh session each time.
+		if _, err := sessMgr.Resume(route.sessionID); err != nil {
+			log.Printf("daemon: failed to resume routed session %q for %q: %v", route.sessionID, req.RouteKey, err)
+			sessMgr.NewSession()
+		}
 	case strings.HasPrefix(req.RouteKey, "agent:"):
 		// Named-agent cold start — resume latest from disk, or NewSession if none.
 		if _, err := resumeNamedAgentColdStart(sessMgr); err != nil {

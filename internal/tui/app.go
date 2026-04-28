@@ -409,6 +409,11 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 	// Interactive TUI — long-lived session with iteration, 1h cache pays off.
 	loop.SetCacheSource("tui")
 	loop.SetSkillDiscovery(runtimeCfg.Agent.SkillDiscoveryEnabled())
+	loop.SetTimeBasedCompactConfig(agent.TimeBasedCompactConfig{
+		Enabled:             runtimeCfg.Agent.TimeBasedCompact.Enabled,
+		GapThresholdMinutes: runtimeCfg.Agent.TimeBasedCompact.GapThresholdMinutes,
+		KeepRecent:          runtimeCfg.Agent.TimeBasedCompact.KeepRecent,
+	})
 	if runtimeCfg.Agent.Model != "" {
 		loop.SetSpecificModel(runtimeCfg.Agent.Model)
 	}

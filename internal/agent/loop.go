@@ -442,6 +442,20 @@ type AgentLoop struct {
 	skillDiscovery    bool              // call small-tier model on first turn to identify relevant skills (default true)
 	sentSkillNames    map[string]bool   // delta tracking: skills already announced to the LLM (persists across Run() calls)
 
+	// Time-based microcompact (see internal/agent/timebasedcompact.go).
+	// Default disabled. When enabled, fires only when (now - lastAssistantAt)
+	// exceeds GapThresholdMinutes — i.e. only when the prompt cache has
+	// reliably expired so clearing tool_result content costs no cache hits.
+	// Replaces the old per-iter compressOldToolResults call site at the
+	// pre-LLM step. The reactive compaction paths still call
+	// compressOldToolResults directly under context-pressure.
+	timeBasedCompactCfg TimeBasedCompactConfig
+	// lastAssistantAt is updated to time.Now() after every successful LLM
+	// response. Persists across Run() calls when the AgentLoop instance is
+	// reused (e.g. routed daemon sessions, TUI). Zero-valued for fresh loops
+	// — evaluateTimeBasedCompactTrigger short-circuits in that case.
+	lastAssistantAt time.Time
+
 	// Watchdog thresholds (0 = disabled). The watchdog observes the loop's
 	// phase tracker and only measures duration in "idle-counted" phases
 	// (PhaseAwaitingLLM, PhaseForceStop) — see phase.go. Tool execution,
@@ -752,6 +766,14 @@ func (a *AgentLoop) SwitchAgent(basePrompt string, memoryDir string, reg *ToolRe
 // SetSkills updates the agent's skill catalog without touching other fields.
 func (a *AgentLoop) SetSkills(s []*skills.Skill) {
 	a.agentSkills = s
+}
+
+// SetTimeBasedCompactConfig wires the time-gated tool_result clearing
+// config. Default disabled (DefaultTimeBasedCompactConfig). Only fires
+// when (now - lastAssistantAt) > GapThresholdMinutes, so a fresh session
+// never compacts on its first turn even with Enabled = true.
+func (a *AgentLoop) SetTimeBasedCompactConfig(cfg TimeBasedCompactConfig) {
+	a.timeBasedCompactCfg = cfg
 }
 
 // SetSkillDiscovery enables or disables the first-turn skill discovery call.
@@ -1669,8 +1691,18 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		// Filter old screenshots to stay within context budget
 		filterOldImages(messages, maxRecentImages)
 
-		// Compress old tool results to save context (keep recent turns verbose)
-		compressOldToolResults(a.ctxWithUsageEmit(ctx), messages, compressAfter, maxResultChars, a.client)
+		// Time-based microcompact (see timebasedcompact.go). No-op unless
+		// Enabled AND the gap since the last assistant response exceeds
+		// GapThresholdMinutes. The default config is Enabled=false, so
+		// per-iter compaction is OFF for typical sessions — short sessions
+		// never compact, and only sessions that idle past the 1h Anthropic
+		// prompt-cache TTL ceiling trigger a one-shot clearing pass when
+		// the next turn arrives.
+		//
+		// Reactive context-pressure paths still call compressOldToolResults
+		// directly (loop.go ~1961/1980); those run only on
+		// context-length-overflow recovery and are gated by reactiveCompacted.
+		_ = timeBasedCompact(messages, a.lastAssistantAt, a.timeBasedCompactCfg)
 
 		// Progress checkpoint at ~60% of effective limit
 		if !checkpointDone && totalToolCalls > 0 {
@@ -1897,6 +1929,9 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				resp, err = a.client.Complete(ctx, req)
 			}
 			if err == nil {
+				// Mark "last assistant response received" for the time-based
+				// microcompact gap calculation (timebasedcompact.go).
+				a.lastAssistantAt = time.Now()
 				break
 			}
 			if ctx.Err() != nil {
@@ -2932,6 +2967,7 @@ func (a *AgentLoop) completeWithRetry(ctx context.Context, req client.Completion
 	for attempt := 0; ; attempt++ {
 		resp, err = a.client.Complete(ctx, req)
 		if err == nil {
+			a.lastAssistantAt = time.Now()
 			return resp, nil
 		}
 		if ctx.Err() != nil {

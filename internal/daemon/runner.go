@@ -910,6 +910,11 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 	loop.SetDeltaProvider(agent.NewTemporalDelta())
 	loop.SetCacheSource(cacheSourceFromDaemonSource(req.Source))
 	loop.SetSkillDiscovery(runCfg.Agent.SkillDiscoveryEnabled())
+	loop.SetTimeBasedCompactConfig(agent.TimeBasedCompactConfig{
+		Enabled:             runCfg.Agent.TimeBasedCompact.Enabled,
+		GapThresholdMinutes: runCfg.Agent.TimeBasedCompact.GapThresholdMinutes,
+		KeepRecent:          runCfg.Agent.TimeBasedCompact.KeepRecent,
+	})
 	if agentOverride != nil {
 		scopedMCPCtx := tools.ResolveMCPContext(runCfg, agentOverride)
 		agentDir := filepath.Join(deps.ShannonDir, "agents", agentName)

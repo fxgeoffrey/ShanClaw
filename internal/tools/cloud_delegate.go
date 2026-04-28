@@ -137,6 +137,7 @@ func (t *CloudDelegateTool) Run(ctx context.Context, argsJSON string) (agent.Too
 		WorkflowType: args.WorkflowType,
 		UserContext:  args.Context,
 		ExtraContext: extras,
+		Timeout:      t.timeout,
 	}, t.handler)
 
 	if err != nil {

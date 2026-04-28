@@ -32,6 +32,9 @@ type Request struct {
 	SessionID    string         // optional; passed to Gateway for correlation
 	UserContext  string         // optional free-text context appended to the request
 
+	// Timeout is the workflow deadline. Zero falls back to the package default (30 minutes).
+	Timeout time.Duration
+
 	// ExtraContext is merged into TaskRequest.Context after user_context and
 	// the workflow-type flags are applied. ExtraContext keys take precedence:
 	// they override user_context, force_research, and force_swarm if they
@@ -78,12 +81,20 @@ func Run(ctx context.Context, req Request, handler agent.EventHandler) (Result, 
 		return Result{}, ErrGatewayNotConfigured
 	}
 
-	// Apply a 30-minute default timeout when the caller has not set one.
-	// This caps runaway workflows that never emit WORKFLOW_COMPLETED.
+	// Resolve the workflow deadline:
+	//   (a) honor the caller's existing ctx deadline if set,
+	//   (b) else use req.Timeout if non-zero,
+	//   (c) else fall back to the 30-minute package default.
+	// This caps runaway workflows that never emit WORKFLOW_COMPLETED while
+	// preserving any user-configured cloud.timeout passed by the caller.
 	timeoutCtx := ctx
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		d := req.Timeout
+		if d == 0 {
+			d = 30 * time.Minute
+		}
 		var cancel context.CancelFunc
-		timeoutCtx, cancel = context.WithTimeout(ctx, 30*time.Minute)
+		timeoutCtx, cancel = context.WithTimeout(ctx, d)
 		defer cancel()
 	}
 
@@ -313,8 +324,10 @@ func Run(ctx context.Context, req Request, handler agent.EventHandler) (Result, 
 
 	// API fallback: SSE events may be truncated (cloud caps at 10K runes).
 	// Always attempt to fetch the full result from the REST API.
-	// Only set FullResultConfirmed when we have a confirmed full result.
-	fullResultConfirmed := true
+	// FullResultConfirmed defaults to false and is only flipped to true when
+	// the REST API verifies the result — a missing taskID, API error, or
+	// empty task.Result all leave the SSE-only payload unconfirmed.
+	fullResultConfirmed := false
 	taskID := resp.TaskID
 	if taskID == "" {
 		taskID = resp.WorkflowID
@@ -327,10 +340,8 @@ func Run(ctx context.Context, req Request, handler agent.EventHandler) (Result, 
 				// API returned a longer result — SSE was truncated
 				finalResult = task.Result
 			}
-			// API succeeded: we have the canonical full result
-		} else {
-			// API fallback failed — SSE result may be truncated
-			fullResultConfirmed = false
+			// API succeeded with non-empty result: this is the canonical full result.
+			fullResultConfirmed = true
 		}
 	}
 

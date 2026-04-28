@@ -90,8 +90,14 @@ func TestAccumulateUsage_ParsesSplitCacheCreation(t *testing.T) {
 	}
 }
 
-func TestRun_FakeGateway_StreamsToHandler(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// newFakeGateway returns an httptest.Server stubbing the three Gateway
+// endpoints used by Run: POST /api/v1/tasks/stream (returns 201 with a
+// workflow_id), GET /api/v1/stream/sse (emits a minimal AGENT_STARTED →
+// thread.message.completed → WORKFLOW_COMPLETED sequence), and GET
+// /api/v1/tasks/{id} (returns the canonical full result for API fallback).
+func newFakeGateway(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/api/v1/tasks/stream"):
 			w.Header().Set("Content-Type", "application/json")
@@ -109,6 +115,10 @@ func TestRun_FakeGateway_StreamsToHandler(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	}))
+}
+
+func TestRun_FakeGateway_StreamsToHandler(t *testing.T) {
+	srv := newFakeGateway(t)
 	defer srv.Close()
 
 	gw := client.NewGatewayClient(srv.URL, "test-key")
@@ -127,5 +137,36 @@ func TestRun_FakeGateway_StreamsToHandler(t *testing.T) {
 	}
 	if len(h.cloudAgents) == 0 {
 		t.Fatalf("expected at least one OnCloudAgent call, got 0")
+	}
+	if !res.FullResultConfirmed {
+		t.Fatalf("expected FullResultConfirmed=true after successful API fallback, got false")
+	}
+}
+
+func TestRun_FakeGateway_InvokesWorkflowStartedCallback(t *testing.T) {
+	srv := newFakeGateway(t)
+	defer srv.Close()
+
+	var seen atomic.Pointer[string]
+	ctx := WithOnWorkflowStarted(context.Background(), func(wfID string) {
+		s := wfID
+		seen.Store(&s)
+	})
+
+	gw := client.NewGatewayClient(srv.URL, "test-key")
+	_, err := Run(ctx, Request{
+		Gateway: gw,
+		APIKey:  "test-key",
+		Query:   "q",
+	}, &captureHandler{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	got := seen.Load()
+	if got == nil {
+		t.Fatalf("OnWorkflowStarted callback was never invoked")
+	}
+	if *got != "wf-123" {
+		t.Fatalf("callback got workflow_id=%q, want %q", *got, "wf-123")
 	}
 }

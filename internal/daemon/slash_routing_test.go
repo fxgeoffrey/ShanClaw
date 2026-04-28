@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -564,6 +565,74 @@ func TestTryLockRouteWithManager_Held(t *testing.T) {
 		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("TryLockRouteWithManager blocked instead of returning immediately")
+	}
+}
+
+// TestTryLockRouteWithManager_StartupWindowCancelSurvives is a regression
+// guard for a router race: TryLockRouteWithManager's cancelPending=false
+// write must happen under sc.mu so a concurrent CancelRoute (which writes
+// cancelPending=true under sc.mu) cannot be silently overwritten.
+//
+// The bug: TryLock cleared cancelPending=false outside sc.mu (router.go:129),
+// racing with a concurrent CancelRoute that set cancelPending=true under
+// sc.mu (router.go:367). SetRouteCancel then saw cancelPending=false and
+// silently dropped the cancel signal — the cloud workflow continued until
+// natural completion or the 30-min timeout despite POST /cancel having
+// returned "cancelled".
+//
+// Detection strategy: this is fundamentally a data race on the
+// `cancelPending` field. Pre-fix, TryLock writes it without sc.mu held;
+// CancelRoute writes it under sc.mu. Concurrent execution trips the -race
+// detector unconditionally and reports "DATA RACE" at router.go:129 vs :367.
+//
+// Post-fix, both writes happen under sc.mu and the detector is silent.
+//
+// Test scope: this test ONLY exercises TryLockRouteWithManager vs
+// CancelRoute. It deliberately does NOT call UnlockRoute or SetRouteCancel
+// concurrently with CancelRoute — those have a pre-existing
+// cancelPending-via-entry.mu-only race that's out of scope for this fix.
+// Each iteration uses a fresh SessionCache so the concurrent zone is
+// isolated to TryLock and CancelRoute on a single key.
+//
+// Run with -race; without -race the test always passes.
+func TestTryLockRouteWithManager_StartupWindowCancelSurvives(t *testing.T) {
+	const iterations = 200
+	const key = "test-route"
+
+	for i := 0; i < iterations; i++ {
+		dir := t.TempDir()
+		sc := NewSessionCache(dir)
+
+		// Pre-create the route entry by briefly locking and (synchronously)
+		// unlocking. CancelRoute is a no-op for unknown keys, so this
+		// ensures entry exists when goroutine B runs.
+		_ = sc.LockRouteWithManager(key, dir)
+		sc.UnlockRoute(key)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		// Goroutine A: TryLock and exit immediately — this is the ONLY
+		// path under test. We don't call UnlockRoute / SetRouteCancel here
+		// to keep the concurrent zone narrow. The lock leak is fine for
+		// this iteration: each iteration uses a fresh SessionCache.
+		go func() {
+			defer wg.Done()
+			_, _ = sc.TryLockRouteWithManager(key, dir)
+		}()
+
+		// Goroutine B: simulate POST /cancel landing roughly when goroutine
+		// A is acquiring the route lock. The race detector reports the
+		// cancelPending data race regardless of which interleaving wins.
+		go func() {
+			defer wg.Done()
+			sc.CancelRoute(key)
+		}()
+
+		wg.Wait()
+		// Don't UnlockRoute here — that would race with CancelRoute on
+		// cancelPending via UnlockRoute's pre-existing entry.mu-only write,
+		// reporting a different (out-of-scope) race.
 	}
 }
 

@@ -108,6 +108,13 @@ func (sc *SessionCache) LockRoute(key string) *routeEntry {
 // TryLockRouteWithManager acquires a route lock without canceling or waiting
 // for an existing run. busy=true means the route is active and the caller
 // should reject or retry, not inject into the existing run.
+//
+// Implementation note: we take entry.mu.TryLock() while still holding sc.mu so
+// the cancelPending clear is atomic with the lock acquisition. If we cleared
+// cancelPending after releasing sc.mu, a CancelRoute landing in the gap would
+// be silently overwritten — see LockRouteWithManager for the same discipline.
+// TryLock is non-blocking, so holding sc.mu briefly while calling it cannot
+// deadlock (sc.mu is always the outer lock by convention).
 func (sc *SessionCache) TryLockRouteWithManager(key, sessionsDir string) (*routeEntry, bool) {
 	if key == "" {
 		return nil, false
@@ -121,13 +128,20 @@ func (sc *SessionCache) TryLockRouteWithManager(key, sessionsDir string) (*route
 	if entry.manager == nil && sessionsDir != "" {
 		entry.manager = sc.newManager(sessionsDir)
 	}
-	sc.mu.Unlock()
 
 	if !entry.mu.TryLock() {
+		// Busy: leave cancelPending alone. The lock-holder may have a real
+		// pending intent that we must not erase.
+		sc.mu.Unlock()
 		return nil, true
 	}
+	// We own entry.mu now. Clear stale cancelPending atomically with the
+	// acquisition, mirroring LockRouteWithManager:154. A cancel arriving after
+	// this sc.mu.Unlock will set cancelPending=true and SetRouteCancel will
+	// catch it.
 	entry.cancelPending = false
 	entry.lastAccess = time.Now()
+	sc.mu.Unlock()
 	return entry, false
 }
 

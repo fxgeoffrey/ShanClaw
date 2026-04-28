@@ -3,24 +3,14 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/agent"
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
+	"github.com/Kocoro-lab/ShanClaw/internal/cloudflow"
 )
-
-// OnWorkflowStartedFunc is called when cloud_delegate gets a workflow_id from Cloud.
-// Used by daemon mode to send progress with workflow_id for streaming card replies.
-type OnWorkflowStartedFunc func(workflowID string)
-
-type contextKeyWorkflowStarted struct{}
-
-// WithOnWorkflowStarted returns a context carrying a per-request workflow started callback.
-// This is safe for concurrent use (each message gets its own context).
-func WithOnWorkflowStarted(ctx context.Context, fn OnWorkflowStartedFunc) context.Context {
-	return context.WithValue(ctx, contextKeyWorkflowStarted{}, fn)
-}
 
 type CloudDelegateTool struct {
 	gw          *client.GatewayClient
@@ -129,318 +119,43 @@ func (t *CloudDelegateTool) Run(ctx context.Context, argsJSON string) (agent.Too
 		args.Context = args.Context[:8000]
 	}
 
-	// Build context map based on workflow_type
-	taskContext := make(map[string]any)
-	if args.Context != "" {
-		taskContext["user_context"] = args.Context
-	}
-	switch args.WorkflowType {
-	case "research":
-		taskContext["force_research"] = true
-	case "swarm":
-		taskContext["force_swarm"] = true
-	case "auto", "":
-		// no flag — let the system decide
-	}
-
+	extras := map[string]any{}
 	if t.agentName != "" {
-		taskContext["agent_name"] = t.agentName
+		extras["agent_name"] = t.agentName
 		if t.agentPrompt != "" {
-			taskContext["agent_instructions"] = t.agentPrompt
+			extras["agent_instructions"] = t.agentPrompt
 		}
 	}
 
-	taskReq := client.TaskRequest{
-		Query:   args.Task,
-		Context: taskContext,
-	}
-
-	if t.gw == nil {
-		return agent.ToolResult{Content: "cloud delegation not available: gateway not configured", IsError: true}, nil
-	}
-
-	// Apply timeout
-	timeoutCtx, cancel := context.WithTimeout(ctx, t.timeout)
-	defer cancel()
-
-	resp, err := t.gw.SubmitTaskStream(timeoutCtx, taskReq)
-	if err != nil {
-		return agent.ToolResult{Content: fmt.Sprintf("failed to submit task: %v", err), IsError: true}, nil
-	}
-
-	// Notify daemon of workflow_id so Cloud can start streaming card replies
-	if resp.WorkflowID != "" {
-		if fn, ok := ctx.Value(contextKeyWorkflowStarted{}).(OnWorkflowStartedFunc); ok && fn != nil {
-			fn(resp.WorkflowID)
-		}
-	}
-
-	// Resolve stream URL
-	streamURL := resp.StreamURL
-	if streamURL == "" {
-		streamURL = t.gw.StreamURL(resp.WorkflowID)
-	}
-	streamURL = t.gw.ResolveURL(streamURL)
-
-	var finalResult string
-	var workflowErr error
-	var cloudUsage agent.TurnUsage
-
-	// Enable cloud streaming on handlers that support it (e.g., TUI)
-	type cloudStreamToggle interface {
-		SetCloudStreaming(bool)
-	}
-	if cs, ok := t.handler.(cloudStreamToggle); ok {
-		cs.SetCloudStreaming(true)
-		defer cs.SetCloudStreaming(false)
-	}
-
-	err = client.StreamSSE(timeoutCtx, streamURL, t.apiKey, func(ev client.SSEEvent) {
-		var event struct {
-			Message  string                 `json:"message"`
-			AgentID  string                 `json:"agent_id"`
-			Delta    string                 `json:"delta"`
-			Response string                 `json:"response"`
-			Type     string                 `json:"type"`
-			Payload  map[string]interface{} `json:"payload"`
-		}
-		json.Unmarshal([]byte(ev.Data), &event)
-
-		switch ev.Event {
-		// --- Streaming deltas ---
-		case "thread.message.delta", "LLM_PARTIAL":
-			// Only stream deltas from synthesis / final_output / swarm-lead / single-agent (empty) to user
-			if t.handler != nil && (event.AgentID == "final_output" || event.AgentID == "swarm-lead" || event.AgentID == "synthesis" || event.AgentID == "") {
-				delta := event.Delta
-				if delta == "" {
-					delta = event.Message
-				}
-				if delta != "" {
-					t.handler.OnStreamDelta(delta)
-				}
-			}
-
-		// --- Final result ---
-		case "thread.message.completed", "LLM_OUTPUT":
-			if event.AgentID == "title_generator" {
-				break // skip title generation output
-			}
-			if event.Response != "" {
-				finalResult = event.Response
-			}
-			// Accumulate usage from LLM_OUTPUT metadata
-			t.accumulateUsage(ev.Data, &cloudUsage)
-
-		// --- HITL: research plan review ---
-		case "RESEARCH_PLAN_READY":
-			// Surface the plan to the user, then auto-approve
-			if t.handler != nil && event.Message != "" {
-				t.handler.OnCloudPlan("research_plan", event.Message, true)
-			}
-			// Auto-approve so the workflow continues (matches Desktop's autoApprove: "on" default)
-			go t.gw.ApproveReviewPlan(timeoutCtx, resp.WorkflowID)
-
-		case "RESEARCH_PLAN_UPDATED":
-			// Updated plan from feedback — surface to user
-			if t.handler != nil && event.Message != "" {
-				t.handler.OnCloudPlan("research_plan_updated", event.Message, false)
-			}
-
-		case "RESEARCH_PLAN_APPROVED":
-			// Plan approved, execution starting
-			if t.handler != nil {
-				t.handler.OnCloudPlan("approved", "", false)
-			}
-
-		case "APPROVAL_REQUESTED":
-			// General approval request — auto-approve
-			if t.handler != nil && event.Message != "" {
-				t.handler.OnStreamDelta("\n[Approval requested: " + event.Message + " — auto-approving]\n")
-			}
-			go t.gw.ApproveReviewPlan(timeoutCtx, resp.WorkflowID)
-
-		// --- Status events — only surface user-facing milestones ---
-		case "AGENT_STARTED":
-			if t.handler != nil {
-				t.handler.OnCloudAgent(event.AgentID, "started", statusMsg(event.AgentID, event.Message, "Agent working..."))
-			}
-		case "AGENT_COMPLETED":
-			if t.handler != nil {
-				t.handler.OnCloudAgent(event.AgentID, "completed", statusMsg(event.AgentID, event.Message, "Agent completed"))
-			}
-		case "AGENT_THINKING":
-			if len(event.Message) <= 100 && t.handler != nil {
-				t.handler.OnCloudAgent("", "thinking", statusMsg("", event.Message, "Thinking..."))
-			}
-		case "TOOL_INVOKED", "TOOL_STARTED":
-			if t.handler != nil {
-				t.handler.OnCloudAgent("", "tool", statusMsg("", event.Message, "Calling tool..."))
-			}
-
-		case "DATA_PROCESSING":
-			// Use a semantic label for pre-planning / data prep. Was "synthesis",
-			// which confusingly implies the final summarization step and also
-			// collides with Shannon Cloud's real `synthesis` agent ID (line ~213
-			// filter). `preparing` reflects what DATA_PROCESSING actually is.
-			if msg := event.Message; msg != "" && len(msg) <= 150 && t.handler != nil {
-				t.handler.OnCloudAgent("preparing", "processing", msg)
-			}
-
-		// --- Internal plumbing — silently ignore ---
-		case "WORKFLOW_STARTED", "TOOL_OBSERVATION", "TOOL_COMPLETED",
-			"DELEGATION", "PROGRESS", "STATUS_UPDATE", "WAITING":
-			// Drop — these are too verbose for the desktop UI
-		case "APPROVAL_DECISION":
-			// no-op
-
-		// --- Swarm-specific events ---
-		case "LEAD_DECISION":
-			if msg := event.Message; msg != "" && len(msg) <= 150 && t.handler != nil {
-				t.handler.OnCloudAgent("", "thinking", msg)
-			}
-		case "TASKLIST_UPDATED":
-			if payload := event.Payload; payload != nil {
-				if tasks, ok := payload["tasks"].([]interface{}); ok && len(tasks) > 0 {
-					completed := 0
-					for _, task := range tasks {
-						if tm, ok := task.(map[string]interface{}); ok {
-							if tm["status"] == "completed" {
-								completed++
-							}
-						}
-					}
-					if t.handler != nil {
-						t.handler.OnCloudProgress(completed, len(tasks))
-					}
-				}
-			}
-		case "HITL_RESPONSE":
-			if event.Message != "" && t.handler != nil {
-				t.handler.OnCloudAgent("", "thinking", "Lead responding to your input")
-			}
-
-		case "WORKFLOW_COMPLETED":
-			if finalResult == "" {
-				finalResult = event.Message
-			}
-
-		case "WORKFLOW_FAILED", "error", "ERROR_OCCURRED":
-			workflowErr = fmt.Errorf("workflow failed: %s", event.Message)
-
-		case "workflow.cancelled":
-			workflowErr = fmt.Errorf("workflow cancelled")
-		}
-	})
-
-	// Report accumulated cloud usage
-	if t.handler != nil && cloudUsage.LLMCalls > 0 {
-		t.handler.OnUsage(cloudUsage)
-	}
-
-	// Handle timeout
-	if err != nil && timeoutCtx.Err() == context.DeadlineExceeded {
-		if finalResult != "" {
-			return agent.ToolResult{Content: fmt.Sprintf("[cloud_delegate timed out after %s, returning partial result]\n\n%s", t.timeout, finalResult)}, nil
-		}
-		return agent.ToolResult{Content: fmt.Sprintf("cloud task timed out after %s with no result", t.timeout), IsError: true}, nil
-	}
+	// ctx already carries any OnWorkflowStartedFunc set by cmd/daemon.go via
+	// cloudflow.WithOnWorkflowStarted — pass it through directly so cloudflow.Run
+	// finds it under the correct context key without an extra wrapper.
+	res, err := cloudflow.Run(ctx, cloudflow.Request{
+		Gateway:      t.gw,
+		APIKey:       t.apiKey,
+		Query:        args.Task,
+		WorkflowType: args.WorkflowType,
+		UserContext:  args.Context,
+		ExtraContext: extras,
+	}, t.handler)
 
 	if err != nil {
-		return agent.ToolResult{Content: fmt.Sprintf("stream error: %v", err), IsError: true}, nil
-	}
-
-	if workflowErr != nil {
-		return agent.ToolResult{Content: workflowErr.Error(), IsError: true}, nil
-	}
-
-	if finalResult == "" {
-		return agent.ToolResult{Content: "workflow completed but returned no response", IsError: true}, nil
-	}
-
-	// API fallback: SSE events may be truncated (cloud caps at 10K runes).
-	// Always attempt to fetch the full result from the REST API.
-	// Only mark as CloudResult (bypass LLM summarization) when we have
-	// a confirmed full result — either from SSE or from the API fallback.
-	fullResultConfirmed := true
-	taskID := resp.TaskID
-	if taskID == "" {
-		taskID = resp.WorkflowID
-	}
-	if taskID != "" && t.gw != nil {
-		apiCtx, apiCancel := context.WithTimeout(ctx, 10*time.Second)
-		defer apiCancel()
-		if task, apiErr := t.gw.GetTask(apiCtx, taskID); apiErr == nil && task.Result != "" {
-			if len(task.Result) > len(finalResult) {
-				// API returned a longer result — SSE was truncated
-				finalResult = task.Result
-			}
-			// API succeeded: we have the canonical full result
-		} else {
-			// API fallback failed — SSE result may be truncated
-			fullResultConfirmed = false
+		if errors.Is(err, cloudflow.ErrGatewayNotConfigured) {
+			return agent.ToolResult{Content: "cloud delegation not available: gateway not configured", IsError: true}, nil
 		}
+		return agent.ToolResult{Content: fmt.Sprintf("cloud workflow error: %v", err), IsError: true}, nil
 	}
 
-	// Determine terminal mode: explicit arg takes precedence,
-	// otherwise research defaults to terminal, swarm/auto default to non-terminal.
 	terminal := args.WorkflowType == "research"
 	if args.Terminal != nil {
 		terminal = *args.Terminal
 	}
-
-	return agent.ToolResult{Content: finalResult, CloudResult: fullResultConfirmed && terminal}, nil
+	return agent.ToolResult{Content: res.FinalText, CloudResult: res.FullResultConfirmed && terminal}, nil
 }
 
 func (t *CloudDelegateTool) RequiresApproval() bool { return true }
 
 func (t *CloudDelegateTool) IsReadOnlyCall(string) bool { return false }
-
-// accumulateUsage extracts usage metadata from LLM_OUTPUT events and adds it to the running total.
-func (t *CloudDelegateTool) accumulateUsage(data string, usage *agent.TurnUsage) {
-	// Shannon Cloud sends usage info in "metadata" field of LLM_OUTPUT events
-	var meta struct {
-		Metadata *struct {
-			InputTokens           int     `json:"input_tokens"`
-			OutputTokens          int     `json:"output_tokens"`
-			TokensUsed            int     `json:"tokens_used"`
-			CostUSD               float64 `json:"cost_usd"`
-			CacheReadTokens       int     `json:"cache_read_tokens"`
-			CacheCreationTokens   int     `json:"cache_creation_tokens"`
-			CacheCreation5mTokens int     `json:"cache_creation_5m_tokens"`
-			CacheCreation1hTokens int     `json:"cache_creation_1h_tokens"`
-			ModelUsed             string  `json:"model_used"`
-		} `json:"metadata"`
-	}
-	if err := json.Unmarshal([]byte(data), &meta); err != nil || meta.Metadata == nil {
-		return
-	}
-	usage.Add(client.Usage{
-		InputTokens:           meta.Metadata.InputTokens,
-		OutputTokens:          meta.Metadata.OutputTokens,
-		TotalTokens:           meta.Metadata.TokensUsed,
-		CostUSD:               meta.Metadata.CostUSD,
-		CacheReadTokens:       meta.Metadata.CacheReadTokens,
-		CacheCreationTokens:   meta.Metadata.CacheCreationTokens,
-		CacheCreation5mTokens: meta.Metadata.CacheCreation5mTokens,
-		CacheCreation1hTokens: meta.Metadata.CacheCreation1hTokens,
-	})
-	if meta.Metadata.ModelUsed != "" {
-		usage.Model = meta.Metadata.ModelUsed
-	}
-}
-
-// statusMsg returns message if non-empty, otherwise fallback.
-// Prepends agentID label if present.
-func statusMsg(agentID, message, fallback string) string {
-	msg := message
-	if msg == "" {
-		msg = fallback
-	}
-	if agentID != "" && agentID != "orchestrator" && agentID != "streaming" {
-		return "[" + agentID + "] " + msg
-	}
-	return msg
-}
 
 // Ensure CloudDelegateTool implements SafeChecker to always require approval.
 var _ agent.SafeChecker = (*CloudDelegateTool)(nil)

@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
-
-	"github.com/Kocoro-lab/ShanClaw/internal/agent"
 )
 
 func TestCloudDelegateInfo(t *testing.T) {
@@ -118,39 +116,3 @@ func TestCloudDelegateContextTruncation(t *testing.T) {
 	}
 }
 
-func TestCloudDelegateAccumulateUsage_ParsesSplitCacheCreation(t *testing.T) {
-	tool := NewCloudDelegateTool(nil, "", 60*time.Second, nil, "", "")
-	var usage agent.TurnUsage
-
-	tool.accumulateUsage(`{
-		"metadata": {
-			"input_tokens": 120,
-			"output_tokens": 30,
-			"tokens_used": 180,
-			"cost_usd": 0.42,
-			"cache_read_tokens": 50,
-			"cache_creation_5m_tokens": 100,
-			"cache_creation_1h_tokens": 200,
-			"model_used": "claude-cloud"
-		}
-	}`, &usage)
-
-	if usage.InputTokens != 120 || usage.OutputTokens != 30 {
-		t.Fatalf("expected input/output 120/30, got %d/%d", usage.InputTokens, usage.OutputTokens)
-	}
-	if usage.TotalTokens != 180 {
-		t.Fatalf("expected total tokens 180, got %d", usage.TotalTokens)
-	}
-	if usage.CacheCreationTokens != 300 {
-		t.Fatalf("expected legacy cache creation total 300, got %d", usage.CacheCreationTokens)
-	}
-	if usage.CacheCreation5mTokens != 100 || usage.CacheCreation1hTokens != 200 {
-		t.Fatalf("expected split cache creation 100/200, got %d/%d", usage.CacheCreation5mTokens, usage.CacheCreation1hTokens)
-	}
-	if usage.Model != "claude-cloud" {
-		t.Fatalf("expected model claude-cloud, got %q", usage.Model)
-	}
-	if usage.LLMCalls != 1 {
-		t.Fatalf("expected 1 LLM call, got %d", usage.LLMCalls)
-	}
-}

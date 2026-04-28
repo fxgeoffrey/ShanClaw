@@ -8,7 +8,10 @@ package cloudflow
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"time"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/agent"
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
@@ -28,7 +31,12 @@ type Request struct {
 	Strategy     string         // "quick" | "standard" | "deep" | "academic" — research only
 	SessionID    string         // optional; passed to Gateway for correlation
 	UserContext  string         // optional free-text context appended to the request
-	ExtraContext map[string]any // optional; merged into TaskRequest.Context
+
+	// ExtraContext is merged into TaskRequest.Context after user_context and
+	// the workflow-type flags are applied. ExtraContext keys take precedence:
+	// they override user_context, force_research, and force_swarm if they
+	// collide. Use this for caller-specific metadata (agent_name, etc.).
+	ExtraContext map[string]any
 }
 
 // Result holds the final assistant message and accumulated cloud usage.
@@ -69,6 +77,315 @@ func Run(ctx context.Context, req Request, handler agent.EventHandler) (Result, 
 	if req.Gateway == nil {
 		return Result{}, ErrGatewayNotConfigured
 	}
-	// TODO(A2): full implementation — extracted from cloud_delegate.go.
-	return Result{}, errors.New("cloudflow.Run not implemented")
+
+	// Apply a 30-minute default timeout when the caller has not set one.
+	// This caps runaway workflows that never emit WORKFLOW_COMPLETED.
+	timeoutCtx := ctx
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		timeoutCtx, cancel = context.WithTimeout(ctx, 30*time.Minute)
+		defer cancel()
+	}
+
+	// Build context map for the task request.
+	taskContext := make(map[string]any)
+	if req.UserContext != "" {
+		taskContext["user_context"] = req.UserContext
+	}
+	switch req.WorkflowType {
+	case "research":
+		taskContext["force_research"] = true
+	case "swarm":
+		taskContext["force_swarm"] = true
+	case "auto", "":
+		// no flag — let the system decide
+	}
+	// ExtraContext keys override the base flags above.
+	for k, v := range req.ExtraContext {
+		taskContext[k] = v
+	}
+
+	taskReq := client.TaskRequest{
+		Query:            req.Query,
+		SessionID:        req.SessionID,
+		Context:          taskContext,
+		ResearchStrategy: req.Strategy,
+	}
+
+	resp, err := req.Gateway.SubmitTaskStream(timeoutCtx, taskReq)
+	if err != nil {
+		return Result{}, fmt.Errorf("submit task: %w", err)
+	}
+
+	// Notify any registered workflow-started listener (e.g. daemon EventBus).
+	if resp.WorkflowID != "" {
+		if fn, ok := ctx.Value(contextKeyOnWorkflowStarted{}).(OnWorkflowStartedFunc); ok && fn != nil {
+			fn(resp.WorkflowID)
+		}
+	}
+
+	// Resolve stream URL: prefer the one returned by Gateway, fall back to
+	// the canonical SSE URL derived from workflowID.
+	streamURL := resp.StreamURL
+	if streamURL == "" {
+		streamURL = req.Gateway.StreamURL(resp.WorkflowID)
+	}
+	streamURL = req.Gateway.ResolveURL(streamURL)
+
+	var finalResult string
+	var workflowErr error
+	var cloudUsage agent.TurnUsage
+
+	// Enable cloud streaming on handlers that support it (e.g., TUI).
+	type cloudStreamToggle interface {
+		SetCloudStreaming(bool)
+	}
+	if cs, ok := handler.(cloudStreamToggle); ok {
+		cs.SetCloudStreaming(true)
+		defer cs.SetCloudStreaming(false)
+	}
+
+	err = client.StreamSSE(timeoutCtx, streamURL, req.APIKey, func(ev client.SSEEvent) {
+		var event struct {
+			Message  string                 `json:"message"`
+			AgentID  string                 `json:"agent_id"`
+			Delta    string                 `json:"delta"`
+			Response string                 `json:"response"`
+			Type     string                 `json:"type"`
+			Payload  map[string]interface{} `json:"payload"`
+		}
+		json.Unmarshal([]byte(ev.Data), &event) //nolint:errcheck
+
+		switch ev.Event {
+		// --- Streaming deltas ---
+		case "thread.message.delta", "LLM_PARTIAL":
+			// Only stream deltas from synthesis / final_output / swarm-lead / single-agent (empty) to user
+			if handler != nil && (event.AgentID == "final_output" || event.AgentID == "swarm-lead" || event.AgentID == "synthesis" || event.AgentID == "") {
+				delta := event.Delta
+				if delta == "" {
+					delta = event.Message
+				}
+				if delta != "" {
+					handler.OnStreamDelta(delta)
+				}
+			}
+
+		// --- Final result ---
+		case "thread.message.completed", "LLM_OUTPUT":
+			if event.AgentID == "title_generator" {
+				break // skip title generation output
+			}
+			if event.Response != "" {
+				finalResult = event.Response
+			}
+			// Accumulate usage from LLM_OUTPUT metadata
+			accumulateUsage(ev.Data, &cloudUsage)
+
+		// --- HITL: research plan review ---
+		case "RESEARCH_PLAN_READY":
+			// Surface the plan to the user, then auto-approve
+			if handler != nil && event.Message != "" {
+				handler.OnCloudPlan("research_plan", event.Message, true)
+			}
+			// Auto-approve so the workflow continues (matches Desktop's autoApprove: "on" default)
+			go req.Gateway.ApproveReviewPlan(timeoutCtx, resp.WorkflowID) //nolint:errcheck
+
+		case "RESEARCH_PLAN_UPDATED":
+			// Updated plan from feedback — surface to user
+			if handler != nil && event.Message != "" {
+				handler.OnCloudPlan("research_plan_updated", event.Message, false)
+			}
+
+		case "RESEARCH_PLAN_APPROVED":
+			// Plan approved, execution starting
+			if handler != nil {
+				handler.OnCloudPlan("approved", "", false)
+			}
+
+		case "APPROVAL_REQUESTED":
+			// General approval request — auto-approve
+			if handler != nil && event.Message != "" {
+				handler.OnStreamDelta("\n[Approval requested: " + event.Message + " — auto-approving]\n")
+			}
+			go req.Gateway.ApproveReviewPlan(timeoutCtx, resp.WorkflowID) //nolint:errcheck
+
+		// --- Status events — only surface user-facing milestones ---
+		case "AGENT_STARTED":
+			if handler != nil {
+				handler.OnCloudAgent(event.AgentID, "started", statusMsg(event.AgentID, event.Message, "Agent working..."))
+			}
+		case "AGENT_COMPLETED":
+			if handler != nil {
+				handler.OnCloudAgent(event.AgentID, "completed", statusMsg(event.AgentID, event.Message, "Agent completed"))
+			}
+		case "AGENT_THINKING":
+			if len(event.Message) <= 100 && handler != nil {
+				handler.OnCloudAgent("", "thinking", statusMsg("", event.Message, "Thinking..."))
+			}
+		case "TOOL_INVOKED", "TOOL_STARTED":
+			if handler != nil {
+				handler.OnCloudAgent("", "tool", statusMsg("", event.Message, "Calling tool..."))
+			}
+
+		case "DATA_PROCESSING":
+			// Use a semantic label for pre-planning / data prep. Was "synthesis",
+			// which confusingly implies the final summarization step and also
+			// collides with Shannon Cloud's real `synthesis` agent ID (filter above).
+			// `preparing` reflects what DATA_PROCESSING actually is.
+			if msg := event.Message; msg != "" && len(msg) <= 150 && handler != nil {
+				handler.OnCloudAgent("preparing", "processing", msg)
+			}
+
+		// --- Internal plumbing — silently ignore ---
+		case "WORKFLOW_STARTED", "TOOL_OBSERVATION", "TOOL_COMPLETED",
+			"DELEGATION", "PROGRESS", "STATUS_UPDATE", "WAITING":
+			// Drop — these are too verbose for the desktop UI
+		case "APPROVAL_DECISION":
+			// no-op
+
+		// --- Swarm-specific events ---
+		case "LEAD_DECISION":
+			if msg := event.Message; msg != "" && len(msg) <= 150 && handler != nil {
+				handler.OnCloudAgent("", "thinking", msg)
+			}
+		case "TASKLIST_UPDATED":
+			if payload := event.Payload; payload != nil {
+				if tasks, ok := payload["tasks"].([]interface{}); ok && len(tasks) > 0 {
+					completed := 0
+					for _, task := range tasks {
+						if tm, ok := task.(map[string]interface{}); ok {
+							if tm["status"] == "completed" {
+								completed++
+							}
+						}
+					}
+					if handler != nil {
+						handler.OnCloudProgress(completed, len(tasks))
+					}
+				}
+			}
+		case "HITL_RESPONSE":
+			if event.Message != "" && handler != nil {
+				handler.OnCloudAgent("", "thinking", "Lead responding to your input")
+			}
+
+		case "WORKFLOW_COMPLETED":
+			if finalResult == "" {
+				finalResult = event.Message
+			}
+
+		case "WORKFLOW_FAILED", "error", "ERROR_OCCURRED":
+			workflowErr = fmt.Errorf("workflow failed: %s", event.Message)
+
+		case "workflow.cancelled":
+			workflowErr = fmt.Errorf("workflow cancelled")
+		}
+	})
+
+	// Report accumulated cloud usage.
+	if handler != nil && cloudUsage.LLMCalls > 0 {
+		handler.OnUsage(cloudUsage)
+	}
+
+	// Handle timeout.
+	if err != nil && timeoutCtx.Err() == context.DeadlineExceeded {
+		if finalResult != "" {
+			return Result{
+				FinalText:  fmt.Sprintf("[cloudflow timed out, returning partial result]\n\n%s", finalResult),
+				WorkflowID: resp.WorkflowID,
+				TaskID:     resp.TaskID,
+			}, nil
+		}
+		return Result{}, fmt.Errorf("cloud task timed out with no result")
+	}
+
+	if err != nil {
+		return Result{}, fmt.Errorf("stream error: %w", err)
+	}
+
+	if workflowErr != nil {
+		return Result{}, workflowErr
+	}
+
+	if finalResult == "" {
+		return Result{}, fmt.Errorf("workflow completed but returned no response")
+	}
+
+	// API fallback: SSE events may be truncated (cloud caps at 10K runes).
+	// Always attempt to fetch the full result from the REST API.
+	// Only set FullResultConfirmed when we have a confirmed full result.
+	fullResultConfirmed := true
+	taskID := resp.TaskID
+	if taskID == "" {
+		taskID = resp.WorkflowID
+	}
+	if taskID != "" {
+		apiCtx, apiCancel := context.WithTimeout(ctx, 10*time.Second)
+		defer apiCancel()
+		if task, apiErr := req.Gateway.GetTask(apiCtx, taskID); apiErr == nil && task.Result != "" {
+			if len(task.Result) > len(finalResult) {
+				// API returned a longer result — SSE was truncated
+				finalResult = task.Result
+			}
+			// API succeeded: we have the canonical full result
+		} else {
+			// API fallback failed — SSE result may be truncated
+			fullResultConfirmed = false
+		}
+	}
+
+	return Result{
+		FinalText:           finalResult,
+		Usage:               cloudUsage,
+		WorkflowID:          resp.WorkflowID,
+		TaskID:              taskID,
+		FullResultConfirmed: fullResultConfirmed,
+	}, nil
+}
+
+// accumulateUsage extracts usage metadata from LLM_OUTPUT events and adds it
+// to the running total. Shannon Cloud sends usage info in "metadata" field.
+func accumulateUsage(data string, usage *agent.TurnUsage) {
+	var meta struct {
+		Metadata *struct {
+			InputTokens           int     `json:"input_tokens"`
+			OutputTokens          int     `json:"output_tokens"`
+			TokensUsed            int     `json:"tokens_used"`
+			CostUSD               float64 `json:"cost_usd"`
+			CacheReadTokens       int     `json:"cache_read_tokens"`
+			CacheCreationTokens   int     `json:"cache_creation_tokens"`
+			CacheCreation5mTokens int     `json:"cache_creation_5m_tokens"`
+			CacheCreation1hTokens int     `json:"cache_creation_1h_tokens"`
+			ModelUsed             string  `json:"model_used"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal([]byte(data), &meta); err != nil || meta.Metadata == nil {
+		return
+	}
+	usage.Add(client.Usage{
+		InputTokens:           meta.Metadata.InputTokens,
+		OutputTokens:          meta.Metadata.OutputTokens,
+		TotalTokens:           meta.Metadata.TokensUsed,
+		CostUSD:               meta.Metadata.CostUSD,
+		CacheReadTokens:       meta.Metadata.CacheReadTokens,
+		CacheCreationTokens:   meta.Metadata.CacheCreationTokens,
+		CacheCreation5mTokens: meta.Metadata.CacheCreation5mTokens,
+		CacheCreation1hTokens: meta.Metadata.CacheCreation1hTokens,
+	})
+	if meta.Metadata.ModelUsed != "" {
+		usage.Model = meta.Metadata.ModelUsed
+	}
+}
+
+// statusMsg returns message if non-empty, otherwise fallback.
+// Prepends agentID label if present and not an internal plumbing ID.
+func statusMsg(agentID, message, fallback string) string {
+	msg := message
+	if msg == "" {
+		msg = fallback
+	}
+	if agentID != "" && agentID != "orchestrator" && agentID != "streaming" {
+		return "[" + agentID + "] " + msg
+	}
+	return msg
 }

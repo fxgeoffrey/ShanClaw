@@ -18,6 +18,7 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/agents"
 	"github.com/Kocoro-lab/ShanClaw/internal/audit"
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
+	"github.com/Kocoro-lab/ShanClaw/internal/cloudflow"
 	"github.com/Kocoro-lab/ShanClaw/internal/config"
 	"github.com/Kocoro-lab/ShanClaw/internal/daemon"
 	"github.com/Kocoro-lab/ShanClaw/internal/heartbeat"
@@ -202,7 +203,7 @@ var daemonStartCmd = &cobra.Command{
 			// Uses context (not mutable tool field) for concurrency safety.
 			if msg.MessageID != "" {
 				msgID := msg.MessageID
-				msgCtx = tools.WithOnWorkflowStarted(msgCtx, func(workflowID string) {
+				msgCtx = cloudflow.WithOnWorkflowStarted(msgCtx, func(workflowID string) {
 					_ = wsClient.SendProgressWithWorkflow(msgID, workflowID)
 				})
 			}

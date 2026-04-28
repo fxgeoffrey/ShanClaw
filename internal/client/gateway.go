@@ -190,20 +190,22 @@ func dumpRawForDebug(reqID string, req CompletionRequest) {
 		return
 	}
 	dir := filepath.Join(home, ".shannon", "logs", "cache-debug-raw", reqID)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	// 0700/0600: dumps contain the full LLM request (user messages, tool inputs,
+	// and any secrets injected into bash results). Restrict to the owning user.
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return
 	}
 	if b, err := json.MarshalIndent(req.Tools, "", "  "); err == nil {
-		_ = os.WriteFile(filepath.Join(dir, "tools.json"), b, 0644)
+		_ = os.WriteFile(filepath.Join(dir, "tools.json"), b, 0600)
 	}
 	if b, err := json.MarshalIndent(req.Messages, "", "  "); err == nil {
-		_ = os.WriteFile(filepath.Join(dir, "messages.json"), b, 0644)
+		_ = os.WriteFile(filepath.Join(dir, "messages.json"), b, 0600)
 	}
 	// Pull system content out separately for quick inspection.
 	for _, m := range req.Messages {
 		if m.Role == "system" {
 			if b, err := json.MarshalIndent(m.Content, "", "  "); err == nil {
-				_ = os.WriteFile(filepath.Join(dir, "system.json"), b, 0644)
+				_ = os.WriteFile(filepath.Join(dir, "system.json"), b, 0600)
 			}
 			break
 		}
@@ -269,8 +271,11 @@ type ContentBlock struct {
 	// alone so the wire bytes stay byte-stable across iterations — Anthropic's
 	// prompt-cache prefix matcher diverges at the first changed byte. Values:
 	//   0 = uncompressed (eligible for first pass)
+	//   1 = stripped to Tier 1 metadata (the most aggressive form)
 	//   2 = visited at Tier 2 (LLM micro-compact summary or head+tail truncation)
-	//   1 = stripped to Tier 1 metadata
+	// The numbering is "recency tier" (lower number = older message = more
+	// compressed), not "compression order" — the loop sets Tier 2 first when
+	// micro-compact runs, then Tier 1 strips deeper on later passes.
 	// Never serialized; agent-internal state only.
 	CompressedTier int `json:"-"`
 	// ToolName is set when Type == "tool_reference" (deferred-tool expansion hint

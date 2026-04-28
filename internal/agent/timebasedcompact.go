@@ -133,17 +133,9 @@ func timeBasedCompact(messages []client.Message, lastAssistantAt time.Time, cfg 
 	}
 
 	keepFrom := len(ids) - keepRecent
-	keepSet := make(map[string]bool, keepRecent)
-	for _, id := range ids[keepFrom:] {
-		keepSet[id] = true
-	}
 	clearSet := make(map[string]bool, keepFrom)
 	for _, id := range ids[:keepFrom] {
 		clearSet[id] = true
-	}
-
-	if len(clearSet) == 0 {
-		return 0
 	}
 
 	cleared := 0

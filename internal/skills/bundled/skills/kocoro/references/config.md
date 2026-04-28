@@ -42,6 +42,9 @@ Global settings control how Shannon behaves across all agents — which AI model
 | `agent.temperature` | Creativity level 0.0–1.0. Lower = more predictable. | No |
 | `agent.max_iterations` | Max tool-use rounds per conversation turn | No |
 | `agent.skill_discovery` | Enable small-model skill matching on first turn (default: true) | No |
+| `agent.time_based_compact.enabled` | Master switch for time-gated tool_result clearing (default: false) | No |
+| `agent.time_based_compact.gap_threshold_minutes` | Fire when (now − last assistant response) exceeds this; matches the Anthropic 1h cache TTL ceiling so no extra cache miss is forced (default: 60) | No |
+| `agent.time_based_compact.keep_recent` | Most-recent compactable tool_results to retain verbatim; older ones are replaced with a placeholder marker (default: 5, floor: 1) | No |
 | `tools.bash_timeout` | Max seconds a bash command can run (default: 120) | No |
 | `daemon.auto_approve` | Skip approval prompts for all tool calls | No |
 | `mcp_servers` | External service integrations (see mcp reference) | No |

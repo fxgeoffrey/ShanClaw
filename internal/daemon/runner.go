@@ -20,6 +20,7 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/agents"
 	"github.com/Kocoro-lab/ShanClaw/internal/audit"
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
+	"github.com/Kocoro-lab/ShanClaw/internal/cloudflow"
 	"github.com/Kocoro-lab/ShanClaw/internal/config"
 	"github.com/Kocoro-lab/ShanClaw/internal/cwdctx"
 	"github.com/Kocoro-lab/ShanClaw/internal/hooks"
@@ -1272,6 +1273,149 @@ func generateMessageID() string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
 	return "msg-" + hex.EncodeToString(b)
+}
+
+// ErrSlashRouteBusy is returned when a slash request lands on a route key
+// that already has another run in flight. Callers translate this to an SSE
+// error event with reason="active_run_not_ready".
+var ErrSlashRouteBusy = errors.New("slash command rejected: another run is active on this route")
+
+// RunSlashWorkflow handles a /research or /swarm HTTP request by dispatching
+// directly to Shannon Cloud's Gateway via cloudflow.Run. It mirrors RunAgent's
+// return shape so callers can encode the result identically (the SSE writer's
+// existing event: done payload works without modification).
+//
+// Differences from RunAgent:
+//   - No agent-loop execution; cloudflow.Run replaces the loop body.
+//   - No session-history replay into the LLM (Cloud carries its own memory).
+//
+// Same as RunAgent (intentionally, to avoid transcript corruption on
+// concurrent same-session writes):
+//   - Honors req.Agent — slash routes through the agent's SessionsDir and
+//     resumes the agent's long-lived session.
+//   - Acquires a SessionCache route lock so concurrent slash+RunAgent or
+//     slash+slash on the same route serialize via the existing locking model.
+//   - Persists user + assistant messages to the local transcript; emits the
+//     same EventMessageReceived bus event RunAgent emits at runner.go:837-846.
+//
+// Caller MUST have already validated that req.Text is a slash command and
+// that req.Content is empty (rejected at the HTTP layer).
+func RunSlashWorkflow(ctx context.Context, deps *ServerDeps, req RunAgentRequest, cmd *cloudflow.SlashCommand, handler agent.EventHandler) (*RunAgentResult, error) {
+	cfg, _, _ := deps.Snapshot()
+	if deps.GW == nil {
+		return nil, fmt.Errorf("gateway not configured")
+	}
+
+	agentName := req.Agent // honors named-agent lane; "" = default
+	sessionsDir := deps.SessionCache.SessionsDir(agentName)
+
+	// Use the same route-key + lock machinery RunAgent uses (runner.go:611-660),
+	// but fail fast instead of canceling or waiting for an active route.
+	var sessMgr *session.Manager
+	if req.RouteKey != "" {
+		route, busy := deps.SessionCache.TryLockRouteWithManager(req.RouteKey, sessionsDir)
+		if busy {
+			return nil, ErrSlashRouteBusy
+		}
+		sessMgr = route.manager
+		defer func() {
+			if current := sessMgr.Current(); current != nil {
+				route.sessionID = current.ID
+			}
+			deps.SessionCache.UnlockRoute(req.RouteKey)
+		}()
+	} else {
+		sessMgr = session.NewManager(sessionsDir)
+		defer func() {
+			if err := sessMgr.Close(); err != nil {
+				log.Printf("daemon: failed to close session manager: %v", err)
+			}
+		}()
+	}
+
+	// Resume / new-session — mirrors RunAgent's switch at runner.go:659-687.
+	switch {
+	case req.SessionID != "":
+		if _, err := sessMgr.Resume(req.SessionID); err != nil {
+			return nil, fmt.Errorf("session not found: %s", req.SessionID)
+		}
+	case req.NewSession || req.RouteKey == "":
+		sessMgr.NewSession()
+	case strings.HasPrefix(req.RouteKey, "agent:"):
+		// Named-agent cold start — resume latest from disk, or NewSession if none.
+		if _, err := resumeNamedAgentColdStart(sessMgr); err != nil {
+			log.Printf("daemon: failed to resume latest named-agent session: %v", err)
+			if sessMgr.Current() == nil {
+				sessMgr.NewSession()
+			}
+		}
+	default:
+		sessMgr.NewSession()
+	}
+	sess := sessMgr.Current()
+
+	// Persist the user message (matching runner.go:820-848 verbatim).
+	if !req.Ephemeral {
+		userMsgID := generateMessageID()
+		sess.Messages = append(sess.Messages,
+			client.Message{Role: "user", Content: client.NewTextContent(req.Text)},
+		)
+		sess.MessageMeta = append(sess.MessageMeta,
+			session.MessageMeta{Source: req.Source, MessageID: userMsgID, Timestamp: session.TimePtr(time.Now())},
+		)
+		if err := sessMgr.Save(); err != nil {
+			log.Printf("daemon: failed to pre-save user message: %v", err)
+		} else if deps.EventBus != nil {
+			payload, _ := json.Marshal(map[string]any{
+				"agent":      agentName,
+				"source":     req.Source,
+				"sender":     req.Sender,
+				"session_id": sess.ID,
+				"message_id": userMsgID,
+				"text":       req.Text,
+			})
+			deps.EventBus.Emit(Event{Type: EventMessageReceived, Payload: payload})
+		}
+	}
+
+	cf := cloudflow.Request{
+		Gateway:      deps.GW,
+		APIKey:       cfg.APIKey,
+		Query:        cmd.Query,
+		WorkflowType: cmd.Type,
+		Strategy:     cmd.Strategy,
+		SessionID:    sess.ID,
+	}
+	res, err := cloudflow.Run(ctx, cf, handler)
+	if err != nil {
+		return nil, err
+	}
+
+	// Persist assistant message.
+	if !req.Ephemeral {
+		sess.Messages = append(sess.Messages,
+			client.Message{Role: "assistant", Content: client.NewTextContent(res.FinalText)},
+		)
+		sess.MessageMeta = append(sess.MessageMeta,
+			session.MessageMeta{Source: "cloud", Timestamp: session.TimePtr(time.Now())},
+		)
+		if err := sessMgr.Save(); err != nil {
+			log.Printf("daemon: failed to save assistant message: %v", err)
+		}
+	}
+
+	// RunAgentUsage has exactly four fields (runner.go:394-399): InputTokens,
+	// OutputTokens, TotalTokens, CostUSD. There is no Model field.
+	return &RunAgentResult{
+		Reply:     res.FinalText,
+		SessionID: sess.ID,
+		Usage: RunAgentUsage{
+			InputTokens:  res.Usage.InputTokens,
+			OutputTokens: res.Usage.OutputTokens,
+			TotalTokens:  res.Usage.TotalTokens,
+			CostUSD:      res.Usage.CostUSD,
+		},
+	}, nil
 }
 
 func closeRouteDone(done chan struct{}) {

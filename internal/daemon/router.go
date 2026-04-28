@@ -105,6 +105,32 @@ func (sc *SessionCache) LockRoute(key string) *routeEntry {
 	return sc.LockRouteWithManager(key, "")
 }
 
+// TryLockRouteWithManager acquires a route lock without canceling or waiting
+// for an existing run. busy=true means the route is active and the caller
+// should reject or retry, not inject into the existing run.
+func (sc *SessionCache) TryLockRouteWithManager(key, sessionsDir string) (*routeEntry, bool) {
+	if key == "" {
+		return nil, false
+	}
+	sc.mu.Lock()
+	entry, ok := sc.routes[key]
+	if !ok {
+		entry = &routeEntry{lastAccess: time.Now()}
+		sc.routes[key] = entry
+	}
+	if entry.manager == nil && sessionsDir != "" {
+		entry.manager = sc.newManager(sessionsDir)
+	}
+	sc.mu.Unlock()
+
+	if !entry.mu.TryLock() {
+		return nil, true
+	}
+	entry.cancelPending = false
+	entry.lastAccess = time.Now()
+	return entry, false
+}
+
 func (sc *SessionCache) LockRouteWithManager(key, sessionsDir string) *routeEntry {
 	if key == "" {
 		return nil

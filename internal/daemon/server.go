@@ -24,6 +24,7 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/agents"
 	"github.com/Kocoro-lab/ShanClaw/internal/audit"
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
+	"github.com/Kocoro-lab/ShanClaw/internal/cloudflow"
 	"github.com/Kocoro-lab/ShanClaw/internal/config"
 	ctxwin "github.com/Kocoro-lab/ShanClaw/internal/context"
 	"github.com/Kocoro-lab/ShanClaw/internal/mcp"
@@ -1097,6 +1098,23 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Slash-command routing: /research and /swarm dispatch directly to Shannon
+	// Cloud's Gateway, bypassing the local agent loop AND the in-flight injection
+	// path. A slash request always starts a fresh cloud workflow — never injects
+	// as mid-run user text into an active routed session.
+	if cmd := cloudflow.ParseSlash(req.Text); cmd != nil {
+		if !strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
+			http.Error(w, `{"error":"slash commands require Accept: text/event-stream"}`, http.StatusBadRequest)
+			return
+		}
+		if len(req.Content) > 0 {
+			http.Error(w, `{"error":"slash commands do not support attachments"}`, http.StatusBadRequest)
+			return
+		}
+		s.handleSlashSSE(w, r, req, cmd)
+		return
+	}
+
 	// Try injecting into an in-flight run on the same route.
 	if req.RouteKey != "" {
 		switch s.deps.SessionCache.InjectMessage(req.RouteKey, agent.InjectedMessage{Text: req.Text, CWD: req.CWD}) {
@@ -1211,6 +1229,53 @@ func (s *Server) handleMessageSSE(w http.ResponseWriter, r *http.Request, req Ru
 		return
 	}
 
+	fmt.Fprintf(w, "event: done\ndata: %s\n\n", mustJSON(result))
+	flusher.Flush()
+}
+
+// handleSlashSSE streams a /research or /swarm cloud workflow over SSE.
+// Output shape matches handleMessageSSE so Desktop's existing done-event
+// consumer works unchanged.
+func (s *Server) handleSlashSSE(w http.ResponseWriter, r *http.Request, req RunAgentRequest, cmd *cloudflow.SlashCommand) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, `{"error":"streaming not supported"}`, http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher.Flush()
+
+	// Reuse the existing sseEventHandler so cloud_agent / cloud_progress /
+	// cloud_plan / delta / usage events go out the same wire format the
+	// Desktop already consumes (server.go:1276+).
+	// broker and autoApprove are zero-valued: cloud workflows don't use the
+	// approval broker (no tool calls needing local approval) and autoApprove
+	// defaulting to false is safe because OnApprovalNeeded is never called
+	// from cloudflow.Run.
+	handler := &sseEventHandler{w: w, flusher: flusher, ctx: r.Context(), deps: s.deps}
+
+	result, err := RunSlashWorkflow(r.Context(), s.deps, req, cmd, handler)
+	if errors.Is(err, ErrSlashRouteBusy) {
+		// The stream has already started, so this is an SSE-level conflict
+		// response, not an HTTP 409. The reason matches the injection layer's
+		// active-run conflict semantic (server.go:1129-1136).
+		fmt.Fprintf(w, "event: error\ndata: %s\n\n", mustJSON(map[string]string{
+			"error":  err.Error(),
+			"reason": "active_run_not_ready",
+		}))
+		flusher.Flush()
+		return
+	}
+	if err != nil {
+		fmt.Fprintf(w, "event: error\ndata: %s\n\n", mustJSON(map[string]string{"error": err.Error()}))
+		flusher.Flush()
+		return
+	}
+
+	// Same payload shape as handleMessageSSE's done event (server.go:1214) —
+	// Desktop's done consumer parses RunAgentResult JSON and renders result.Reply.
 	fmt.Fprintf(w, "event: done\ndata: %s\n\n", mustJSON(result))
 	flusher.Flush()
 }

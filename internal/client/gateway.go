@@ -84,6 +84,13 @@ func rotateCacheDebugLog(path string) error {
 // to logCacheResponse so the response's cache_creation / cache_read tokens
 // can be joined to the same request line. Silent on any error; never
 // affects the request.
+//
+// Two diagnostic depths:
+//   - SHANNON_CACHE_DEBUG=1    → JSON line with rollup hashes + per-tool +
+//     per-message hash ladders (cheap, default for triage).
+//   - SHANNON_CACHE_DEBUG_RAW=1 → in addition, full tools[]/messages[]/system
+//     bytes are dumped to ~/.shannon/logs/cache-debug-raw/<req_id>/ so two
+//     adjacent requests can be byte-diffed (heavy, opt-in).
 func logCacheDebug(req CompletionRequest, tag string) string {
 	if os.Getenv("SHANNON_CACHE_DEBUG") != "1" {
 		return ""
@@ -93,18 +100,55 @@ func logCacheDebug(req CompletionRequest, tag string) string {
 		return hex.EncodeToString(sum[:6])
 	}
 	var systemBytes, firstUserBytes, lastUserBytes []byte
-	for _, m := range req.Messages {
-		b, _ := json.Marshal(m.Content)
+
+	// Per-message hash ladder. Hash the WHOLE marshalled message (role+content
+	// +name+tool_call_id) — this is what the wire body actually contains, and
+	// what Anthropic's prefix matcher sees. Tracking position-by-position lets
+	// us spot middle-of-history byte drift (e.g. Tier compression rewriting an
+	// older tool_result) that the rollup first_user_h / last_user_h hashes hide.
+	msgHashes := make([]map[string]any, 0, len(req.Messages))
+	for i, m := range req.Messages {
+		mb, _ := json.Marshal(m)
+		msgHashes = append(msgHashes, map[string]any{
+			"i":    i,
+			"role": m.Role,
+			"hash": h(mb),
+			"len":  len(mb),
+		})
+		cb, _ := json.Marshal(m.Content)
 		switch m.Role {
 		case "system":
-			systemBytes = b
+			systemBytes = cb
 		case "user":
 			if firstUserBytes == nil {
-				firstUserBytes = b
+				firstUserBytes = cb
 			}
-			lastUserBytes = b
+			lastUserBytes = cb
 		}
 	}
+
+	// Per-tool hash list. Anthropic's prefix matcher hashes the tools[] array
+	// in source order; if any single tool's marshalled bytes drift (e.g.
+	// defer_loading flag flips after tool_search warms it), we need to know
+	// WHICH tool changed, not just the rolled-up tools_h.
+	toolHashes := make([]map[string]any, 0, len(req.Tools))
+	for _, t := range req.Tools {
+		tb, _ := json.Marshal(t)
+		name := t.Name
+		if name == "" {
+			name = t.Function.Name
+		}
+		entry := map[string]any{
+			"name": name,
+			"hash": h(tb),
+			"len":  len(tb),
+		}
+		if t.DeferLoading {
+			entry["defer"] = true
+		}
+		toolHashes = append(toolHashes, entry)
+	}
+
 	toolsJSON, _ := json.Marshal(req.Tools)
 	var idBuf [6]byte
 	_, _ = rand.Read(idBuf[:])
@@ -126,8 +170,44 @@ func logCacheDebug(req CompletionRequest, tag string) string {
 		"first_user_len": len(firstUserBytes),
 		"last_user_h":    h(lastUserBytes),
 		"last_user_len":  len(lastUserBytes),
+		"tool_hashes":    toolHashes,
+		"msg_hashes":     msgHashes,
 	})
+
+	if os.Getenv("SHANNON_CACHE_DEBUG_RAW") == "1" {
+		dumpRawForDebug(reqID, req)
+	}
 	return reqID
+}
+
+// dumpRawForDebug writes the request's tools[], messages[] and system content
+// as pretty-printed JSON files keyed by req_id under
+// ~/.shannon/logs/cache-debug-raw/<req_id>/. Caller verifies the env flag.
+// All errors silent — diagnostic dump must never affect the request path.
+func dumpRawForDebug(reqID string, req CompletionRequest) {
+	home, err := os.UserHomeDir()
+	if home == "" || err != nil {
+		return
+	}
+	dir := filepath.Join(home, ".shannon", "logs", "cache-debug-raw", reqID)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return
+	}
+	if b, err := json.MarshalIndent(req.Tools, "", "  "); err == nil {
+		_ = os.WriteFile(filepath.Join(dir, "tools.json"), b, 0644)
+	}
+	if b, err := json.MarshalIndent(req.Messages, "", "  "); err == nil {
+		_ = os.WriteFile(filepath.Join(dir, "messages.json"), b, 0644)
+	}
+	// Pull system content out separately for quick inspection.
+	for _, m := range req.Messages {
+		if m.Role == "system" {
+			if b, err := json.MarshalIndent(m.Content, "", "  "); err == nil {
+				_ = os.WriteFile(filepath.Join(dir, "system.json"), b, 0644)
+			}
+			break
+		}
+	}
 }
 
 // logCacheResponse appends a "dir":"resp" JSON line joined to the request

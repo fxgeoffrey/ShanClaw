@@ -264,6 +264,15 @@ type ContentBlock struct {
 	ToolUseID   string `json:"tool_use_id,omitempty"`
 	IsError     bool   `json:"is_error,omitempty"`
 	ToolContent any    `json:"-"` // string or []ContentBlock; serialized as "content" for tool_result
+	// CompressedTier records that an agent-loop compaction pass has visited
+	// this tool_result block. Once non-zero, further passes leave ToolContent
+	// alone so the wire bytes stay byte-stable across iterations — Anthropic's
+	// prompt-cache prefix matcher diverges at the first changed byte. Values:
+	//   0 = uncompressed (eligible for first pass)
+	//   2 = visited at Tier 2 (LLM micro-compact summary or head+tail truncation)
+	//   1 = stripped to Tier 1 metadata
+	// Never serialized; agent-internal state only.
+	CompressedTier int `json:"-"`
 	// ToolName is set when Type == "tool_reference" (deferred-tool expansion hint
 	// returned by tool_search). Anthropic expands the full schema server-side
 	// for deferred tools referenced by name. Only populated for tool_reference blocks.

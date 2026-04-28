@@ -3573,11 +3573,22 @@ func buildToolCallMap(messages []client.Message) map[string]toolCallInfo {
 }
 
 // stripToMetadata replaces tool_result content with a metadata-only summary.
+//
+// Skips blocks already marked CompressedTier > 0: a block previously
+// micro-compacted at Tier 2 stays as that ~300-char summary (more useful
+// than ~80-char metadata, and any rewrite breaks Anthropic's prompt-cache
+// prefix); a block already at Tier 1 stays byte-stable instead of letting
+// origLen ratchet down on every pass. See
+// docs/issues/cache-message-prefix-invalidation.md.
 func stripToMetadata(mc client.MessageContent, toolCallMap map[string]toolCallInfo) client.MessageContent {
 	blocks := mc.Blocks()
 	var newBlocks []client.ContentBlock
 	for _, b := range blocks {
 		if b.Type != "tool_result" {
+			newBlocks = append(newBlocks, b)
+			continue
+		}
+		if b.CompressedTier != 0 {
 			newBlocks = append(newBlocks, b)
 			continue
 		}
@@ -3591,6 +3602,7 @@ func stripToMetadata(mc client.MessageContent, toolCallMap map[string]toolCallIn
 		origLen := toolContentLength(b.ToolContent)
 		meta := fmt.Sprintf("[%s called with %s] → [result: %d chars, snipped]", name, args, origLen)
 		b.ToolContent = meta
+		b.CompressedTier = 1
 		newBlocks = append(newBlocks, b)
 	}
 	return client.NewBlockContent(newBlocks)
@@ -3754,11 +3766,22 @@ func compressTier2(ctx context.Context, msg client.Message, maxChars int, comple
 }
 
 // compressTier2Blocks handles native tool_result blocks for Tier 2.
+//
+// Skips blocks already marked CompressedTier > 0 to keep their wire bytes
+// stable across iterations (Anthropic's prompt-cache prefix matcher diverges
+// at the first changed byte). After any first-time visit — micro-compact,
+// mechanical truncation, or no-op for already-small content — the block is
+// marked CompressedTier = 2 so subsequent Tier 2 AND Tier 1 passes treat it
+// as terminal. See docs/issues/cache-message-prefix-invalidation.md.
 func compressTier2Blocks(ctx context.Context, mc client.MessageContent, maxChars int, completer ctxwin.Completer, toolCallMap map[string]toolCallInfo, mcCount *int) client.MessageContent {
 	blocks := mc.Blocks()
 	var newBlocks []client.ContentBlock
 	for _, b := range blocks {
 		if b.Type != "tool_result" {
+			newBlocks = append(newBlocks, b)
+			continue
+		}
+		if b.CompressedTier != 0 {
 			newBlocks = append(newBlocks, b)
 			continue
 		}
@@ -3786,6 +3809,7 @@ func compressTier2Blocks(ctx context.Context, mc client.MessageContent, maxChars
 					LLMCalls:              1,
 				})
 				b.ToolContent = summary
+				b.CompressedTier = 2
 				newBlocks = append(newBlocks, b)
 				continue
 			}
@@ -3811,6 +3835,7 @@ func compressTier2Blocks(ctx context.Context, mc client.MessageContent, maxChars
 			}
 			b.ToolContent = newNested
 		}
+		b.CompressedTier = 2
 		newBlocks = append(newBlocks, b)
 	}
 	return client.NewBlockContent(newBlocks)

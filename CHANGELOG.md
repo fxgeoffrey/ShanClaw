@@ -4,6 +4,9 @@ All notable changes to ShanClaw are documented here. Format follows [Keep a Chan
 
 ## Unreleased
 
+### Added
+- **HTTP slash routing** — `POST /message` now recognizes `/research [strategy] <query>` and `/swarm <query>` slash prefixes (SSE only) and dispatches directly to Shannon Cloud's Gateway, bypassing the local agent loop. Previously slash commands were TUI-only; HTTP clients (including Kocoro Desktop) had to rely on the model invoking `cloud_delegate`. The done event carries the same `RunAgentResult` JSON shape as regular agent runs, so existing SSE consumers need no changes.
+
 ## v0.0.101 — 2026-04-27
 
 ### Added

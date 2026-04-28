@@ -271,6 +271,9 @@ Type `/` in the TUI to see the interactive command menu:
 | `/help` | Show help |
 | `/research [quick\|standard\|deep] <query>` | Remote research via Gateway |
 | `/swarm <query>` | Multi-agent swarm orchestration |
+
+> Both `/research` and `/swarm` are also accepted via `POST /message` with `Accept: text/event-stream` (HTTP clients including Kocoro Desktop).
+
 | `/copy` | Copy last response to clipboard |
 | `/model [small\|medium\|large]` | Switch model tier |
 | `/rename <title>` | Rename current session |

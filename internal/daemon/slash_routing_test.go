@@ -88,17 +88,27 @@ func newFakeGateway(t *testing.T, sseEvents []string, taskResult string) (*fakeG
 // It starts listening on an ephemeral port and registers t.Cleanup to stop it.
 func newSlashTestServer(t *testing.T, gwURL string) *Server {
 	t.Helper()
+	return newSlashTestServerWithConfig(t, gwURL, nil)
+}
+
+// newSlashTestServerWithConfig is like newSlashTestServer but lets the test
+// override the daemon Config (e.g. to set Cloud.Timeout for the timeout test).
+// applyConfig is invoked on the default config; if nil, the default is used.
+func newSlashTestServerWithConfig(t *testing.T, gwURL string, applyConfig func(*config.Config)) *Server {
+	t.Helper()
 	dir := t.TempDir()
 	sc := NewSessionCache(dir)
 	gw := client.NewGatewayClient(gwURL, "test-key")
+	cfg := &config.Config{APIKey: "test-key"}
+	if applyConfig != nil {
+		applyConfig(cfg)
+	}
 	deps := &ServerDeps{
 		ShannonDir:   dir,
 		AgentsDir:    dir,
 		SessionCache: sc,
 		GW:           gw,
-		Config: &config.Config{
-			APIKey: "test-key",
-		},
+		Config:       cfg,
 	}
 	c := NewClient("ws://localhost:1/x", "", func(msg MessagePayload) string { return "" }, nil)
 	srv := NewServer(0, c, deps, "test")
@@ -838,5 +848,236 @@ func TestHandleMessage_SlashConcurrent_SerializesViaRouteLock(t *testing.T) {
 		}
 		t.Fatalf("expected exactly 2 messages on disk (user+assistant from winner), got %d: roles=%v",
 			got, roles)
+	}
+}
+
+// TestHandleMessage_SlashHonorsConfigTimeout verifies that RunSlashWorkflow
+// computes its workflow deadline from cfg.Cloud.Timeout (matching
+// register.go:458-461 for cloud_delegate). The fake Gateway's SSE handler
+// blocks indefinitely; with Cloud.Timeout=1s the request must fail fast (well
+// under cloudflow's 30-min default and under our 1-hour zero-fallback).
+func TestHandleMessage_SlashHonorsConfigTimeout(t *testing.T) {
+	hold := make(chan struct{})
+	defer close(hold)
+	var submitCount atomic.Int32
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/tasks/stream":
+			submitCount.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"workflow_id": "wf-t", "task_id": "t-t"})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/stream/sse":
+			// Block until connection closes (i.e. ctx deadline fires).
+			select {
+			case <-hold:
+			case <-r.Context().Done():
+			}
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/tasks/"):
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"task_id": "t-t", "result": ""})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer gateway.Close()
+
+	// Cloud.Timeout=1 → 1 second. With cloudflow's zero-fallback at 30 min and
+	// our local zero-fallback at 1 hour, anything that returns within ~3s
+	// proves the configured value won.
+	srv := newSlashTestServerWithConfig(t, gateway.URL, func(cfg *config.Config) {
+		cfg.Cloud.Timeout = 1
+	})
+
+	req, _ := http.NewRequest(http.MethodPost,
+		fmt.Sprintf("http://127.0.0.1:%d/message", srv.Port()),
+		strings.NewReader(`{"text":"/research foo","source":"shanclaw"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+
+	start := time.Now()
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	elapsed := time.Since(start)
+
+	// Should return well before any default fallback (30 min / 1 hour).
+	// Allow 3s ceiling to absorb scheduler jitter.
+	if elapsed > 3*time.Second {
+		t.Fatalf("expected request to fail within ~1s due to Cloud.Timeout=1, took %v", elapsed)
+	}
+	// Sanity: gateway must have been called (otherwise we'd be timing out for
+	// the wrong reason).
+	if submitCount.Load() == 0 {
+		t.Fatal("expected gateway submit to be called at least once")
+	}
+}
+
+// TestHandleMessage_SlashCancellable_StopsViaCancelRoute verifies that calling
+// SessionCache.CancelRoute on the slash route key actually stops the run.
+// Without RunSlashWorkflow's SetRouteCancel registration this would be a no-op
+// (CancelRoute would set cancelPending=true with nothing reading it) and the
+// request would block until the cloudflow timeout fires.
+func TestHandleMessage_SlashCancellable_StopsViaCancelRoute(t *testing.T) {
+	var submitCount atomic.Int32
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/tasks/stream":
+			submitCount.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"workflow_id": "wf-c", "task_id": "t-c"})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/stream/sse":
+			// Block until the request context is cancelled. CancelRoute →
+			// slashCancel → cloudflow.Run's ctx → StreamSSE closes the HTTP
+			// request → handler's r.Context() fires.
+			<-r.Context().Done()
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/tasks/"):
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"task_id": "t-c", "result": ""})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer gateway.Close()
+
+	srv := newSlashTestServer(t, gateway.URL)
+
+	type result struct {
+		body string
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		// Use a routed lane (slack:#dev) so CancelRoute has a target.
+		req, _ := http.NewRequest(http.MethodPost,
+			fmt.Sprintf("http://127.0.0.1:%d/message", srv.Port()),
+			strings.NewReader(`{"text":"/research foo","source":"slack","channel":"#dev"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "text/event-stream")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			ch <- result{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		ch <- result{body: string(b)}
+	}()
+
+	// Wait until the run is in flight (gateway received submit + holds the lock).
+	const routeKey = "default:slack:%23dev"
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if submitCount.Load() >= 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if submitCount.Load() == 0 {
+		t.Fatal("gateway not contacted in time")
+	}
+	// Confirm the lock is held (so SetRouteCancel definitely landed).
+	deadline = time.Now().Add(2 * time.Second)
+	locked := false
+	for time.Now().Before(deadline) {
+		_, busy := srv.deps.SessionCache.TryLockRouteWithManager(routeKey, srv.deps.SessionCache.SessionsDir(""))
+		if busy {
+			locked = true
+			break
+		}
+		// We accidentally got the lock — release and retry. (Goroutine 1
+		// hasn't reached LockRouteWithManager yet.)
+		srv.deps.SessionCache.UnlockRoute(routeKey)
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !locked {
+		t.Fatal("slash run never acquired the route lock")
+	}
+
+	// Fire cancel.
+	cancelStart := time.Now()
+	srv.deps.SessionCache.CancelRoute(routeKey)
+
+	// Request must return well before the configured 1-hour fallback.
+	select {
+	case r := <-ch:
+		elapsed := time.Since(cancelStart)
+		if r.err != nil {
+			t.Fatalf("request returned error: %v", r.err)
+		}
+		if elapsed > 3*time.Second {
+			t.Fatalf("CancelRoute took %v to stop slash run; expected <1s", elapsed)
+		}
+		// Body should contain an error event (cloudflow surfaces ctx-cancel
+		// as a stream error). Don't pin to the exact wording — just confirm
+		// it's NOT a successful done payload.
+		if strings.Contains(r.body, `"reply":"ok"`) {
+			t.Errorf("expected cancelled run, got successful done event: %q", r.body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("request did not return within 5s after CancelRoute")
+	}
+}
+
+// TestHandleMessage_SlashWithNamedAgent_DoneCarriesAgent verifies that the
+// done event's RunAgentResult carries Agent=<agentName>, that the persisted
+// session has Title=session.AgentTitle(agentName), and that Source is stamped.
+func TestHandleMessage_SlashWithNamedAgent_DoneCarriesAgent(t *testing.T) {
+	_, gwSrv := newFakeGateway(t, researchSSEEvents, "ok")
+	srv := newSlashTestServer(t, gwSrv.URL)
+
+	// Use both source AND channel so source/channel get stamped on the session.
+	body := `{"text":"/research foo","agent":"researcher","source":"shanclaw","channel":"main"}`
+	req, _ := http.NewRequest(http.MethodPost,
+		fmt.Sprintf("http://127.0.0.1:%d/message", srv.Port()),
+		strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	events := readSSE(t, resp)
+
+	// Find the done event and decode RunAgentResult.
+	var doneResult RunAgentResult
+	var gotDone bool
+	for _, ev := range events {
+		if ev.event == "done" {
+			gotDone = true
+			if err := json.Unmarshal([]byte(ev.data), &doneResult); err != nil {
+				t.Fatalf("decode done: %v (data=%q)", err, ev.data)
+			}
+		}
+	}
+	if !gotDone {
+		t.Fatalf("expected a done event, got %+v", events)
+	}
+	if doneResult.Agent != "researcher" {
+		t.Errorf("done event Agent=%q, want %q", doneResult.Agent, "researcher")
+	}
+
+	// Verify persisted session metadata.
+	researcherSessionsDir := srv.deps.SessionCache.SessionsDir("researcher")
+	sessions := readSessionsInDir(t, researcherSessionsDir)
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 researcher session file, got %d", len(sessions))
+	}
+	sess := sessions[0]
+	wantTitle := session.AgentTitle("researcher")
+	if sess.Title != wantTitle {
+		t.Errorf("session Title=%q, want %q", sess.Title, wantTitle)
+	}
+	if sess.Source != "shanclaw" {
+		t.Errorf("session Source=%q, want %q", sess.Source, "shanclaw")
+	}
+	if sess.Channel != "main" {
+		t.Errorf("session Channel=%q, want %q", sess.Channel, "main")
 	}
 }

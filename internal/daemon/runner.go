@@ -1306,6 +1306,15 @@ func RunSlashWorkflow(ctx context.Context, deps *ServerDeps, req RunAgentRequest
 		return nil, fmt.Errorf("gateway not configured")
 	}
 
+	// Honor cfg.Cloud.Timeout the same way register.go:458-461 does for
+	// cloud_delegate. Zero falls back to 1 hour so slash and tool paths default
+	// identically (cloudflow's own zero-fallback is 30 minutes — diverges from
+	// the cloud_delegate baseline if we don't compute this here).
+	slashTimeout := time.Duration(cfg.Cloud.Timeout) * time.Second
+	if slashTimeout <= 0 {
+		slashTimeout = time.Hour
+	}
+
 	agentName := req.Agent // honors named-agent lane; "" = default
 	sessionsDir := deps.SessionCache.SessionsDir(agentName)
 
@@ -1315,6 +1324,10 @@ func RunSlashWorkflow(ctx context.Context, deps *ServerDeps, req RunAgentRequest
 	// below can warm-resume from route.sessionID across slash invocations.
 	var sessMgr *session.Manager
 	var route *routeEntry
+	// slashCtx is the cancellable context passed to cloudflow.Run. For routed
+	// requests we register slashCancel via SetRouteCancel so POST /cancel can
+	// stop the run. For unrouted requests slashCtx == ctx (no cancel target).
+	slashCtx := ctx
 	if req.RouteKey != "" {
 		var busy bool
 		route, busy = deps.SessionCache.TryLockRouteWithManager(req.RouteKey, sessionsDir)
@@ -1322,13 +1335,25 @@ func RunSlashWorkflow(ctx context.Context, deps *ServerDeps, req RunAgentRequest
 			return nil, ErrSlashRouteBusy
 		}
 		sessMgr = route.manager
+
+		// Wrap ctx so POST /cancel → CancelRoute → slashCancel propagates through
+		// cloudflow.Run → StreamSSE. Without this, CancelRoute only sets
+		// cancelPending=true (a flag nothing reads) and the cloud workflow
+		// continues until its own deadline. Mirrors RunAgent at runner.go:620-628.
+		var slashCancel context.CancelFunc
+		slashCtx, slashCancel = context.WithCancel(ctx)
+		defer slashCancel()
+
 		// Publish run state so concurrent regular POST /message calls on the same
 		// route see "active run in progress" via InjectMessage (returns InjectBusy)
 		// instead of falling through to start a parallel RunAgent. Mirrors
 		// RunAgent's pattern at runner.go:621-624 / 629-631.
 		routeDone := make(chan struct{})
 		deps.SessionCache.SetRouteRunState(req.RouteKey, routeDone, nil, "")
+		deps.SessionCache.SetRouteCancel(req.RouteKey, slashCancel)
 		defer func() {
+			// Clear cancel registration before unlock so the next caller registers fresh.
+			deps.SessionCache.SetRouteCancel(req.RouteKey, nil)
 			deps.SessionCache.ClearRouteRunState(req.RouteKey)
 			closeRouteDone(routeDone)
 			if current := sessMgr.Current(); current != nil {
@@ -1376,6 +1401,33 @@ func RunSlashWorkflow(ctx context.Context, deps *ServerDeps, req RunAgentRequest
 	}
 	sess := sessMgr.Current()
 
+	// Stamp session metadata before persisting — mirrors runner.go:791-803.
+	// This makes the session searchable/displayable by source+channel and gives
+	// it a stable human-readable title.
+	if !req.Ephemeral {
+		if req.Source != "" && req.Channel != "" {
+			sess.Source = req.Source
+			sess.Channel = req.Channel
+		}
+		// Title precedence (matches RunAgent's combined behavior at lines
+		// 798-803 + 1147-1152): named agent > route source/channel > derived
+		// from query.
+		if sess.Title == "New session" {
+			switch {
+			case agentName != "":
+				sess.Title = session.AgentTitle(agentName)
+			case req.RouteKey != "":
+				if t := routeTitle(req.Source, req.Channel, req.Sender); t != "" {
+					sess.Title = t
+				} else {
+					sess.Title = session.Title(cmd.Query)
+				}
+			default:
+				sess.Title = session.Title(cmd.Query)
+			}
+		}
+	}
+
 	// Persist the user message (matching runner.go:820-848 verbatim).
 	if !req.Ephemeral {
 		userMsgID := generateMessageID()
@@ -1407,8 +1459,9 @@ func RunSlashWorkflow(ctx context.Context, deps *ServerDeps, req RunAgentRequest
 		WorkflowType: cmd.Type,
 		Strategy:     cmd.Strategy,
 		SessionID:    sess.ID,
+		Timeout:      slashTimeout,
 	}
-	res, err := cloudflow.Run(ctx, cf, handler)
+	res, err := cloudflow.Run(slashCtx, cf, handler)
 	if err != nil {
 		return nil, err
 	}
@@ -1431,6 +1484,7 @@ func RunSlashWorkflow(ctx context.Context, deps *ServerDeps, req RunAgentRequest
 	return &RunAgentResult{
 		Reply:     res.FinalText,
 		SessionID: sess.ID,
+		Agent:     agentName,
 		Usage: RunAgentUsage{
 			InputTokens:  res.Usage.InputTokens,
 			OutputTokens: res.Usage.OutputTokens,

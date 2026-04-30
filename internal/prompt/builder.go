@@ -160,22 +160,9 @@ func buildStaticSystem(opts PromptOptions) string {
 			"Only sequence when later calls genuinely depend on earlier results.")
 	}
 
-	// Skills are listed in the user message (not system prompt) to preserve
-	// cache prefix stability. See buildSkillListing() in loop.go.
-
-	// 3b. Deferred Tools (only in deferred mode) — name + truncated description.
-	// Model calls tool_search to load full schemas on demand.
-	if len(opts.DeferredTools) > 0 {
-		sb.WriteString("\n\n## Deferred Tools\n")
-		sb.WriteString("Load via `tool_search` when needed, then immediately call the loaded tool.\n")
-		for _, dt := range opts.DeferredTools {
-			desc := dt.Description
-			if len(desc) > 60 {
-				desc = desc[:57] + "..."
-			}
-			fmt.Fprintf(&sb, "- %s: %s\n", dt.Name, desc)
-		}
-	}
+	// Skills and dynamic tool listings (MCP, gateway, deferred) are emitted
+	// in the user message (StableContext via BuildToolListing) to keep this
+	// system prompt byte-stable across users. See issue #107.
 
 	// 4. macOS automation guidance (only on darwin with relevant tools)
 	if guidance := macOSAutomationGuidance(opts.ToolNames); guidance != "" {

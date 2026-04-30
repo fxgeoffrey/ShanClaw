@@ -304,24 +304,28 @@ func TestBuildSystemPrompt_InstructionsTruncation(t *testing.T) {
 	}
 }
 
-func TestBuildSystemPrompt_DeferredToolsInStaticSystem(t *testing.T) {
+// TestBuildSystemPrompt_DeferredToolsExcludedFromSystem asserts deferred
+// tools are NOT rendered in the system prompt — they vary per user (only
+// appear when total tool count > 30) so they break BP #1 byte stability
+// (issue #107). Routed to BuildToolListing instead.
+func TestBuildSystemPrompt_DeferredToolsExcludedFromSystem(t *testing.T) {
 	parts := BuildSystemPrompt(PromptOptions{
-		BasePrompt: "Base.",
-		ToolNames:  []string{"bash", "file_read", "tool_search"},
+		BasePrompt:     "Base.",
+		LocalToolNames: []string{"bash", "file_read", "tool_search"},
 		DeferredTools: []DeferredToolSummary{
 			{Name: "playwright_click", Description: "Click an element"},
 			{Name: "playwright_type", Description: "Type text"},
 		},
 	})
 
-	if !strings.Contains(parts.System, "## Deferred Tools") {
-		t.Error("System should contain Deferred Tools section")
+	if strings.Contains(parts.System, "## Deferred Tools") {
+		t.Error("System must not contain Deferred Tools section (per-user drift source)")
 	}
-	if !strings.Contains(parts.System, "playwright_click: Click an element") {
-		t.Error("System should list deferred tool summaries")
+	if strings.Contains(parts.System, "playwright_click") {
+		t.Error("System must not contain deferred tool names")
 	}
 	if !strings.Contains(parts.System, "tool_search") {
-		t.Error("System should mention tool_search in available tools")
+		t.Error("System should still mention tool_search (it's a local tool)")
 	}
 }
 
@@ -454,35 +458,6 @@ func TestMacOSAutomationGuidance_AccessibilityOnly(t *testing.T) {
 	// Should NOT include the AX fallback bullet (requires both accessibility+computer)
 	if strings.Contains(out, "Fall back to `computer`") {
 		t.Fatalf("unexpected fallback bullet when only accessibility present: %q", out)
-	}
-}
-
-func TestBuildSystemPrompt_DeferredToolsTruncated(t *testing.T) {
-	longDesc := strings.Repeat("abcdefghij", 20) // 200 chars
-	opts := PromptOptions{
-		BasePrompt: "You are Shannon.",
-		DeferredTools: []DeferredToolSummary{
-			{Name: "long-tool", Description: longDesc},
-		},
-	}
-	p := BuildSystemPrompt(opts)
-	// Find the bullet line for long-tool and assert it's truncated
-	found := false
-	for _, l := range strings.Split(p.System, "\n") {
-		if strings.HasPrefix(l, "- long-tool:") {
-			found = true
-			// Line = "- long-tool: " (13 chars) + up to 60 chars desc
-			// So total <= 75 including trailing newline excluded.
-			if len(l) > 100 {
-				t.Fatalf("deferred tool line too long (%d chars), truncation regressed: %q", len(l), l)
-			}
-			if !strings.HasSuffix(l, "...") {
-				t.Fatalf("expected truncation marker '...' on long desc, got: %q", l)
-			}
-		}
-	}
-	if !found {
-		t.Fatalf("deferred tool bullet not found in system prompt")
 	}
 }
 

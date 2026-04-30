@@ -462,6 +462,25 @@ func TestMacOSAutomationGuidance_AccessibilityOnly(t *testing.T) {
 	}
 }
 
+// TestBuildSystemPrompt_MacOSGuidanceEmitted is an integration-level test
+// for the BuildSystemPrompt → macOSAutomationGuidance path. Catches the
+// regression class where macOSAutomationGuidance reads a stale field that
+// the caller no longer populates (existing macOS unit tests bypass
+// BuildSystemPrompt and call the helper directly, so they don't catch
+// wiring bugs at the call site).
+func TestBuildSystemPrompt_MacOSGuidanceEmitted(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("darwin-only guidance")
+	}
+	parts := BuildSystemPrompt(PromptOptions{
+		BasePrompt:     "Base.",
+		LocalToolNames: []string{"accessibility", "bash"},
+	})
+	if !strings.Contains(parts.System, "## macOS Automation") {
+		t.Error("macOS guidance must appear when accessibility is in LocalToolNames")
+	}
+}
+
 // TestBuildSystemPrompt_BP1ByteStableAcrossMCPConfigs locks in the cross-user
 // cache-share invariant from issue #107: two users running the same agent on
 // the same OS but with different MCP server sets must produce byte-identical

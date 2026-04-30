@@ -165,7 +165,7 @@ func buildStaticSystem(opts PromptOptions) string {
 	// system prompt byte-stable across users. See issue #107.
 
 	// 4. macOS automation guidance (only on darwin with relevant tools)
-	if guidance := macOSAutomationGuidance(opts.ToolNames); guidance != "" {
+	if guidance := macOSAutomationGuidance(opts.LocalToolNames); guidance != "" {
 		sb.WriteString("\n\n")
 		sb.WriteString(guidance)
 	}

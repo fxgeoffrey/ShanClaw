@@ -2,8 +2,11 @@ package tools
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -208,11 +211,159 @@ func TestHTTP_IsSafeArgs(t *testing.T) {
 		{`{"url": "http://localhost/path", "method": "POST"}`, false},
 		{`{"url": "https://example.com/api"}`, false},
 		{`{"url": "https://example.com/api", "method": "GET"}`, false},
+		// GET with any body (inline or file) is not safe — could exfiltrate data.
+		{`{"url": "http://localhost/api", "body": "x"}`, false},
+		{`{"url": "http://localhost/api", "body_from_file": "/tmp/x"}`, false},
 		{`not valid json`, false},
 	}
 	for _, tt := range tests {
 		if tool.IsSafeArgs(tt.argsJSON) != tt.safe {
 			t.Errorf("IsSafeArgs(%q) = %v, want %v", tt.argsJSON, !tt.safe, tt.safe)
 		}
+	}
+}
+
+func TestHTTP_BodyFromFile(t *testing.T) {
+	// Payload contains every character that's painful to JSON-escape:
+	// double quotes, backslashes, newlines, tabs, unicode, backticks.
+	payload := "line1 \"with quotes\"\nline2 \\backslash\\\nline3\ttab\nline4 中文 — `backtick`\n"
+
+	dir := t.TempDir()
+	bodyPath := filepath.Join(dir, "payload.txt")
+	if err := os.WriteFile(bodyPath, []byte(payload), 0644); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "PUT" {
+			t.Errorf("expected PUT, got %s", r.Method)
+		}
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		got = string(b)
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	tool := &HTTPTool{}
+	argsJSON := `{"url": "` + srv.URL + `", "method": "PUT", "body_from_file": "` + bodyPath + `"}`
+	result, err := tool.Run(context.Background(), argsJSON)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error result: %s", result.Content)
+	}
+	if got != payload {
+		t.Errorf("server received body %q, want %q", got, payload)
+	}
+}
+
+func TestHTTP_BodyFromFile_SetsContentLength(t *testing.T) {
+	// Without an explicit ContentLength, *os.File bodies would fall back to
+	// chunked transfer encoding (stdlib only auto-detects length for
+	// *strings.Reader / *bytes.Reader / *bytes.Buffer). We set it explicitly
+	// from f.Stat() so strict HTTP/1.0 servers and proxies see a normal
+	// Content-Length header.
+	dir := t.TempDir()
+	bodyPath := filepath.Join(dir, "payload.txt")
+	payload := []byte("exactly thirty bytes of content")
+	if err := os.WriteFile(bodyPath, payload, 0644); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	wantLen := int64(len(payload))
+
+	var gotLen int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotLen = r.ContentLength
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	tool := &HTTPTool{}
+	argsJSON := `{"url": "` + srv.URL + `", "method": "POST", "body_from_file": "` + bodyPath + `"}`
+	result, err := tool.Run(context.Background(), argsJSON)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error result: %s", result.Content)
+	}
+	if gotLen != wantLen {
+		t.Errorf("Content-Length = %d, want %d (chunked encoding indicates -1)", gotLen, wantLen)
+	}
+}
+
+func TestHTTP_BodyFromFile_MutuallyExclusive(t *testing.T) {
+	dir := t.TempDir()
+	bodyPath := filepath.Join(dir, "payload.txt")
+	if err := os.WriteFile(bodyPath, []byte("x"), 0644); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+
+	tool := &HTTPTool{}
+	argsJSON := `{"url": "http://localhost/x", "method": "POST", "body": "inline", "body_from_file": "` + bodyPath + `"}`
+	result, err := tool.Run(context.Background(), argsJSON)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Error("expected error when both body and body_from_file are set")
+	}
+	if !contains(result.Content, "mutually exclusive") {
+		t.Errorf("expected 'mutually exclusive' message, got: %s", result.Content)
+	}
+}
+
+func TestHTTP_BodyFromFile_Missing(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "does-not-exist.txt")
+
+	tool := &HTTPTool{}
+	argsJSON := `{"url": "http://localhost/x", "method": "POST", "body_from_file": "` + missing + `"}`
+	result, err := tool.Run(context.Background(), argsJSON)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Error("expected error for missing body_from_file")
+	}
+	if !contains(result.Content, "does not exist") {
+		t.Errorf("expected 'does not exist' in error, got: %s", result.Content)
+	}
+}
+
+func TestHTTP_BodyFromFile_Directory(t *testing.T) {
+	dir := t.TempDir()
+
+	tool := &HTTPTool{}
+	argsJSON := `{"url": "http://localhost/x", "method": "POST", "body_from_file": "` + dir + `"}`
+	result, err := tool.Run(context.Background(), argsJSON)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Error("expected error when body_from_file points at a directory")
+	}
+	if !contains(result.Content, "is a directory") {
+		t.Errorf("expected 'is a directory' in error, got: %s", result.Content)
+	}
+}
+
+func TestHTTP_BodyFromFile_RelativePathWithoutCWD(t *testing.T) {
+	tool := &HTTPTool{}
+	argsJSON := `{"url": "http://localhost/x", "method": "POST", "body_from_file": "relative/path.txt"}`
+	result, err := tool.Run(context.Background(), argsJSON)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Error("expected error for relative path without session CWD")
+	}
+	if !contains(result.Content, "absolute path") {
+		t.Errorf("expected 'absolute path' guidance in error, got: %s", result.Content)
 	}
 }

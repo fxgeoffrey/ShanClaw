@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"maps"
+	"mime"
 	"net"
 	"net/http"
 	"os"
@@ -3535,13 +3536,40 @@ func (s *Server) handleGetInstructions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePutInstructions(w http.ResponseWriter, r *http.Request) {
+	path := filepath.Join(s.deps.ShannonDir, "instructions.md")
+
+	// Content-Type negotiation: text/markdown and text/plain accept the
+	// request body verbatim as the file contents. This lets clients send
+	// raw markdown without JSON-string-escaping every quote/newline (which
+	// is fragile when the LLM hand-writes the body field). Anything else
+	// (including application/json and the default empty Content-Type) goes
+	// through the existing {"content": "..."} JSON shape for back-compat.
+	if isTextContentType(r.Header.Get("Content-Type")) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) {
+				writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+				return
+			}
+			writeError(w, http.StatusBadRequest, "error reading body")
+			return
+		}
+		if err := agents.AtomicWrite(path, data); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+		return
+	}
+
 	var body struct {
 		Content *string `json:"content"`
 	}
 	if !decodeBody(w, r, &body) {
 		return
 	}
-	path := filepath.Join(s.deps.ShannonDir, "instructions.md")
 	if body.Content == nil {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -3554,6 +3582,23 @@ func (s *Server) handlePutInstructions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+// isTextContentType reports whether the Content-Type header indicates a
+// text body (markdown or plain) that should be written verbatim. Returns
+// false for empty / JSON / malformed / anything else so the JSON path
+// stays the default. Uses mime.ParseMediaType for robust handling of
+// charset suffixes, casing, comma-joined types, and other RFC 7231 edge
+// cases.
+func isTextContentType(ct string) bool {
+	if ct == "" {
+		return false
+	}
+	mt, _, err := mime.ParseMediaType(ct)
+	if err != nil {
+		return false
+	}
+	return mt == "text/markdown" || mt == "text/plain"
 }
 
 // syncAuditAdapter bridges the daemon's *audit.AuditLogger (which writes

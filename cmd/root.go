@@ -205,6 +205,11 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 	// One-shot CLI invocation — no resume across runs. Short TTL is correct.
 	loop.SetCacheSource("oneshot_cli")
 	loop.SetSkillDiscovery(runCfg.Agent.SkillDiscoveryEnabled())
+	loop.SetTimeBasedCompactConfig(agent.TimeBasedCompactConfig{
+		Enabled:             runCfg.Agent.TimeBasedCompact.Enabled,
+		GapThresholdMinutes: runCfg.Agent.TimeBasedCompact.GapThresholdMinutes,
+		KeepRecent:          runCfg.Agent.TimeBasedCompact.KeepRecent,
+	})
 	if runCfg.Agent.Model != "" {
 		loop.SetSpecificModel(runCfg.Agent.Model)
 	}

@@ -73,6 +73,23 @@ type AgentConfig struct {
 	IdleSoftTimeoutSecs int `mapstructure:"idle_soft_timeout_secs" yaml:"idle_soft_timeout_secs" json:"idle_soft_timeout_secs"`
 	IdleHardTimeoutSecs int `mapstructure:"idle_hard_timeout_secs" yaml:"idle_hard_timeout_secs" json:"idle_hard_timeout_secs"`
 	SkillDiscovery      *bool `mapstructure:"skill_discovery" yaml:"skill_discovery,omitempty" json:"skill_discovery,omitempty"`
+
+	// TimeBasedCompact controls time-gated tool_result clearing. Disabled
+	// by default. When enabled, an old tool_result is cleared to a short
+	// marker only after the gap since the last assistant response exceeds
+	// GapThresholdMinutes — i.e. only when Anthropic's prompt cache has
+	// reliably expired so the prefix would be rewritten anyway. See
+	// internal/agent/timebasedcompact.go.
+	TimeBasedCompact TimeBasedCompactConfig `mapstructure:"time_based_compact" yaml:"time_based_compact" json:"time_based_compact"`
+}
+
+// TimeBasedCompactConfig is the YAML/JSON-bindable view of the agent's
+// time-based microcompact policy. The runtime view lives in
+// internal/agent.TimeBasedCompactConfig — they are kept in lockstep.
+type TimeBasedCompactConfig struct {
+	Enabled             bool `mapstructure:"enabled"               yaml:"enabled"               json:"enabled"`
+	GapThresholdMinutes int  `mapstructure:"gap_threshold_minutes" yaml:"gap_threshold_minutes" json:"gap_threshold_minutes"`
+	KeepRecent          int  `mapstructure:"keep_recent"           yaml:"keep_recent"           json:"keep_recent"`
 }
 
 // SkillDiscoveryEnabled returns whether skill discovery is enabled (default: true).
@@ -169,6 +186,13 @@ func Load() (*Config, error) {
 	viper.SetDefault("agent.context_window", 128000)
 	viper.SetDefault("agent.idle_soft_timeout_secs", 90)
 	viper.SetDefault("agent.idle_hard_timeout_secs", 0) // 0 = disabled; flip to <600 after dogfood
+	// Time-based microcompact. Disabled by default — short sessions never
+	// compact, and only sessions that idle past the gap threshold will
+	// clear old tool_results. 60min matches Anthropic's 1h prompt-cache
+	// TTL ceiling. KeepRecent=5 keeps a working tail visible to the model.
+	viper.SetDefault("agent.time_based_compact.enabled", false)
+	viper.SetDefault("agent.time_based_compact.gap_threshold_minutes", 60)
+	viper.SetDefault("agent.time_based_compact.keep_recent", 5)
 	viper.SetDefault("tools.bash_timeout", 120)
 	viper.SetDefault("tools.bash_max_output", 30000)
 	viper.SetDefault("tools.result_truncation", 30000)
@@ -409,6 +433,14 @@ type overlayAgentConfig struct {
 	IdleSoftTimeoutSecs *int  `yaml:"idle_soft_timeout_secs"`
 	IdleHardTimeoutSecs *int  `yaml:"idle_hard_timeout_secs"`
 	SkillDiscovery      *bool `yaml:"skill_discovery"`
+
+	TimeBasedCompact *overlayTimeBasedCompactConfig `yaml:"time_based_compact"`
+}
+
+type overlayTimeBasedCompactConfig struct {
+	Enabled             *bool `yaml:"enabled"`
+	GapThresholdMinutes *int  `yaml:"gap_threshold_minutes"`
+	KeepRecent          *int  `yaml:"keep_recent"`
 }
 
 type overlayToolsConfig struct {
@@ -622,6 +654,20 @@ func mergeRuntimeOverlayFile(cfg *Config, file string, level string) {
 		if overlay.Agent.SkillDiscovery != nil {
 			cfg.Agent.SkillDiscovery = overlay.Agent.SkillDiscovery
 			cfg.Sources["agent.skill_discovery"] = src
+		}
+		if overlay.Agent.TimeBasedCompact != nil {
+			if overlay.Agent.TimeBasedCompact.Enabled != nil {
+				cfg.Agent.TimeBasedCompact.Enabled = *overlay.Agent.TimeBasedCompact.Enabled
+				cfg.Sources["agent.time_based_compact.enabled"] = src
+			}
+			if overlay.Agent.TimeBasedCompact.GapThresholdMinutes != nil {
+				cfg.Agent.TimeBasedCompact.GapThresholdMinutes = *overlay.Agent.TimeBasedCompact.GapThresholdMinutes
+				cfg.Sources["agent.time_based_compact.gap_threshold_minutes"] = src
+			}
+			if overlay.Agent.TimeBasedCompact.KeepRecent != nil {
+				cfg.Agent.TimeBasedCompact.KeepRecent = *overlay.Agent.TimeBasedCompact.KeepRecent
+				cfg.Sources["agent.time_based_compact.keep_recent"] = src
+			}
 		}
 	}
 

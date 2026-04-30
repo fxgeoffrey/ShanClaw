@@ -14,6 +14,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -38,8 +40,11 @@ func appendCacheDebug(entry map[string]any) {
 	if path == "" {
 		return
 	}
-	// Ensure parent dir exists; silent on failure (never block request)
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	// Ensure parent dir exists; silent on failure (never block request).
+	// 0700/0600 matches dumpRawForDebug and audit.go — even though this log
+	// holds only hashes/lengths (no message bytes), keeping the same posture
+	// avoids accidental loosening on multi-user machines.
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return
 	}
 	data, _ := json.Marshal(entry)
@@ -52,7 +57,7 @@ func appendCacheDebug(entry map[string]any) {
 	if info, err := os.Stat(path); err == nil && info.Size() > cacheDebugMaxBytes {
 		_ = rotateCacheDebugLog(path)
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600)
 	if err != nil {
 		return
 	}
@@ -75,7 +80,7 @@ func rotateCacheDebugLog(path string) error {
 	if idx < 0 {
 		return nil // single giant line — don't touch
 	}
-	return os.WriteFile(path, content[mid+idx+1:], 0644)
+	return os.WriteFile(path, content[mid+idx+1:], 0600)
 }
 
 // logCacheDebug appends a "dir":"req" JSON line containing content hashes
@@ -84,6 +89,13 @@ func rotateCacheDebugLog(path string) error {
 // to logCacheResponse so the response's cache_creation / cache_read tokens
 // can be joined to the same request line. Silent on any error; never
 // affects the request.
+//
+// Two diagnostic depths:
+//   - SHANNON_CACHE_DEBUG=1    → JSON line with rollup hashes + per-tool +
+//     per-message hash ladders (cheap, default for triage).
+//   - SHANNON_CACHE_DEBUG_RAW=1 → in addition, full tools[]/messages[]/system
+//     bytes are dumped to ~/.shannon/logs/cache-debug-raw/<req_id>/ so two
+//     adjacent requests can be byte-diffed (heavy, opt-in).
 func logCacheDebug(req CompletionRequest, tag string) string {
 	if os.Getenv("SHANNON_CACHE_DEBUG") != "1" {
 		return ""
@@ -93,23 +105,83 @@ func logCacheDebug(req CompletionRequest, tag string) string {
 		return hex.EncodeToString(sum[:6])
 	}
 	var systemBytes, firstUserBytes, lastUserBytes []byte
-	for _, m := range req.Messages {
-		b, _ := json.Marshal(m.Content)
+
+	// Per-message hash ladder. Hash the WHOLE marshalled message (role+content
+	// +name+tool_call_id) — this is what the wire body actually contains, and
+	// what Anthropic's prefix matcher sees. Tracking position-by-position lets
+	// us spot middle-of-history byte drift (e.g. Tier compression rewriting an
+	// older tool_result) that the rollup first_user_h / last_user_h hashes hide.
+	//
+	// For messages with structured content (multi-block user turns containing
+	// tool_result blocks), additionally emit a per-block ladder so the analyst
+	// can pinpoint which block inside a multi-block message drifted — the
+	// minimum unit compressOldToolResults / micro-compact actually mutate.
+	msgHashes := make([]map[string]any, 0, len(req.Messages))
+	for i, m := range req.Messages {
+		mb, _ := json.Marshal(m)
+		entry := map[string]any{
+			"i":    i,
+			"role": m.Role,
+			"hash": h(mb),
+			"len":  len(mb),
+		}
+		if m.Content.HasBlocks() {
+			blocks := m.Content.Blocks()
+			ladder := make([]map[string]any, 0, len(blocks))
+			for _, b := range blocks {
+				bb, _ := json.Marshal(b)
+				bEntry := map[string]any{
+					"type": b.Type,
+					"hash": h(bb),
+					"len":  len(bb),
+				}
+				if b.CompressedTier != 0 {
+					bEntry["tier"] = b.CompressedTier
+				}
+				ladder = append(ladder, bEntry)
+			}
+			entry["blocks"] = ladder
+		}
+		msgHashes = append(msgHashes, entry)
+		cb, _ := json.Marshal(m.Content)
 		switch m.Role {
 		case "system":
-			systemBytes = b
+			systemBytes = cb
 		case "user":
 			if firstUserBytes == nil {
-				firstUserBytes = b
+				firstUserBytes = cb
 			}
-			lastUserBytes = b
+			lastUserBytes = cb
 		}
 	}
+
+	// Per-tool hash list. Anthropic's prefix matcher hashes the tools[] array
+	// in source order; if any single tool's marshalled bytes drift (e.g.
+	// defer_loading flag flips after tool_search warms it), we need to know
+	// WHICH tool changed, not just the rolled-up tools_h.
+	toolHashes := make([]map[string]any, 0, len(req.Tools))
+	for _, t := range req.Tools {
+		tb, _ := json.Marshal(t)
+		name := t.Name
+		if name == "" {
+			name = t.Function.Name
+		}
+		entry := map[string]any{
+			"name": name,
+			"hash": h(tb),
+			"len":  len(tb),
+		}
+		if t.DeferLoading {
+			entry["defer"] = true
+		}
+		toolHashes = append(toolHashes, entry)
+	}
+
 	toolsJSON, _ := json.Marshal(req.Tools)
 	var idBuf [6]byte
 	_, _ = rand.Read(idBuf[:])
 	reqID := hex.EncodeToString(idBuf[:])
-	appendCacheDebug(map[string]any{
+	entry := map[string]any{
 		"ts":             time.Now().Format(time.RFC3339Nano),
 		"dir":            "req",
 		"req_id":         reqID,
@@ -126,8 +198,159 @@ func logCacheDebug(req CompletionRequest, tag string) string {
 		"first_user_len": len(firstUserBytes),
 		"last_user_h":    h(lastUserBytes),
 		"last_user_len":  len(lastUserBytes),
-	})
+		"tool_hashes":    toolHashes,
+		"msg_hashes":     msgHashes,
+	}
+	// SHANNON_FORCE_TTL surfaces operator overrides ({off,5m,1h}). Absent →
+	// gateway uses cache_source → TTL routing (see docs/cache-strategy.md).
+	// Logged only when set so normal-operation logs stay tidy.
+	if v := os.Getenv("SHANNON_FORCE_TTL"); v != "" {
+		entry["force_ttl"] = v
+	}
+	appendCacheDebug(entry)
+
+	if os.Getenv("SHANNON_CACHE_DEBUG_RAW") == "1" {
+		dumpRawForDebug(reqID, req)
+	}
 	return reqID
+}
+
+// dumpRawForDebug writes the request's tools[], messages[] and system content
+// as pretty-printed JSON files keyed by req_id under
+// ~/.shannon/logs/cache-debug-raw/<req_id>/. Caller verifies the env flag.
+// All errors silent — diagnostic dump must never affect the request path.
+//
+// After writing, the parent directory is rotated to keep only the N most
+// recent dumps (LRU by ModTime). N defaults to 100; override via
+// SHANNON_CACHE_DEBUG_RAW_MAX. Long sessions previously accumulated 1000+
+// dirs uncapped.
+func dumpRawForDebug(reqID string, req CompletionRequest) {
+	home, err := os.UserHomeDir()
+	if home == "" || err != nil {
+		return
+	}
+	parent := filepath.Join(home, ".shannon", "logs", "cache-debug-raw")
+	dir := filepath.Join(parent, reqID)
+	// 0700/0600: dumps contain the full LLM request (user messages, tool inputs,
+	// and any secrets injected into bash results). Restrict to the owning user.
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return
+	}
+	if b, err := json.MarshalIndent(req.Tools, "", "  "); err == nil {
+		_ = os.WriteFile(filepath.Join(dir, "tools.json"), b, 0600)
+	}
+	if b, err := json.MarshalIndent(req.Messages, "", "  "); err == nil {
+		_ = os.WriteFile(filepath.Join(dir, "messages.json"), b, 0600)
+	}
+	// Pull system content out separately for quick inspection.
+	for _, m := range req.Messages {
+		if m.Role == "system" {
+			if b, err := json.MarshalIndent(m.Content, "", "  "); err == nil {
+				_ = os.WriteFile(filepath.Join(dir, "system.json"), b, 0600)
+			}
+			break
+		}
+	}
+	rotateRawDumpDir(parent, rawDumpMaxEntries())
+}
+
+const cacheDebugRawDefaultMax = 100
+
+// rawDumpMaxEntries returns the configured cap. SHANNON_CACHE_DEBUG_RAW_MAX
+// must parse as a positive int; anything else falls back to the default.
+func rawDumpMaxEntries() int {
+	v := strings.TrimSpace(os.Getenv("SHANNON_CACHE_DEBUG_RAW_MAX"))
+	if v == "" {
+		return cacheDebugRawDefaultMax
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return cacheDebugRawDefaultMax
+	}
+	return n
+}
+
+// rotateRawDumpDir keeps the N most recent immediate subdirectories of dir
+// (sorted by ModTime descending) and RemoveAll's the rest. Best-effort —
+// silent on any error so a transient FS hiccup never poisons the request
+// path.
+func rotateRawDumpDir(dir string, max int) {
+	if max <= 0 {
+		return
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	type rec struct {
+		name string
+		mod  time.Time
+	}
+	recs := make([]rec, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		recs = append(recs, rec{name: e.Name(), mod: info.ModTime()})
+	}
+	if len(recs) <= max {
+		return
+	}
+	// Newest first, then trim the tail.
+	sort.Slice(recs, func(i, j int) bool { return recs[i].mod.After(recs[j].mod) })
+	for _, r := range recs[max:] {
+		_ = os.RemoveAll(filepath.Join(dir, r.name))
+	}
+}
+
+// LogCacheCompactEvent records that an in-place message-content rewrite
+// occurred, changing the wire bytes of a position in the prefix. The agent
+// loop's compaction passes (Tier 1 strip-to-metadata, Tier 2 micro-compact
+// or head+tail truncation, time-based microcompact) all mutate
+// `messages[idx].Content` and are the ONLY legitimate sources of mid-history
+// byte drift. Without these events, a `system_h` or `msg_hashes[k]` flip in
+// the next req log line gives no clue WHY the bytes changed.
+//
+// Joins to neighboring req/resp lines by timestamp ordering — events fire
+// just before the next LLM call, so a `dir:"compact"` line followed by a
+// `dir:"req"` line on the same session is the standard correlation.
+//
+// Action vocabulary (free-form, but use these for analyzability):
+//   - "tier1"     — stripToMetadata (Anthropic native blocks)
+//   - "tier1_xml" — XML-format truncation
+//   - "tier2"     — head+tail truncation or micro-compact summary
+//   - "tbcompact" — time-based microcompact (timebasedcompact.go)
+//   - "tbclear"   — time-based result clear (replaces with sentinel)
+//
+// Silent when SHANNON_CACHE_DEBUG != "1". Skips no-op rewrites where bytes
+// are unchanged (idempotent re-visit on already-compacted blocks).
+func LogCacheCompactEvent(action string, msgIndex int, oldContent, newContent MessageContent) {
+	if os.Getenv("SHANNON_CACHE_DEBUG") != "1" {
+		return
+	}
+	ob, _ := json.Marshal(oldContent)
+	nb, _ := json.Marshal(newContent)
+	if bytes.Equal(ob, nb) {
+		return
+	}
+	h := func(b []byte) string {
+		sum := sha256.Sum256(b)
+		return hex.EncodeToString(sum[:6])
+	}
+	appendCacheDebug(map[string]any{
+		"ts":       time.Now().Format(time.RFC3339Nano),
+		"dir":      "compact",
+		"action":   action,
+		"msg_idx":  msgIndex,
+		"old_hash": h(ob),
+		"new_hash": h(nb),
+		"old_len":  len(ob),
+		"new_len":  len(nb),
+	})
 }
 
 // logCacheResponse appends a "dir":"resp" JSON line joined to the request
@@ -184,6 +407,18 @@ type ContentBlock struct {
 	ToolUseID   string `json:"tool_use_id,omitempty"`
 	IsError     bool   `json:"is_error,omitempty"`
 	ToolContent any    `json:"-"` // string or []ContentBlock; serialized as "content" for tool_result
+	// CompressedTier records that an agent-loop compaction pass has visited
+	// this tool_result block. Once non-zero, further passes leave ToolContent
+	// alone so the wire bytes stay byte-stable across iterations — Anthropic's
+	// prompt-cache prefix matcher diverges at the first changed byte. Values:
+	//   0 = uncompressed (eligible for first pass)
+	//   1 = stripped to Tier 1 metadata (the most aggressive form)
+	//   2 = visited at Tier 2 (LLM micro-compact summary or head+tail truncation)
+	// The numbering is "recency tier" (lower number = older message = more
+	// compressed), not "compression order" — the loop sets Tier 2 first when
+	// micro-compact runs, then Tier 1 strips deeper on later passes.
+	// Never serialized; agent-internal state only.
+	CompressedTier int `json:"-"`
 	// ToolName is set when Type == "tool_reference" (deferred-tool expansion hint
 	// returned by tool_search). Anthropic expands the full schema server-side
 	// for deferred tools referenced by name. Only populated for tool_reference blocks.

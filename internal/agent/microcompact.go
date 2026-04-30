@@ -68,6 +68,7 @@ func microCompactResult(ctx context.Context, c ctxwin.Completer, toolName, conte
 		ModelTier:   "small",
 		Temperature: 0.0,
 		MaxTokens:   200,
+		CacheSource: "helper",
 	})
 	if err != nil || resp.OutputText == "" {
 		return "", false, client.Usage{}

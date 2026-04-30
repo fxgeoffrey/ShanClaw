@@ -605,6 +605,7 @@ func discoverRelevantSkills(ctx context.Context, c ctxwin.Completer, userText st
 		ModelTier:   "small",
 		Temperature: 0.0,
 		MaxTokens:   30,
+		CacheSource: "helper",
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[skill-discovery] error: %v\n", err)

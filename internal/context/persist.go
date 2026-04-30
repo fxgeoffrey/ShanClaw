@@ -108,6 +108,7 @@ func PersistLearnings(ctx context.Context, c Completer, messages []client.Messag
 		ModelTier:   "small",
 		Temperature: 0.2,
 		MaxTokens:   1000,
+		CacheSource: "helper",
 	}
 
 	resp, err := c.Complete(ctx, req)
@@ -296,6 +297,7 @@ func ConsolidateMemory(ctx context.Context, c Completer, memoryDir string) (clie
 		ModelTier:   "small",
 		Temperature: 0.2,
 		MaxTokens:   2000,
+		CacheSource: "helper",
 	}
 
 	resp, err := c.Complete(ctx, req)

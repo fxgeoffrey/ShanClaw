@@ -442,6 +442,20 @@ type AgentLoop struct {
 	skillDiscovery    bool              // call small-tier model on first turn to identify relevant skills (default true)
 	sentSkillNames    map[string]bool   // delta tracking: skills already announced to the LLM (persists across Run() calls)
 
+	// Time-based microcompact (see internal/agent/timebasedcompact.go).
+	// Default disabled. When enabled, fires only when (now - lastAssistantAt)
+	// exceeds GapThresholdMinutes — i.e. only when the prompt cache has
+	// reliably expired so clearing tool_result content costs no cache hits.
+	// Replaces the old per-iter compressOldToolResults call site at the
+	// pre-LLM step. The reactive compaction paths still call
+	// compressOldToolResults directly under context-pressure.
+	timeBasedCompactCfg TimeBasedCompactConfig
+	// lastAssistantAt is updated to time.Now() after every successful LLM
+	// response. Persists across Run() calls when the AgentLoop instance is
+	// reused (e.g. routed daemon sessions, TUI). Zero-valued for fresh loops
+	// — evaluateTimeBasedCompactTrigger short-circuits in that case.
+	lastAssistantAt time.Time
+
 	// Watchdog thresholds (0 = disabled). The watchdog observes the loop's
 	// phase tracker and only measures duration in "idle-counted" phases
 	// (PhaseAwaitingLLM, PhaseForceStop) — see phase.go. Tool execution,
@@ -754,6 +768,14 @@ func (a *AgentLoop) SetSkills(s []*skills.Skill) {
 	a.agentSkills = s
 }
 
+// SetTimeBasedCompactConfig wires the time-gated tool_result clearing
+// config. Default disabled (DefaultTimeBasedCompactConfig). Only fires
+// when (now - lastAssistantAt) > GapThresholdMinutes, so a fresh session
+// never compacts on its first turn even with Enabled = true.
+func (a *AgentLoop) SetTimeBasedCompactConfig(cfg TimeBasedCompactConfig) {
+	a.timeBasedCompactCfg = cfg
+}
+
 // SetSkillDiscovery enables or disables the first-turn skill discovery call.
 // When enabled (default), a small-tier model identifies relevant skills and
 // injects a hint before the main LLM call.
@@ -945,7 +967,13 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	deferred := deferredToolNames(a.tools)
 	loadedDeferred := preseedDeferredSchemas(a.workingSet, deferred)
 	coldDeferred := remainingDeferredNames(deferred, loadedDeferred)
-	deferredMode := len(coldDeferred) > 0 && shouldDefer(a.tools, a.tools.SortedNames(), schemaTokenBudget)
+	// Trigger deferred mode when EITHER the total schema budget is exceeded
+	// OR any cold deferred tool belongs to an always-defer category. The
+	// categorical clause lets us shrink cold-start tools[] for one-shot CLI
+	// even when total tokens stay under schemaTokenBudget.
+	deferredMode := len(coldDeferred) > 0 &&
+		(shouldDefer(a.tools, a.tools.SortedNames(), schemaTokenBudget) ||
+			hasCategoricalDeferred(coldDeferred))
 
 	// sessionCWD may legitimately be empty for daemon runs that arrive without
 	// a CWD (pure web / reasoning tasks). Do NOT fall back to os.Getwd() here:
@@ -970,6 +998,33 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	}
 	basePrompt := persona + coreOperationalRules + contrastExamplesCore
 	usage := &TurnUsage{}
+
+	// Per-Run cache tracker. Records main-tier LLM responses only (helper
+	// calls have their own cache_source="helper" namespace). Emits a single
+	// "cache_summary" audit entry at Run exit for always-on cliff detection
+	// without requiring SHANNON_CACHE_DEBUG=1. See cache-action-plan §1.3.
+	cacheTracker := &CacheTracker{}
+	defer func() {
+		if a.auditor == nil {
+			return
+		}
+		s := cacheTracker.Summary()
+		if s.Calls == 0 {
+			return // nothing recorded — skip the empty entry
+		}
+		a.auditor.Log(audit.AuditEntry{
+			Timestamp:           time.Now(),
+			SessionID:           a.sessionID,
+			Event:               "cache_summary",
+			Source:              a.cacheSource,
+			Calls:               s.Calls,
+			CacheCreationTokens: int(s.CCTotal),
+			CacheReadTokens:     int(s.CRTotal),
+			CER:                 s.CER,
+			TailCERLast3:        s.TailCERLast3,
+			WarmStart:           s.WarmStart,
+		})
+	}()
 
 	// Memory consolidation: merge auto-*.md detail files when accumulated.
 	// Runs at most once per 7 days, only when ≥12 detail files exist.
@@ -1059,7 +1114,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		effTools = a.tools.Clone()
 		effTools.Register(tsSearch)
 
-		baseSchemas = buildLocalOnlySchemas(effTools)
+		baseSchemas = buildLocalActiveSchemas(effTools, coldDeferred)
 		toolSchemas = baseSchemas
 		if len(loadedDeferred) > 0 {
 			toolSchemas = rebuildSchemas(effTools, baseSchemas, loadedDeferred)
@@ -1417,6 +1472,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			return "", err
 		}
 		usage.Add(finalResp.Usage)
+		cacheTracker.Record(finalResp.Usage)
 		a.reportLLMUsage(finalResp.Usage, finalResp.Model)
 
 		text := strings.TrimSpace(finalResp.OutputText)
@@ -1669,8 +1725,18 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		// Filter old screenshots to stay within context budget
 		filterOldImages(messages, maxRecentImages)
 
-		// Compress old tool results to save context (keep recent turns verbose)
-		compressOldToolResults(a.ctxWithUsageEmit(ctx), messages, compressAfter, maxResultChars, a.client)
+		// Time-based microcompact (see timebasedcompact.go). No-op unless
+		// Enabled AND the gap since the last assistant response exceeds
+		// GapThresholdMinutes. The default config is Enabled=false, so
+		// per-iter compaction is OFF for typical sessions — short sessions
+		// never compact, and only sessions that idle past the 1h Anthropic
+		// prompt-cache TTL ceiling trigger a one-shot clearing pass when
+		// the next turn arrives.
+		//
+		// Reactive context-pressure paths still call compressOldToolResults
+		// directly (loop.go ~1961/1980); those run only on
+		// context-length-overflow recovery and are gated by reactiveCompacted.
+		_ = timeBasedCompact(messages, a.lastAssistantAt, a.timeBasedCompactCfg)
 
 		// Progress checkpoint at ~60% of effective limit
 		if !checkpointDone && totalToolCalls > 0 {
@@ -1897,6 +1963,9 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				resp, err = a.client.Complete(ctx, req)
 			}
 			if err == nil {
+				// Mark "last assistant response received" for the time-based
+				// microcompact gap calculation (timebasedcompact.go).
+				a.lastAssistantAt = time.Now()
 				break
 			}
 			if ctx.Err() != nil {
@@ -2102,6 +2171,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 
 		normalizedUsage := resp.Usage.Normalized()
 		usage.Add(normalizedUsage)
+		cacheTracker.Record(normalizedUsage)
 		// Emit incremental usage delta to handler for accumulation/persistence.
 		// Handler sums these into session totals. Model is carried so the last-seen
 		// model wins at the session level (handler decides its own precedence).
@@ -2414,7 +2484,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			}
 
 			// Permission check
-			decision, wasApproved := a.checkPermissionAndApproval(ctx, fc.Name, argsStr, tool, resp.OutputText, approvalCache)
+			decision, wasApproved := a.checkPermissionAndApproval(ctx, fc.Name, argsStr, tool, approvalCache)
 			callMeta[idx].decision = decision
 			callMeta[idx].wasApproved = wasApproved
 			if decision == "deny" {
@@ -2932,6 +3002,7 @@ func (a *AgentLoop) completeWithRetry(ctx context.Context, req client.Completion
 	for attempt := 0; ; attempt++ {
 		resp, err = a.client.Complete(ctx, req)
 		if err == nil {
+			a.lastAssistantAt = time.Now()
 			return resp, nil
 		}
 		if ctx.Err() != nil {
@@ -3047,7 +3118,7 @@ func classifyLLMError(err error) string {
 // wasApproved is true if the tool call should proceed.
 // The approvalCache tracks previously approved tool+args combinations within
 // the current turn so the user is not asked twice for the same call.
-func (a *AgentLoop) checkPermissionAndApproval(ctx context.Context, toolName, argsStr string, tool Tool, outputText string, cache *ApprovalCache) (string, bool) {
+func (a *AgentLoop) checkPermissionAndApproval(ctx context.Context, toolName, argsStr string, tool Tool, cache *ApprovalCache) (string, bool) {
 	// Bypass mode: skip all permission checks including hard-blocks
 	if a.bypassPermissions {
 		return "allow", true
@@ -3491,7 +3562,9 @@ func filterOldImages(messages []client.Message, keep int) {
 				newBlocks = append(newBlocks, b)
 			}
 		}
+		oldContent := messages[idx].Content
 		messages[idx].Content = client.NewBlockContent(newBlocks)
+		client.LogCacheCompactEvent("img_strip", idx, oldContent, messages[idx].Content)
 	}
 }
 
@@ -3573,11 +3646,22 @@ func buildToolCallMap(messages []client.Message) map[string]toolCallInfo {
 }
 
 // stripToMetadata replaces tool_result content with a metadata-only summary.
+//
+// Skips blocks already marked CompressedTier > 0: a block previously
+// micro-compacted at Tier 2 stays as that ~300-char summary (more useful
+// than ~80-char metadata, and any rewrite breaks Anthropic's prompt-cache
+// prefix); a block already at Tier 1 stays byte-stable instead of letting
+// origLen ratchet down on every pass. See
+// docs/issues/cache-message-prefix-invalidation.md.
 func stripToMetadata(mc client.MessageContent, toolCallMap map[string]toolCallInfo) client.MessageContent {
 	blocks := mc.Blocks()
 	var newBlocks []client.ContentBlock
 	for _, b := range blocks {
 		if b.Type != "tool_result" {
+			newBlocks = append(newBlocks, b)
+			continue
+		}
+		if b.CompressedTier != 0 {
 			newBlocks = append(newBlocks, b)
 			continue
 		}
@@ -3591,6 +3675,7 @@ func stripToMetadata(mc client.MessageContent, toolCallMap map[string]toolCallIn
 		origLen := toolContentLength(b.ToolContent)
 		meta := fmt.Sprintf("[%s called with %s] → [result: %d chars, snipped]", name, args, origLen)
 		b.ToolContent = meta
+		b.CompressedTier = 1
 		newBlocks = append(newBlocks, b)
 	}
 	return client.NewBlockContent(newBlocks)
@@ -3685,17 +3770,22 @@ func compressOldToolResults(ctx context.Context, messages []client.Message, keep
 
 		if distFromEnd >= tier1Threshold && !hasTier2FloorTool(msg, toolCallMap) {
 			// Tier 1: strip to metadata
+			oldContent := msg.Content
 			if msg.Role == "user" && msg.Content.HasBlocks() {
 				messages[idx].Content = stripToMetadata(msg.Content, toolCallMap)
+				client.LogCacheCompactEvent("tier1", idx, oldContent, messages[idx].Content)
 			} else {
 				// XML text: aggressive truncation to just tool name
 				text := msg.Content.Text()
 				compressed := compressToolResultText(text, 50)
 				messages[idx].Content = client.NewTextContent(compressed)
+				client.LogCacheCompactEvent("tier1_xml", idx, oldContent, messages[idx].Content)
 			}
 		} else if distFromEnd >= keepRecent {
 			// Tier 2: LLM summary for large results, else head+tail truncation.
+			oldContent := msg.Content
 			messages[idx].Content = compressTier2(ctx, msg, maxChars, completer, toolCallMap, &mcCount)
+			client.LogCacheCompactEvent("tier2", idx, oldContent, messages[idx].Content)
 		}
 	}
 }
@@ -3754,11 +3844,22 @@ func compressTier2(ctx context.Context, msg client.Message, maxChars int, comple
 }
 
 // compressTier2Blocks handles native tool_result blocks for Tier 2.
+//
+// Skips blocks already marked CompressedTier > 0 to keep their wire bytes
+// stable across iterations (Anthropic's prompt-cache prefix matcher diverges
+// at the first changed byte). After any first-time visit — micro-compact,
+// mechanical truncation, or no-op for already-small content — the block is
+// marked CompressedTier = 2 so subsequent Tier 2 AND Tier 1 passes treat it
+// as terminal. See docs/issues/cache-message-prefix-invalidation.md.
 func compressTier2Blocks(ctx context.Context, mc client.MessageContent, maxChars int, completer ctxwin.Completer, toolCallMap map[string]toolCallInfo, mcCount *int) client.MessageContent {
 	blocks := mc.Blocks()
 	var newBlocks []client.ContentBlock
 	for _, b := range blocks {
 		if b.Type != "tool_result" {
+			newBlocks = append(newBlocks, b)
+			continue
+		}
+		if b.CompressedTier != 0 {
 			newBlocks = append(newBlocks, b)
 			continue
 		}
@@ -3786,6 +3887,7 @@ func compressTier2Blocks(ctx context.Context, mc client.MessageContent, maxChars
 					LLMCalls:              1,
 				})
 				b.ToolContent = summary
+				b.CompressedTier = 2
 				newBlocks = append(newBlocks, b)
 				continue
 			}
@@ -3811,6 +3913,7 @@ func compressTier2Blocks(ctx context.Context, mc client.MessageContent, maxChars
 			}
 			b.ToolContent = newNested
 		}
+		b.CompressedTier = 2
 		newBlocks = append(newBlocks, b)
 	}
 	return client.NewBlockContent(newBlocks)
@@ -3828,41 +3931,6 @@ func truncateHeadTail(content string, maxChars int) string {
 	return string(r[:keepHead]) + "\n\n[... truncated " +
 		strconv.Itoa(len(r)-maxChars) + " chars ...]\n\n" +
 		string(r[len(r)-keepTail:])
-}
-
-// compressToolResultBlocks truncates the text content inside tool_result blocks.
-func compressToolResultBlocks(mc client.MessageContent, maxChars int) client.MessageContent {
-	blocks := mc.Blocks()
-	var newBlocks []client.ContentBlock
-	for _, b := range blocks {
-		if b.Type != "tool_result" {
-			newBlocks = append(newBlocks, b)
-			continue
-		}
-		switch v := b.ToolContent.(type) {
-		case string:
-			if len([]rune(v)) > maxChars {
-				b.ToolContent = truncateHeadTail(v, maxChars)
-			}
-		case []client.ContentBlock:
-			var newNested []client.ContentBlock
-			for _, nb := range v {
-				if nb.Type == "text" {
-					if len([]rune(nb.Text)) > maxChars {
-						nb.Text = truncateHeadTail(nb.Text, maxChars)
-					}
-				}
-				// Strip images in compressed results
-				if nb.Type == "image" {
-					nb = client.ContentBlock{Type: "text", Text: "[image removed to save context]"}
-				}
-				newNested = append(newNested, nb)
-			}
-			b.ToolContent = newNested
-		}
-		newBlocks = append(newBlocks, b)
-	}
-	return client.NewBlockContent(newBlocks)
 }
 
 // compressToolResultText compresses individual tool call results within an assistant message.

@@ -467,3 +467,22 @@ func skillNames(ss []*skills.Skill) []string {
 	}
 	return out
 }
+
+// Helper-tier callers must tag CacheSource="helper". See cache-action-plan §1.1.
+func TestDiscoverRelevantSkills_TagsHelperCacheSource(t *testing.T) {
+	loaded := []*skills.Skill{
+		{Name: "alpha", Description: "alpha skill"},
+		{Name: "beta", Description: "beta skill"},
+	}
+	var captured client.CompletionRequest
+	mock := &mockFnCompleter{
+		fn: func(ctx context.Context, req client.CompletionRequest) (*client.CompletionResponse, error) {
+			captured = req
+			return &client.CompletionResponse{OutputText: "none"}, nil
+		},
+	}
+	_, _ = discoverRelevantSkills(context.Background(), mock, "do something with alpha", loaded)
+	if captured.CacheSource != "helper" {
+		t.Errorf("discoverRelevantSkills CacheSource = %q, want %q", captured.CacheSource, "helper")
+	}
+}

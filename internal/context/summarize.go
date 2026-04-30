@@ -86,6 +86,7 @@ func GenerateSummary(ctx context.Context, c Completer, messages []client.Message
 		ModelTier:   "small",
 		Temperature: 0.2,
 		MaxTokens:   2000,
+		CacheSource: "helper",
 	}
 
 	resp, err := c.Complete(ctx, req)
@@ -116,6 +117,7 @@ func SummarizeForUser(ctx context.Context, c Completer, messages []client.Messag
 		ModelTier:   "small",
 		Temperature: 0.2,
 		MaxTokens:   2000,
+		CacheSource: "helper",
 	}
 
 	resp, err := c.Complete(ctx, req)

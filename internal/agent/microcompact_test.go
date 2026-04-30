@@ -13,13 +13,15 @@ import (
 
 // mockCompleter returns a fixed response for micro-compact tests.
 type mockCompleter struct {
-	output string
-	calls  int
-	usage  client.Usage
+	output  string
+	calls   int
+	usage   client.Usage
+	lastReq client.CompletionRequest
 }
 
 func (m *mockCompleter) Complete(ctx context.Context, req client.CompletionRequest) (*client.CompletionResponse, error) {
 	m.calls++
+	m.lastReq = req
 	return &client.CompletionResponse{OutputText: m.output, Usage: m.usage}, nil
 }
 
@@ -478,5 +480,18 @@ func TestMicroCompact_ReturnsUsage(t *testing.T) {
 	}
 	if usage.InputTokens != 200 || usage.CostUSD != 0.0005 {
 		t.Errorf("usage not propagated: got %+v", usage)
+	}
+}
+
+// Helper-tier callers must tag CacheSource="helper". See cache-action-plan §1.1.
+func TestMicroCompact_TagsHelperCacheSource(t *testing.T) {
+	mc := &mockCompleter{output: "summary text"}
+	content := strings.Repeat("data ", 1000)
+	_, _, _ = microCompactResult(context.Background(), mc, "bash", content)
+	if mc.calls == 0 {
+		t.Fatal("microCompactResult did not invoke the completer")
+	}
+	if got := mc.lastReq.CacheSource; got != "helper" {
+		t.Errorf("microCompactResult CacheSource = %q, want %q", got, "helper")
 	}
 }

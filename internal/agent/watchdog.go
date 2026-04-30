@@ -16,8 +16,8 @@ var ErrHardIdleTimeout = errors.New("agent: hard idle timeout exceeded")
 // override via runWatchdogWithTick.
 const defaultWatchdogTick = 1 * time.Second
 
-// runWatchdog spawns a goroutine that polls the phase tracker and fires
-// onSoft / onHard when an idle-counted phase exceeds the configured
+// runWatchdogWithTick spawns a goroutine that polls the phase tracker and
+// fires onSoft / onHard when an idle-counted phase exceeds the configured
 // thresholds. Returns a stop func — defer it right after the call so every
 // Run() exit path releases the goroutine.
 //
@@ -33,18 +33,8 @@ const defaultWatchdogTick = 1 * time.Second
 //     phase type — re-arms soft.
 //   - If tracker.Invalid() is ever observed, the watchdog disables itself
 //     for the remainder of the run (silently, no events, no cancel).
-func runWatchdog(
-	parent context.Context,
-	tracker *phaseTracker,
-	softTimeout, hardTimeout time.Duration,
-	onSoft func(phase TurnPhase, idle time.Duration),
-	onHard func(phase TurnPhase, idle time.Duration),
-	cancelCause func(error),
-) (stop func()) {
-	return runWatchdogWithTick(parent, tracker, softTimeout, hardTimeout,
-		defaultWatchdogTick, onSoft, onHard, cancelCause)
-}
-
+//   - tick controls the polling interval; production uses
+//     defaultWatchdogTick, tests pass a faster value.
 func runWatchdogWithTick(
 	parent context.Context,
 	tracker *phaseTracker,

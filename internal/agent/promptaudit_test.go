@@ -46,12 +46,12 @@ func TestSystemPromptAudit(t *testing.T) {
 		"tool_search", "use_skill",
 	}
 	parts := prompt.BuildSystemPrompt(prompt.PromptOptions{
-		BasePrompt:    basePrompt,
-		ToolNames:     tools,
-		MemoryDir:     "/Users/test/.shannon/agents/sample",
-		ContextWindow: 200000,
-		ModelID:       "claude-sonnet-4-6",
-		OutputFormat:  "markdown",
+		BasePrompt:     basePrompt,
+		LocalToolNames: tools,
+		MemoryDir:      "/Users/test/.shannon/agents/sample",
+		ContextWindow:  200000,
+		ModelID:        "claude-sonnet-4-6",
+		OutputFormat:   "markdown",
 	})
 
 	t.Logf("--- Assembled system prompt ---")

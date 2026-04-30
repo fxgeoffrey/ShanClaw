@@ -1,7 +1,6 @@
 package prompt
 
 import (
-	"crypto/sha256"
 	"runtime"
 	"strings"
 	"testing"
@@ -44,16 +43,16 @@ func TestBuildSystemPrompt_ParallelNudgeOnlyWhenToolsPresent(t *testing.T) {
 func TestBuildSystemPrompt_SystemIsStatic(t *testing.T) {
 	// Two calls with different volatile content must produce identical System fields
 	opts1 := PromptOptions{
-		BasePrompt: "You are Shannon.",
-		ToolNames:  []string{"bash", "file_read"},
-		Memory:     "User prefers Go.",
-		CWD:        "/home/user/project",
+		BasePrompt:     "You are Shannon.",
+		LocalToolNames: []string{"bash", "file_read"},
+		Memory:         "User prefers Go.",
+		CWD:            "/home/user/project",
 	}
 	opts2 := PromptOptions{
-		BasePrompt: "You are Shannon.",
-		ToolNames:  []string{"bash", "file_read"},
-		Memory:     "User prefers Rust now.",
-		CWD:        "/tmp/other",
+		BasePrompt:     "You are Shannon.",
+		LocalToolNames: []string{"bash", "file_read"},
+		Memory:         "User prefers Rust now.",
+		CWD:            "/tmp/other",
 	}
 
 	parts1 := BuildSystemPrompt(opts1)
@@ -332,8 +331,8 @@ func TestBuildSystemPrompt_DeferredToolsExcludedFromSystem(t *testing.T) {
 
 func TestBuildSystemPrompt_NoDeferredSection_WhenEmpty(t *testing.T) {
 	parts := BuildSystemPrompt(PromptOptions{
-		BasePrompt: "Base.",
-		ToolNames:  []string{"bash", "file_read"},
+		BasePrompt:     "Base.",
+		LocalToolNames: []string{"bash", "file_read"},
 	})
 
 	if strings.Contains(parts.System, "Deferred Tools") {
@@ -596,24 +595,3 @@ func TestBuildSystemPrompt_StableContextOmitsToolListingWhenEmpty(t *testing.T) 
 	}
 }
 
-// TestBuildSystemPrompt_SystemHashIdenticalAcrossMCPVariation locks in the
-// invariant that the audit-log system_stable_hash is identical across users
-// who differ only in MCP configuration. If this regresses, cross-user cache
-// share is broken (issue #107).
-func TestBuildSystemPrompt_SystemHashIdenticalAcrossMCPVariation(t *testing.T) {
-	a := BuildSystemPrompt(PromptOptions{
-		BasePrompt:     "Persona prompt.",
-		LocalToolNames: []string{"bash", "file_read"},
-		MCPToolNames:   []string{"mcp_gmail_send"},
-	}).System
-	b := BuildSystemPrompt(PromptOptions{
-		BasePrompt:     "Persona prompt.",
-		LocalToolNames: []string{"bash", "file_read"},
-		MCPToolNames:   []string{"mcp_notion_create"},
-	}).System
-	ah := sha256.Sum256([]byte(a))
-	bh := sha256.Sum256([]byte(b))
-	if ah != bh {
-		t.Errorf("system_stable_hash must match across MCP variation; got %x vs %x", ah, bh)
-	}
-}

@@ -27,8 +27,6 @@ type PromptOptions struct {
 	BasePrompt   string   // persona + core operational rules
 	Memory       string   // from LoadMemory (~500 tokens budget) — rendered in VolatileContext
 	Instructions string   // from LoadInstructions (~4000 tokens budget) — rendered in StableContext so it joins the cacheable prefix
-	ToolNames    []string // from ToolRegistry.SortedNames(), deterministic
-	ServerTools  []string // server tool names (optional)
 	// LocalToolNames is the deterministic-ordered list of locally-registered
 	// tool names (built-ins like file_read, bash, etc.). Rendered in the
 	// system prompt's "## Available Tools" line. Excludes MCP and gateway

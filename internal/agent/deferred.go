@@ -205,7 +205,7 @@ func liveToolNames(schemas []client.Tool) []string {
 // ToolRegistry.partitionBySource. Used by the agent loop to feed
 // prompt.BuildSystemPrompt's per-source fields without disturbing the live
 // schema ordering. See issue #107 (cross-user BP #1 byte stability).
-func partitionLiveToolNamesBySource(reg *ToolRegistry, names []string) (local, mcp, gw []string) {
+func partitionLiveToolNamesBySource(reg *ToolRegistry, names []string) (local, mcp, gateway []string) {
 	for _, name := range names {
 		t, ok := reg.Get(name)
 		if !ok {
@@ -221,7 +221,7 @@ func partitionLiveToolNamesBySource(reg *ToolRegistry, names []string) (local, m
 		case SourceMCP:
 			mcp = append(mcp, name)
 		case SourceGateway:
-			gw = append(gw, name)
+			gateway = append(gateway, name)
 		default:
 			local = append(local, name)
 		}

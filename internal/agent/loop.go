@@ -1146,14 +1146,14 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	// by origin so the system prompt only contains the byte-stable local set,
 	// while MCP/gateway names ride the user message via BuildToolListing
 	// (BP #3, per-session). Issue #107.
-	localNames, mcpNames, gwNames := partitionLiveToolNamesBySource(effTools, toolNames)
+	localNames, mcpNames, gatewayNames := partitionLiveToolNamesBySource(effTools, toolNames)
 	parts := prompt.BuildSystemPrompt(prompt.PromptOptions{
 		BasePrompt:       basePrompt,
 		Memory:           mem,
 		Instructions:     instrText,
 		LocalToolNames:   localNames,
 		MCPToolNames:     mcpNames,
-		GatewayToolNames: gwNames,
+		GatewayToolNames: gatewayNames,
 		DeferredTools:    deferredSummaries,
 		MCPContext:       a.mcpContext,
 		CWD:              cwd,

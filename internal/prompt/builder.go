@@ -51,7 +51,9 @@ type PromptOptions struct {
 	// source/channel/task metadata, or by callers needing persistent session facts.
 	StickyContext string
 	// DeferredTools lists tools available via tool_search (deferred mode only).
-	// Rendered in the static system prompt. Empty when not in deferred mode.
+	// Rendered in BuildToolListing for injection into StableContext (user
+	// message, BP #3). Excluded from the system prompt for BP #1 byte
+	// stability. See issue #107. Empty when not in deferred mode.
 	DeferredTools []DeferredToolSummary
 	// ModelID is the model identifier (e.g., "claude-sonnet-4-20250514").
 	// Injected into volatile context so the model knows its own identity.
@@ -144,7 +146,12 @@ func buildStaticSystem(opts PromptOptions) string {
 	// ONE response collapses N iterations → 1, keeping the rolling marker
 	// reachable. Only add when tools are actually registered — tool-less
 	// agents would just pay extra cached-prefix tokens.
-	if len(opts.LocalToolNames) > 0 || len(opts.MCPToolNames) > 0 || len(opts.GatewayToolNames) > 0 {
+	// Gate the nudge on LocalToolNames only — MCP/Gateway tool names are
+	// per-user and live outside the system prompt (issue #107). Including
+	// them here would create a theoretical BP #1 drift surface for the
+	// degenerate "MCP-only, zero local tools" agent (does not exist in
+	// production but worth keeping out of the byte-equality contract).
+	if len(opts.LocalToolNames) > 0 {
 		sb.WriteString("\n\nWhen you need independent pieces of information " +
 			"(read multiple files, check several conditions, fetch data from different sources), " +
 			"prefer calling ALL the tools in a SINGLE response with multiple parallel tool_use blocks " +

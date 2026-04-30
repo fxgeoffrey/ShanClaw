@@ -61,6 +61,12 @@ type AuditEntry struct {
 	CER          float64 `json:"cer,omitempty"`
 	TailCERLast3 float64 `json:"tail_cer_last3,omitempty"`
 	WarmStart    bool    `json:"warm_start,omitempty"`
+
+	// SystemStableHash is a 16-char hex sha256-prefix of the system prompt
+	// (BP #1 / system_stable). Populated on cache_summary entries so cross-user
+	// cache-share rates can be measured: distinct hash counts within a TTL
+	// window indicate residual per-user drift in BP #1. See issue #107.
+	SystemStableHash string `json:"system_stable_hash,omitempty"`
 }
 
 // MarshalJSON forces CER and TailCERLast3 to appear in cache_summary rows

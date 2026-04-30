@@ -1,6 +1,7 @@
 package prompt
 
 import (
+	"crypto/sha256"
 	"runtime"
 	"strings"
 	"testing"
@@ -573,5 +574,27 @@ func TestBuildSystemPrompt_StableContextOmitsToolListingWhenEmpty(t *testing.T) 
 	})
 	if strings.Contains(parts.StableContext, "## Dynamic Tools") {
 		t.Error("StableContext should not have ## Dynamic Tools when no dynamic tools present")
+	}
+}
+
+// TestBuildSystemPrompt_SystemHashIdenticalAcrossMCPVariation locks in the
+// invariant that the audit-log system_stable_hash is identical across users
+// who differ only in MCP configuration. If this regresses, cross-user cache
+// share is broken (issue #107).
+func TestBuildSystemPrompt_SystemHashIdenticalAcrossMCPVariation(t *testing.T) {
+	a := BuildSystemPrompt(PromptOptions{
+		BasePrompt:     "Persona prompt.",
+		LocalToolNames: []string{"bash", "file_read"},
+		MCPToolNames:   []string{"mcp_gmail_send"},
+	}).System
+	b := BuildSystemPrompt(PromptOptions{
+		BasePrompt:     "Persona prompt.",
+		LocalToolNames: []string{"bash", "file_read"},
+		MCPToolNames:   []string{"mcp_notion_create"},
+	}).System
+	ah := sha256.Sum256([]byte(a))
+	bh := sha256.Sum256([]byte(b))
+	if ah != bh {
+		t.Errorf("system_stable_hash must match across MCP variation; got %x vs %x", ah, bh)
 	}
 }

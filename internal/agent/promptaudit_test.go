@@ -146,10 +146,9 @@ func splitBySection(s string) []sectionRange {
 			break
 		}
 		next += idx + 1
-		if strings.HasPrefix(s[next:], "### ") {
-			idx = next + 1
-			continue
-		}
+		// The search pattern "\n## " already excludes "### " sub-headings
+		// (third char differs: space vs '#'), so no extra guard is needed —
+		// s[next:] is guaranteed to start with "## " here.
 		eol := strings.Index(s[next:], "\n")
 		if eol < 0 {
 			eol = len(s) - next

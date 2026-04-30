@@ -50,11 +50,33 @@ type AuditEntry struct {
 	// Source carries the cache_source tag (oneshot_cli/tui/slack/...) for
 	// per-source dashboards. CER and TailCERLast3 are doubles; the Cache*
 	// fields above hold the absolute totals.
+	//
+	// CER and TailCERLast3 keep omitempty here for tool-call rows, but
+	// MarshalJSON below forces them onto cache_summary rows even when 0.0
+	// — that zero IS the worst-case cliff signal we want dashboards to
+	// catch (jq 'select(.cer < 1)' / WHERE cer IS NOT NULL would otherwise
+	// miss the most important row).
 	Calls        int     `json:"calls,omitempty"`
 	Source       string  `json:"source,omitempty"`
 	CER          float64 `json:"cer,omitempty"`
 	TailCERLast3 float64 `json:"tail_cer_last3,omitempty"`
 	WarmStart    bool    `json:"warm_start,omitempty"`
+}
+
+// MarshalJSON forces CER and TailCERLast3 to appear in cache_summary rows
+// even when their value is exactly 0.0. Tool-call rows (Event != "cache_summary")
+// fall through to the default tag-driven marshaling, which keeps them out of
+// the JSON via omitempty. See AuditEntry comment above for rationale.
+func (e AuditEntry) MarshalJSON() ([]byte, error) {
+	type alias AuditEntry
+	if e.Event == "cache_summary" {
+		return json.Marshal(struct {
+			alias
+			CER          float64 `json:"cer"`
+			TailCERLast3 float64 `json:"tail_cer_last3"`
+		}{alias: alias(e), CER: e.CER, TailCERLast3: e.TailCERLast3})
+	}
+	return json.Marshal(alias(e))
 }
 
 // AuditLogger writes audit entries as JSON lines to a log file.

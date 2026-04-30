@@ -453,6 +453,50 @@ func TestAuditLogger_CacheSummary_RoundTrips(t *testing.T) {
 	}
 }
 
+// The CER cliff (zero cache reads) is the single most important diagnostic
+// signal cache_summary exists to surface. omitempty on float64 would silently
+// elide cer=0 / tail_cer_last3=0, hiding the failure mode from dashboards.
+// MarshalJSON must force the field onto every cache_summary row.
+func TestAuditLogger_CacheSummary_CERZero_StillEmitted(t *testing.T) {
+	dir := t.TempDir()
+	logger, err := NewAuditLogger(dir)
+	if err != nil {
+		t.Fatalf("NewAuditLogger: %v", err)
+	}
+	logger.Log(AuditEntry{
+		Timestamp:           time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC),
+		SessionID:           "session-cliff",
+		Event:               "cache_summary",
+		Source:              "tui",
+		Calls:               5,
+		CacheCreationTokens: 12000,
+		CacheReadTokens:     0,
+		CER:                 0,
+		TailCERLast3:        0,
+		WarmStart:           false,
+	})
+	logger.Close()
+
+	data, err := os.ReadFile(filepath.Join(dir, "audit.log"))
+	if err != nil {
+		t.Fatalf("read audit.log: %v", err)
+	}
+	line := strings.TrimSpace(string(data))
+	for _, k := range []string{`"cer":0`, `"tail_cer_last3":0`} {
+		if !strings.Contains(line, k) {
+			t.Errorf("cache_summary row must contain %s for cliff detection; got: %s", k, line)
+		}
+	}
+
+	var decoded AuditEntry
+	if err := json.Unmarshal([]byte(line), &decoded); err != nil {
+		t.Fatalf("parse JSON: %v", err)
+	}
+	if decoded.CER != 0 || decoded.TailCERLast3 != 0 {
+		t.Errorf("CER round-trip: got CER=%v TailCERLast3=%v, want both 0", decoded.CER, decoded.TailCERLast3)
+	}
+}
+
 // A regular tool-call entry must NOT serialize the cache-summary fields,
 // so per-source dashboards don't get polluted with zero values.
 func TestAuditLogger_ToolCallOmitsCacheSummaryFields(t *testing.T) {

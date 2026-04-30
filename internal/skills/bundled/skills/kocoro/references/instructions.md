@@ -16,9 +16,11 @@ Instructions and rules shape how agents behave — their tone, language, formatt
 ### Update global instructions
 - Method: PUT
 - Path: /instructions
-- Body: `{"content": "# Global Instructions\n\nAlways respond concisely..."}`
+- Body (JSON, default): `{"content": "# Global Instructions\n\nAlways respond concisely..."}`
+- Body (raw markdown — preferred for long content): send the markdown verbatim with header `Content-Type: text/markdown` (or `text/plain`). No JSON wrapper, no escaping. With the http tool: `body_from_file: /path/to/source.md` plus `headers: {"Content-Type": "text/markdown"}`.
 - Response: `{"status": "updated"}`
-- Notes: Replaces the entire global instructions file. Include all content you want to keep.
+- Notes: Replaces the entire global instructions file. Include all content you want to keep. Use the raw-markdown path when the content has quotes, backslashes, backticks, or newlines — JSON-string-escaping a long markdown blob by hand is the #1 source of 400 errors here.
+- Delete asymmetry: only the JSON path can delete. `{"content": null}` removes the file; the raw-markdown path is set-only, and a zero-length raw body writes a zero-byte file rather than deleting it.
 
 ### List all rules
 - Method: GET

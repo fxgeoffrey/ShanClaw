@@ -346,3 +346,56 @@ func macOSAutomationGuidance(toolNames []string) string {
 	}
 	return "## macOS Automation\n" + bullets.String()
 }
+
+// BuildToolListing emits a per-user tool catalog (MCP + gateway + deferred)
+// for injection into the user message's StableContext. Returns "" when
+// nothing dynamic is registered.
+//
+// Routing rationale (issue #107): these names vary per user (different MCP
+// configs, different gateway tool sets) and would break BP #1 (system_stable)
+// cross-user byte stability if rendered into the system prompt. The user
+// message's StableContext is a per-session cache (BP #3), which already does
+// not share across users — putting the listing there is zero-cost relative
+// to the original BP #1 placement, while letting BP #1 become byte-stable.
+//
+// The model still discovers MCP/gateway tools from the tools[] array (their
+// authoritative source); this listing is a discovery hint that mirrors what
+// the deprecated "## Available Tools" prose used to provide.
+func BuildToolListing(opts PromptOptions) string {
+	if len(opts.MCPToolNames) == 0 && len(opts.GatewayToolNames) == 0 && len(opts.DeferredTools) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("## Dynamic Tools\n")
+	sb.WriteString("These tools are also available — they vary per user/configuration. " +
+		"Discover full schemas through the tools[] array; the names below are a quick reference.\n")
+
+	if len(opts.MCPToolNames) > 0 {
+		sb.WriteString("\nMCP tools: ")
+		sb.WriteString(strings.Join(opts.MCPToolNames, ", "))
+		sb.WriteString(".")
+	}
+	if len(opts.GatewayToolNames) > 0 {
+		sb.WriteString("\nGateway tools: ")
+		sb.WriteString(strings.Join(opts.GatewayToolNames, ", "))
+		sb.WriteString(".")
+	}
+	if len(opts.DeferredTools) > 0 {
+		sb.WriteString("\n\nDeferred tools (load via `tool_search` before calling):\n")
+		for _, dt := range opts.DeferredTools {
+			desc := dt.Description
+			runes := []rune(desc)
+			if len(runes) > 60 {
+				desc = string(runes[:57]) + "..."
+			}
+			sb.WriteString("- ")
+			sb.WriteString(dt.Name)
+			sb.WriteString(": ")
+			sb.WriteString(desc)
+			sb.WriteString("\n")
+		}
+	}
+
+	return sb.String()
+}

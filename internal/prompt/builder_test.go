@@ -497,3 +497,59 @@ func TestBuildSystemPrompt_SystemExcludesMCPNames(t *testing.T) {
 		t.Error("System must not contain MCP tool names (per-user drift source — see issue #107)")
 	}
 }
+
+func TestBuildToolListing_EmptyWhenNoDynamicTools(t *testing.T) {
+	got := BuildToolListing(PromptOptions{
+		LocalToolNames: []string{"bash", "file_read"},
+	})
+	if got != "" {
+		t.Errorf("expected empty listing when no MCP/gateway/deferred tools; got %q", got)
+	}
+}
+
+func TestBuildToolListing_IncludesMCPNames(t *testing.T) {
+	got := BuildToolListing(PromptOptions{
+		MCPToolNames: []string{"mcp_gmail_send", "mcp_gmail_search"},
+	})
+	if !strings.Contains(got, "mcp_gmail_send") || !strings.Contains(got, "mcp_gmail_search") {
+		t.Errorf("listing missing MCP tool names; got %q", got)
+	}
+	if !strings.Contains(got, "## Dynamic Tools") {
+		t.Errorf("listing missing section heading; got %q", got)
+	}
+}
+
+func TestBuildToolListing_IncludesGatewayNames(t *testing.T) {
+	got := BuildToolListing(PromptOptions{
+		GatewayToolNames: []string{"web_search", "web_fetch"},
+	})
+	if !strings.Contains(got, "web_search") || !strings.Contains(got, "web_fetch") {
+		t.Errorf("listing missing gateway tool names; got %q", got)
+	}
+}
+
+func TestBuildToolListing_IncludesDeferredTools(t *testing.T) {
+	got := BuildToolListing(PromptOptions{
+		DeferredTools: []DeferredToolSummary{
+			{Name: "playwright_click", Description: "Click an element"},
+		},
+	})
+	if !strings.Contains(got, "playwright_click") {
+		t.Errorf("listing missing deferred tool name; got %q", got)
+	}
+	if !strings.Contains(got, "tool_search") {
+		t.Errorf("listing should mention tool_search for loading deferred schemas; got %q", got)
+	}
+}
+
+func TestBuildToolListing_DeferredDescriptionTruncated(t *testing.T) {
+	longDesc := strings.Repeat("x", 200)
+	got := BuildToolListing(PromptOptions{
+		DeferredTools: []DeferredToolSummary{
+			{Name: "long_tool", Description: longDesc},
+		},
+	})
+	if !strings.Contains(got, "...") {
+		t.Errorf("expected truncation marker in long deferred description; got %q", got)
+	}
+}

@@ -157,7 +157,9 @@ func timeBasedCompact(messages []client.Message, lastAssistantAt time.Time, cfg 
 			newBlocks[j] = b
 		}
 		if touched {
+			oldContent := messages[i].Content
 			messages[i].Content = client.NewBlockContent(newBlocks)
+			client.LogCacheCompactEvent("tbclear", i, oldContent, messages[i].Content)
 		}
 	}
 	return cleared

@@ -3527,7 +3527,9 @@ func filterOldImages(messages []client.Message, keep int) {
 				newBlocks = append(newBlocks, b)
 			}
 		}
+		oldContent := messages[idx].Content
 		messages[idx].Content = client.NewBlockContent(newBlocks)
+		client.LogCacheCompactEvent("img_strip", idx, oldContent, messages[idx].Content)
 	}
 }
 
@@ -3733,17 +3735,22 @@ func compressOldToolResults(ctx context.Context, messages []client.Message, keep
 
 		if distFromEnd >= tier1Threshold && !hasTier2FloorTool(msg, toolCallMap) {
 			// Tier 1: strip to metadata
+			oldContent := msg.Content
 			if msg.Role == "user" && msg.Content.HasBlocks() {
 				messages[idx].Content = stripToMetadata(msg.Content, toolCallMap)
+				client.LogCacheCompactEvent("tier1", idx, oldContent, messages[idx].Content)
 			} else {
 				// XML text: aggressive truncation to just tool name
 				text := msg.Content.Text()
 				compressed := compressToolResultText(text, 50)
 				messages[idx].Content = client.NewTextContent(compressed)
+				client.LogCacheCompactEvent("tier1_xml", idx, oldContent, messages[idx].Content)
 			}
 		} else if distFromEnd >= keepRecent {
 			// Tier 2: LLM summary for large results, else head+tail truncation.
+			oldContent := msg.Content
 			messages[idx].Content = compressTier2(ctx, msg, maxChars, completer, toolCallMap, &mcCount)
+			client.LogCacheCompactEvent("tier2", idx, oldContent, messages[idx].Content)
 		}
 	}
 }

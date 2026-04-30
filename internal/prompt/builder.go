@@ -29,6 +29,19 @@ type PromptOptions struct {
 	Instructions string   // from LoadInstructions (~4000 tokens budget) — rendered in StableContext so it joins the cacheable prefix
 	ToolNames    []string // from ToolRegistry.SortedNames(), deterministic
 	ServerTools  []string // server tool names (optional)
+	// LocalToolNames is the deterministic-ordered list of locally-registered
+	// tool names (built-ins like file_read, bash, etc.). Rendered in the
+	// system prompt's "## Available Tools" line. Excludes MCP and gateway
+	// tools so the line stays byte-stable across users with different MCP
+	// configurations — see issue #107.
+	LocalToolNames []string
+	// MCPToolNames is the list of names from MCP-origin tools. Rendered in
+	// BuildToolListing for injection into the user message (StableContext),
+	// not in the system prompt — they vary per user.
+	MCPToolNames []string
+	// GatewayToolNames is the list of names from gateway-origin tools.
+	// Same routing rationale as MCPToolNames.
+	GatewayToolNames []string
 	MCPContext   string   // context from MCP servers (auth info, usage hints)
 	Skills       []*skills.Skill
 	CWD          string // current working directory

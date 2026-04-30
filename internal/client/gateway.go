@@ -14,6 +14,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -106,15 +108,38 @@ func logCacheDebug(req CompletionRequest, tag string) string {
 	// what Anthropic's prefix matcher sees. Tracking position-by-position lets
 	// us spot middle-of-history byte drift (e.g. Tier compression rewriting an
 	// older tool_result) that the rollup first_user_h / last_user_h hashes hide.
+	//
+	// For messages with structured content (multi-block user turns containing
+	// tool_result blocks), additionally emit a per-block ladder so the analyst
+	// can pinpoint which block inside a multi-block message drifted — the
+	// minimum unit compressOldToolResults / micro-compact actually mutate.
 	msgHashes := make([]map[string]any, 0, len(req.Messages))
 	for i, m := range req.Messages {
 		mb, _ := json.Marshal(m)
-		msgHashes = append(msgHashes, map[string]any{
+		entry := map[string]any{
 			"i":    i,
 			"role": m.Role,
 			"hash": h(mb),
 			"len":  len(mb),
-		})
+		}
+		if m.Content.HasBlocks() {
+			blocks := m.Content.Blocks()
+			ladder := make([]map[string]any, 0, len(blocks))
+			for _, b := range blocks {
+				bb, _ := json.Marshal(b)
+				bEntry := map[string]any{
+					"type": b.Type,
+					"hash": h(bb),
+					"len":  len(bb),
+				}
+				if b.CompressedTier != 0 {
+					bEntry["tier"] = b.CompressedTier
+				}
+				ladder = append(ladder, bEntry)
+			}
+			entry["blocks"] = ladder
+		}
+		msgHashes = append(msgHashes, entry)
 		cb, _ := json.Marshal(m.Content)
 		switch m.Role {
 		case "system":
@@ -153,7 +178,7 @@ func logCacheDebug(req CompletionRequest, tag string) string {
 	var idBuf [6]byte
 	_, _ = rand.Read(idBuf[:])
 	reqID := hex.EncodeToString(idBuf[:])
-	appendCacheDebug(map[string]any{
+	entry := map[string]any{
 		"ts":             time.Now().Format(time.RFC3339Nano),
 		"dir":            "req",
 		"req_id":         reqID,
@@ -172,7 +197,14 @@ func logCacheDebug(req CompletionRequest, tag string) string {
 		"last_user_len":  len(lastUserBytes),
 		"tool_hashes":    toolHashes,
 		"msg_hashes":     msgHashes,
-	})
+	}
+	// SHANNON_FORCE_TTL surfaces operator overrides ({off,5m,1h}). Absent →
+	// gateway uses cache_source → TTL routing (see docs/cache-strategy.md).
+	// Logged only when set so normal-operation logs stay tidy.
+	if v := os.Getenv("SHANNON_FORCE_TTL"); v != "" {
+		entry["force_ttl"] = v
+	}
+	appendCacheDebug(entry)
 
 	if os.Getenv("SHANNON_CACHE_DEBUG_RAW") == "1" {
 		dumpRawForDebug(reqID, req)
@@ -184,12 +216,18 @@ func logCacheDebug(req CompletionRequest, tag string) string {
 // as pretty-printed JSON files keyed by req_id under
 // ~/.shannon/logs/cache-debug-raw/<req_id>/. Caller verifies the env flag.
 // All errors silent — diagnostic dump must never affect the request path.
+//
+// After writing, the parent directory is rotated to keep only the N most
+// recent dumps (LRU by ModTime). N defaults to 100; override via
+// SHANNON_CACHE_DEBUG_RAW_MAX. Long sessions previously accumulated 1000+
+// dirs uncapped.
 func dumpRawForDebug(reqID string, req CompletionRequest) {
 	home, err := os.UserHomeDir()
 	if home == "" || err != nil {
 		return
 	}
-	dir := filepath.Join(home, ".shannon", "logs", "cache-debug-raw", reqID)
+	parent := filepath.Join(home, ".shannon", "logs", "cache-debug-raw")
+	dir := filepath.Join(parent, reqID)
 	// 0700/0600: dumps contain the full LLM request (user messages, tool inputs,
 	// and any secrets injected into bash results). Restrict to the owning user.
 	if err := os.MkdirAll(dir, 0700); err != nil {
@@ -210,6 +248,106 @@ func dumpRawForDebug(reqID string, req CompletionRequest) {
 			break
 		}
 	}
+	rotateRawDumpDir(parent, rawDumpMaxEntries())
+}
+
+const cacheDebugRawDefaultMax = 100
+
+// rawDumpMaxEntries returns the configured cap. SHANNON_CACHE_DEBUG_RAW_MAX
+// must parse as a positive int; anything else falls back to the default.
+func rawDumpMaxEntries() int {
+	v := strings.TrimSpace(os.Getenv("SHANNON_CACHE_DEBUG_RAW_MAX"))
+	if v == "" {
+		return cacheDebugRawDefaultMax
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return cacheDebugRawDefaultMax
+	}
+	return n
+}
+
+// rotateRawDumpDir keeps the N most recent immediate subdirectories of dir
+// (sorted by ModTime descending) and RemoveAll's the rest. Best-effort —
+// silent on any error so a transient FS hiccup never poisons the request
+// path.
+func rotateRawDumpDir(dir string, max int) {
+	if max <= 0 {
+		return
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	type rec struct {
+		name string
+		mod  time.Time
+	}
+	recs := make([]rec, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		recs = append(recs, rec{name: e.Name(), mod: info.ModTime()})
+	}
+	if len(recs) <= max {
+		return
+	}
+	// Newest first, then trim the tail.
+	sort.Slice(recs, func(i, j int) bool { return recs[i].mod.After(recs[j].mod) })
+	for _, r := range recs[max:] {
+		_ = os.RemoveAll(filepath.Join(dir, r.name))
+	}
+}
+
+// LogCacheCompactEvent records that an in-place message-content rewrite
+// occurred, changing the wire bytes of a position in the prefix. The agent
+// loop's compaction passes (Tier 1 strip-to-metadata, Tier 2 micro-compact
+// or head+tail truncation, time-based microcompact) all mutate
+// `messages[idx].Content` and are the ONLY legitimate sources of mid-history
+// byte drift. Without these events, a `system_h` or `msg_hashes[k]` flip in
+// the next req log line gives no clue WHY the bytes changed.
+//
+// Joins to neighboring req/resp lines by timestamp ordering — events fire
+// just before the next LLM call, so a `dir:"compact"` line followed by a
+// `dir:"req"` line on the same session is the standard correlation.
+//
+// Action vocabulary (free-form, but use these for analyzability):
+//   - "tier1"     — stripToMetadata (Anthropic native blocks)
+//   - "tier1_xml" — XML-format truncation
+//   - "tier2"     — head+tail truncation or micro-compact summary
+//   - "tbcompact" — time-based microcompact (timebasedcompact.go)
+//   - "tbclear"   — time-based result clear (replaces with sentinel)
+//
+// Silent when SHANNON_CACHE_DEBUG != "1". Skips no-op rewrites where bytes
+// are unchanged (idempotent re-visit on already-compacted blocks).
+func LogCacheCompactEvent(action string, msgIndex int, oldContent, newContent MessageContent) {
+	if os.Getenv("SHANNON_CACHE_DEBUG") != "1" {
+		return
+	}
+	ob, _ := json.Marshal(oldContent)
+	nb, _ := json.Marshal(newContent)
+	if bytes.Equal(ob, nb) {
+		return
+	}
+	h := func(b []byte) string {
+		sum := sha256.Sum256(b)
+		return hex.EncodeToString(sum[:6])
+	}
+	appendCacheDebug(map[string]any{
+		"ts":       time.Now().Format(time.RFC3339Nano),
+		"dir":      "compact",
+		"action":   action,
+		"msg_idx":  msgIndex,
+		"old_hash": h(ob),
+		"new_hash": h(nb),
+		"old_len":  len(ob),
+		"new_len":  len(nb),
+	})
 }
 
 // logCacheResponse appends a "dir":"resp" JSON line joined to the request

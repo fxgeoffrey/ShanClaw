@@ -398,3 +398,34 @@ func TestSummarizePrompt_RequiresStructuredSections(t *testing.T) {
 		}
 	}
 }
+
+// Helper-tier callers must tag CacheSource="helper" so Shannon routes them to
+// the 5m fallback bucket (not the main session's 1h bucket) and analysts can
+// filter them out of cache-debug.log. See docs/issues/cache-action-plan.md §1.1.
+func TestGenerateSummary_TagsHelperCacheSource(t *testing.T) {
+	mock := &mockCompleter{
+		response: &client.CompletionResponse{OutputText: "<summary>x</summary>"},
+	}
+	_, _, _ = GenerateSummary(context.Background(), mock,
+		[]client.Message{{Role: "user", Content: client.NewTextContent("hi")}})
+	if mock.lastReq == nil {
+		t.Fatal("mockCompleter never received a request")
+	}
+	if got := mock.lastReq.CacheSource; got != "helper" {
+		t.Errorf("GenerateSummary CacheSource = %q, want %q", got, "helper")
+	}
+}
+
+func TestSummarizeForUser_TagsHelperCacheSource(t *testing.T) {
+	mock := &mockCompleter{
+		response: &client.CompletionResponse{OutputText: "summary"},
+	}
+	_, _ = SummarizeForUser(context.Background(), mock,
+		[]client.Message{{Role: "user", Content: client.NewTextContent("hi")}})
+	if mock.lastReq == nil {
+		t.Fatal("mockCompleter never received a request")
+	}
+	if got := mock.lastReq.CacheSource; got != "helper" {
+		t.Errorf("SummarizeForUser CacheSource = %q, want %q", got, "helper")
+	}
+}

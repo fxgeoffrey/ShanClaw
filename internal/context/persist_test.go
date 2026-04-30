@@ -615,3 +615,43 @@ func TestPersistLearnings_ReturnsUsage(t *testing.T) {
 		t.Errorf("usage not propagated: got %+v", usage)
 	}
 }
+
+// Helper-tier callers must tag CacheSource="helper". See cache-action-plan §1.1.
+func TestPersistLearnings_TagsHelperCacheSource(t *testing.T) {
+	dir := t.TempDir()
+	mock := &mockCompleter{
+		response: &client.CompletionResponse{OutputText: "- learned thing"},
+	}
+	_, _ = PersistLearnings(context.Background(), mock,
+		[]client.Message{
+			{Role: "user", Content: client.NewTextContent("q")},
+			{Role: "assistant", Content: client.NewTextContent("a")},
+		}, dir)
+	if mock.lastReq == nil {
+		t.Fatal("mockCompleter never received a request")
+	}
+	if got := mock.lastReq.CacheSource; got != "helper" {
+		t.Errorf("PersistLearnings CacheSource = %q, want %q", got, "helper")
+	}
+}
+
+func TestConsolidateMemory_TagsHelperCacheSource(t *testing.T) {
+	dir := t.TempDir()
+	// Seed enough auto-*.md files to clear consolidateThreshold so the LLM call fires.
+	for i := 0; i < consolidateThreshold+1; i++ {
+		fname := filepath.Join(dir, fmt.Sprintf("auto-2026-01-%02d-12-00-aaaaaaaa.md", i+1))
+		if err := os.WriteFile(fname, []byte(fmt.Sprintf("- entry %d", i)), 0644); err != nil {
+			t.Fatalf("seed file: %v", err)
+		}
+	}
+	mock := &mockCompleter{
+		response: &client.CompletionResponse{OutputText: "- consolidated"},
+	}
+	_, _ = ConsolidateMemory(context.Background(), mock, dir)
+	if mock.lastReq == nil {
+		t.Fatal("ConsolidateMemory did not invoke the completer — check threshold/cooldown gates")
+	}
+	if got := mock.lastReq.CacheSource; got != "helper" {
+		t.Errorf("ConsolidateMemory CacheSource = %q, want %q", got, "helper")
+	}
+}

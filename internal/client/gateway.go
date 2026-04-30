@@ -40,8 +40,11 @@ func appendCacheDebug(entry map[string]any) {
 	if path == "" {
 		return
 	}
-	// Ensure parent dir exists; silent on failure (never block request)
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	// Ensure parent dir exists; silent on failure (never block request).
+	// 0700/0600 matches dumpRawForDebug and audit.go — even though this log
+	// holds only hashes/lengths (no message bytes), keeping the same posture
+	// avoids accidental loosening on multi-user machines.
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return
 	}
 	data, _ := json.Marshal(entry)
@@ -54,7 +57,7 @@ func appendCacheDebug(entry map[string]any) {
 	if info, err := os.Stat(path); err == nil && info.Size() > cacheDebugMaxBytes {
 		_ = rotateCacheDebugLog(path)
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600)
 	if err != nil {
 		return
 	}
@@ -77,7 +80,7 @@ func rotateCacheDebugLog(path string) error {
 	if idx < 0 {
 		return nil // single giant line — don't touch
 	}
-	return os.WriteFile(path, content[mid+idx+1:], 0644)
+	return os.WriteFile(path, content[mid+idx+1:], 0600)
 }
 
 // logCacheDebug appends a "dir":"req" JSON line containing content hashes

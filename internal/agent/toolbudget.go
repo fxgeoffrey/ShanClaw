@@ -33,6 +33,7 @@ var alwaysDeferTools = map[string]bool{
 	"screenshot":      true,
 	"applescript":     true,
 	"accessibility":   true,
+	"wait_for":        true,
 	"ghostty":         true,
 	"process":         true,
 	"schedule_create": true,

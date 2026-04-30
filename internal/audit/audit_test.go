@@ -497,6 +497,48 @@ func TestAuditLogger_CacheSummary_CERZero_StillEmitted(t *testing.T) {
 	}
 }
 
+// WarmStart=true is the cross-session cache-reuse signal. Because
+// `warm_start` is omitempty, a regression that always wrote false would
+// look identical to a regression that dropped the field entirely. Lock
+// the wire-level true case so the field actually appears in JSON.
+func TestAuditLogger_CacheSummary_WarmStartTrue_RoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	logger, err := NewAuditLogger(dir)
+	if err != nil {
+		t.Fatalf("NewAuditLogger: %v", err)
+	}
+	logger.Log(AuditEntry{
+		Timestamp:           time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC),
+		SessionID:           "session-warm",
+		Event:               "cache_summary",
+		Source:              "tui",
+		Calls:               7,
+		CacheCreationTokens: 0,
+		CacheReadTokens:     31200,
+		CER:                 4.2,
+		TailCERLast3:        12.5,
+		WarmStart:           true,
+	})
+	logger.Close()
+
+	data, err := os.ReadFile(filepath.Join(dir, "audit.log"))
+	if err != nil {
+		t.Fatalf("read audit.log: %v", err)
+	}
+	line := strings.TrimSpace(string(data))
+	if !strings.Contains(line, `"warm_start":true`) {
+		t.Errorf("cache_summary row must contain warm_start:true; got: %s", line)
+	}
+
+	var decoded AuditEntry
+	if err := json.Unmarshal([]byte(line), &decoded); err != nil {
+		t.Fatalf("parse JSON: %v", err)
+	}
+	if !decoded.WarmStart {
+		t.Errorf("WarmStart round-trip: got false, want true")
+	}
+}
+
 // A regular tool-call entry must NOT serialize the cache-summary fields,
 // so per-source dashboards don't get polluted with zero values.
 func TestAuditLogger_ToolCallOmitsCacheSummaryFields(t *testing.T) {

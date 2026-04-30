@@ -594,6 +594,10 @@ agent:
   idle_soft_timeout_secs: 90       # watchdog: emit "still working" status after this long waiting on the LLM (0 = disabled, default: 90)
   idle_hard_timeout_secs: 0        # watchdog: cancel the run as a soft/partial failure after this long idle (0 = disabled; recommended: 540 once enabled, stays below the 600s gateway timeout)
   skill_discovery: true            # per-turn small-model skill matching (default: true). Set false to disable the prefetch call.
+  time_based_compact:              # time-gated tool_result clearing for prompt-cache stability (off by default — enable per-rollout)
+    enabled: false                 # master switch (default: false)
+    gap_threshold_minutes: 60      # fire when last assistant response is older than this (default: 60)
+    keep_recent: 5                 # number of trailing tool_result blocks to keep per cleanup (default: 5, floor: 1)
 
 # Tool settings
 tools:

@@ -129,19 +129,14 @@ func buildStaticSystem(opts PromptOptions) string {
 		"remain in their original form regardless of response language. " +
 		"Maintain full orthographic correctness — all accents, diacritics, and special characters.")
 
-	// 2. Available Tools (stable once session starts)
+	// 2. Available Tools — only locally-registered tools, byte-stable across
+	// users. MCP and gateway tools are listed in the user message (BuildToolListing)
+	// to keep BP #1 (system_stable) byte-identical across tenants with different
+	// MCP configurations. See issue #107 / docs/cache-strategy.md.
 	sb.WriteString("\n\n## Available Tools\n")
-	if len(opts.ToolNames) > 0 {
+	if len(opts.LocalToolNames) > 0 {
 		sb.WriteString("You have these tools: ")
-		sb.WriteString(strings.Join(opts.ToolNames, ", "))
-		sb.WriteString(".")
-	}
-	if len(opts.ServerTools) > 0 {
-		if len(opts.ToolNames) > 0 {
-			sb.WriteString("\n")
-		}
-		sb.WriteString("You also have server-side tools: ")
-		sb.WriteString(strings.Join(opts.ServerTools, ", "))
+		sb.WriteString(strings.Join(opts.LocalToolNames, ", "))
 		sb.WriteString(".")
 	}
 
@@ -151,7 +146,7 @@ func buildStaticSystem(opts PromptOptions) string {
 	// ONE response collapses N iterations → 1, keeping the rolling marker
 	// reachable. Only add when tools are actually registered — tool-less
 	// agents would just pay extra cached-prefix tokens.
-	if len(opts.ToolNames) > 0 || len(opts.ServerTools) > 0 {
+	if len(opts.LocalToolNames) > 0 || len(opts.MCPToolNames) > 0 || len(opts.GatewayToolNames) > 0 {
 		sb.WriteString("\n\nWhen you need independent pieces of information " +
 			"(read multiple files, check several conditions, fetch data from different sources), " +
 			"prefer calling ALL the tools in a SINGLE response with multiple parallel tool_use blocks " +

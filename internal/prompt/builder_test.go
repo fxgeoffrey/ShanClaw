@@ -14,8 +14,8 @@ import (
 // once msgs * 1.5 exceeds Anthropic's ~20-block auto-lookback.
 func TestBuildSystemPrompt_NudgesParallelToolUse(t *testing.T) {
 	parts := BuildSystemPrompt(PromptOptions{
-		BasePrompt: "Base.",
-		ToolNames:  []string{"file_read", "bash", "grep"},
+		BasePrompt:     "Base.",
+		LocalToolNames: []string{"file_read", "bash", "grep"},
 	})
 
 	// Text signals — must mention parallelism AND the mechanism (tool_use block / single response).
@@ -219,23 +219,27 @@ func TestBuildSystemPrompt_EmptyStableContext(t *testing.T) {
 
 func TestBuildSystemPrompt_SystemContainsToolNames(t *testing.T) {
 	parts := BuildSystemPrompt(PromptOptions{
-		BasePrompt: "Base.",
-		ToolNames:  []string{"file_read", "bash"},
+		BasePrompt:     "Base.",
+		LocalToolNames: []string{"file_read", "bash"},
 	})
 
 	if !strings.Contains(parts.System, "file_read") {
-		t.Error("System should contain tool names")
+		t.Error("System should contain local tool names")
 	}
 }
 
-func TestBuildSystemPrompt_SystemContainsServerToolNames(t *testing.T) {
+// TestBuildSystemPrompt_SystemExcludesGatewayToolNames asserts gateway tool
+// names are NOT in the system prompt — they're routed to BuildToolListing for
+// user-message injection (issue #107). Was previously assertion-of-presence;
+// flipped to assertion-of-absence.
+func TestBuildSystemPrompt_SystemExcludesGatewayToolNames(t *testing.T) {
 	parts := BuildSystemPrompt(PromptOptions{
-		BasePrompt:  "Base.",
-		ServerTools: []string{"web_search"},
+		BasePrompt:       "Base.",
+		GatewayToolNames: []string{"web_search"},
 	})
 
-	if !strings.Contains(parts.System, "web_search") {
-		t.Error("System should contain server tool names")
+	if strings.Contains(parts.System, "web_search") {
+		t.Error("System must not contain gateway tool names (per-user drift source)")
 	}
 }
 
@@ -479,5 +483,42 @@ func TestBuildSystemPrompt_DeferredToolsTruncated(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("deferred tool bullet not found in system prompt")
+	}
+}
+
+// TestBuildSystemPrompt_BP1ByteStableAcrossMCPConfigs locks in the cross-user
+// cache-share invariant from issue #107: two users running the same agent on
+// the same OS but with different MCP server sets must produce byte-identical
+// System (BP #1) content.
+func TestBuildSystemPrompt_BP1ByteStableAcrossMCPConfigs(t *testing.T) {
+	userA := BuildSystemPrompt(PromptOptions{
+		BasePrompt:     "Persona prompt.",
+		LocalToolNames: []string{"bash", "file_read", "file_write"},
+		MCPToolNames:   []string{"mcp_gmail_send", "mcp_gmail_search"},
+	})
+	userB := BuildSystemPrompt(PromptOptions{
+		BasePrompt:     "Persona prompt.",
+		LocalToolNames: []string{"bash", "file_read", "file_write"},
+		MCPToolNames:   []string{"mcp_notion_create", "mcp_notion_query"},
+	})
+
+	if userA.System != userB.System {
+		t.Errorf("System (BP #1) must be byte-identical across users with different MCP configs.\n"+
+			"User A System len=%d\nUser B System len=%d\nDiff would expose per-user drift in BP #1.",
+			len(userA.System), len(userB.System))
+	}
+}
+
+// TestBuildSystemPrompt_SystemExcludesMCPNames guards that MCP tool names
+// never appear in the system prompt — even if the caller mistakenly populates
+// them. Catches regressions where someone adds them back to the prose line.
+func TestBuildSystemPrompt_SystemExcludesMCPNames(t *testing.T) {
+	parts := BuildSystemPrompt(PromptOptions{
+		BasePrompt:     "Base.",
+		LocalToolNames: []string{"bash"},
+		MCPToolNames:   []string{"mcp_gmail_send"},
+	})
+	if strings.Contains(parts.System, "mcp_gmail_send") {
+		t.Error("System must not contain MCP tool names (per-user drift source — see issue #107)")
 	}
 }

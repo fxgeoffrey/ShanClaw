@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"math"
+	"strings"
 )
 
 const (
@@ -16,6 +17,39 @@ const (
 	// charsPerTokenSchema mirrors the context estimator's conservative ratio.
 	charsPerTokenSchema = 3.5
 )
+
+// alwaysDeferTools enumerates local tools whose schemas should start out
+// deferred regardless of the total schema budget. These are categories that
+// most one-shot CLI tasks never use (macOS GUI automation, scheduling,
+// memory-recall, headless process control). Keeping them in the deferred
+// set means cold-start `tools[]` ships ~5K fewer tokens; sessions that DO
+// need them pay one extra `tool_search` round-trip per session.
+//
+// The browser_* prefix is matched separately by shouldDeferByCategory.
+//
+// See docs/issues/cache-action-plan.md §1.2 for the data behind this list.
+var alwaysDeferTools = map[string]bool{
+	"computer":        true,
+	"screenshot":      true,
+	"applescript":     true,
+	"accessibility":   true,
+	"ghostty":         true,
+	"process":         true,
+	"schedule_create": true,
+	"schedule_list":   true,
+	"schedule_remove": true,
+	"schedule_update": true,
+	"memory_recall":   true,
+}
+
+// shouldDeferByCategory reports whether a tool name belongs to a category
+// that should be deferred by default (independent of total schema budget).
+func shouldDeferByCategory(name string) bool {
+	if alwaysDeferTools[name] {
+		return true
+	}
+	return strings.HasPrefix(name, "browser_")
+}
 
 // estimateSchemaTokens returns a heuristic token count for the named tool
 // schemas using compact JSON serialization.

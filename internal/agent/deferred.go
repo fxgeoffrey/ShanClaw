@@ -220,10 +220,41 @@ func buildLocalOnlySchemas(reg *ToolRegistry) []client.Tool {
 	return schemas
 }
 
-// deferredToolNames returns the set of non-local tool names (MCP + gateway).
+// buildLocalActiveSchemas returns local tool schemas with categorical-deferred
+// names filtered out. Used by the legacy deferred path (modelSupportsToolRef
+// false) where defer_loading flags are not honored on the wire — instead we
+// simply omit cold local tools so they're discoverable only via tool_search.
+func buildLocalActiveSchemas(reg *ToolRegistry, cold map[string]bool) []client.Tool {
+	schemas := buildLocalOnlySchemas(reg)
+	if len(cold) == 0 {
+		return schemas
+	}
+	out := make([]client.Tool, 0, len(schemas))
+	for _, s := range schemas {
+		if cold[schemaToolName(s)] {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// deferredToolNames returns the set of tool names that are eligible for
+// deferred loading: MCP + gateway tools plus local tools whose category
+// matches shouldDeferByCategory (rare-use, big-schema families like
+// browser_*, schedule_*, computer, etc. — see toolbudget.go for the list).
+//
+// The actual decision to defer depends on the deferredMode trigger in
+// loop.go, which gates on either total budget overflow OR the presence of
+// any categorical-deferred cold tool.
 func deferredToolNames(reg *ToolRegistry) map[string]bool {
-	_, mcp, gw := reg.partitionBySource()
+	local, mcp, gw := reg.partitionBySource()
 	names := make(map[string]bool, len(mcp)+len(gw))
+	for _, n := range local {
+		if shouldDeferByCategory(n) {
+			names[n] = true
+		}
+	}
 	for _, n := range mcp {
 		names[n] = true
 	}
@@ -231,6 +262,18 @@ func deferredToolNames(reg *ToolRegistry) map[string]bool {
 		names[n] = true
 	}
 	return names
+}
+
+// hasCategoricalDeferred reports whether any name in the cold deferred set
+// belongs to an always-defer category. Used by deferredMode to fire even
+// when total schema tokens stay under schemaTokenBudget.
+func hasCategoricalDeferred(cold map[string]bool) bool {
+	for name := range cold {
+		if shouldDeferByCategory(name) {
+			return true
+		}
+	}
+	return false
 }
 
 // preseedDeferredSchemas filters the session working set down to schemas that

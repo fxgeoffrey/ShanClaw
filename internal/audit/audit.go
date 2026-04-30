@@ -43,6 +43,18 @@ type AuditEntry struct {
 	Model               string  `json:"model,omitempty"`
 	CacheReadTokens     int     `json:"cache_read_tokens,omitempty"`
 	CacheCreationTokens int     `json:"cache_creation_tokens,omitempty"`
+
+	// Cache-summary fields. Populated only when Event=="cache_summary"
+	// (one entry per AgentLoop.Run). All other entries leave these zero
+	// (omitempty keeps the schema clean for tool-call rows).
+	// Source carries the cache_source tag (oneshot_cli/tui/slack/...) for
+	// per-source dashboards. CER and TailCERLast3 are doubles; the Cache*
+	// fields above hold the absolute totals.
+	Calls        int     `json:"calls,omitempty"`
+	Source       string  `json:"source,omitempty"`
+	CER          float64 `json:"cer,omitempty"`
+	TailCERLast3 float64 `json:"tail_cer_last3,omitempty"`
+	WarmStart    bool    `json:"warm_start,omitempty"`
 }
 
 // AuditLogger writes audit entries as JSON lines to a log file.

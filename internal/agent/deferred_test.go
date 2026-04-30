@@ -390,3 +390,132 @@ func TestHasAnyNonDeferred(t *testing.T) {
 		t.Fatal("expected true when at least one tool is non-deferred")
 	}
 }
+
+// Categorical defer (cache-action-plan §1.2) — local tools whose names match
+// shouldDeferByCategory must enter the deferred set even though they are
+// classified as "local" by partitionBySource. Without this, big-schema rare-
+// use tools (browser_*, computer, schedule_*, …) ride the cold-start tools[]
+// for every one-shot CLI session and pay full cache_creation cost.
+
+func TestDeferredToolNames_IncludesLocalCategoricals(t *testing.T) {
+	reg := NewToolRegistry()
+	// Common local tools that must NOT be deferred:
+	reg.Register(&mockTool{name: "bash"})
+	reg.Register(&mockTool{name: "file_read"})
+	reg.Register(&mockTool{name: "file_write"})
+	// Categorical local tools that MUST be deferred:
+	reg.Register(&mockTool{name: "computer"})
+	reg.Register(&mockTool{name: "schedule_create"})
+	reg.Register(&mockTool{name: "browser_navigate"})
+
+	deferred := deferredToolNames(reg)
+
+	mustDefer := []string{"computer", "schedule_create", "browser_navigate"}
+	for _, n := range mustDefer {
+		if !deferred[n] {
+			t.Errorf("expected %q to be in deferred set, got %v", n, mapKeys(deferred))
+		}
+	}
+	mustNotDefer := []string{"bash", "file_read", "file_write"}
+	for _, n := range mustNotDefer {
+		if deferred[n] {
+			t.Errorf("expected %q NOT to be in deferred set", n)
+		}
+	}
+}
+
+func TestDeferredToolNames_BrowserPrefixCovered(t *testing.T) {
+	reg := NewToolRegistry()
+	reg.Register(&mockTool{name: "browser_click"})
+	reg.Register(&mockTool{name: "browser_take_screenshot"})
+	reg.Register(&mockTool{name: "browser_run_code"})
+	reg.Register(&mockTool{name: "file_read"}) // control: must stay non-deferred
+
+	deferred := deferredToolNames(reg)
+
+	for _, name := range []string{"browser_click", "browser_take_screenshot", "browser_run_code"} {
+		if !deferred[name] {
+			t.Errorf("browser_* prefix not covered: %q missing from %v", name, mapKeys(deferred))
+		}
+	}
+	if deferred["file_read"] {
+		t.Error("file_read must remain non-deferred")
+	}
+}
+
+func TestHasCategoricalDeferred(t *testing.T) {
+	cases := []struct {
+		name string
+		cold map[string]bool
+		want bool
+	}{
+		{"empty cold set", map[string]bool{}, false},
+		{"only mcp tools (non-categorical)", map[string]bool{"mcp_a": true}, false},
+		{"contains computer", map[string]bool{"mcp_a": true, "computer": true}, true},
+		{"contains browser_*", map[string]bool{"browser_click": true}, true},
+		{"contains schedule_*", map[string]bool{"schedule_remove": true}, true},
+		{"contains memory_recall", map[string]bool{"memory_recall": true}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasCategoricalDeferred(tc.cold); got != tc.want {
+				t.Errorf("hasCategoricalDeferred(%v) = %v, want %v", tc.cold, got, tc.want)
+			}
+		})
+	}
+}
+
+func mapKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+// Legacy path (modelTier-based; toolRefSupported=false) must filter cold
+// deferred tools out of the active tools[] array. Otherwise categorical local
+// tools ride the wire even though deferredMode triggered.
+func TestBuildLocalActiveSchemas_FiltersCold(t *testing.T) {
+	reg := NewToolRegistry()
+	reg.Register(&mockTool{name: "bash"})
+	reg.Register(&mockTool{name: "file_read"})
+	reg.Register(&mockTool{name: "computer"})
+	reg.Register(&mockTool{name: "schedule_create"})
+	reg.Register(&mockTool{name: "browser_navigate"})
+
+	cold := map[string]bool{"computer": true, "schedule_create": true, "browser_navigate": true}
+
+	schemas := buildLocalActiveSchemas(reg, cold)
+	names := liveToolNames(schemas)
+
+	want := []string{"bash", "file_read"}
+	if len(names) != len(want) {
+		t.Fatalf("expected %d active tools, got %d: %v", len(want), len(names), names)
+	}
+	for _, w := range want {
+		if !containsString(names, w) {
+			t.Errorf("expected %q in active set, got %v", w, names)
+		}
+	}
+	for _, c := range []string{"computer", "schedule_create", "browser_navigate"} {
+		if containsString(names, c) {
+			t.Errorf("cold tool %q must NOT appear in active schemas", c)
+		}
+	}
+}
+
+func TestBuildLocalActiveSchemas_NoColdReturnsAllLocals(t *testing.T) {
+	reg := NewToolRegistry()
+	reg.Register(&mockTool{name: "bash"})
+	reg.Register(&mockTool{name: "file_read"})
+
+	schemas := buildLocalActiveSchemas(reg, nil)
+	if len(schemas) != 2 {
+		t.Errorf("nil cold set: expected 2 schemas, got %d", len(schemas))
+	}
+	schemas = buildLocalActiveSchemas(reg, map[string]bool{})
+	if len(schemas) != 2 {
+		t.Errorf("empty cold set: expected 2 schemas, got %d", len(schemas))
+	}
+}

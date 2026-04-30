@@ -381,3 +381,102 @@ func TestAuditEntry_ApprovedAlwaysPresent(t *testing.T) {
 		})
 	}
 }
+
+// Cache-summary entries (event="cache_summary") carry per-Run cache health
+// metrics. The JSON schema must round-trip without loss so audit-log
+// consumers can build dashboards. See cache-action-plan §1.3.
+func TestAuditLogger_CacheSummary_RoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	logger, err := NewAuditLogger(dir)
+	if err != nil {
+		t.Fatalf("NewAuditLogger: %v", err)
+	}
+
+	entry := AuditEntry{
+		Timestamp:           time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC),
+		SessionID:           "session-xyz",
+		Event:               "cache_summary",
+		Source:              "oneshot_cli",
+		Calls:               11,
+		CacheCreationTokens: 82823,
+		CacheReadTokens:     421719,
+		CER:                 5.09,
+		TailCERLast3:        63.1,
+		WarmStart:           false,
+	}
+	logger.Log(entry)
+	logger.Close()
+
+	data, err := os.ReadFile(filepath.Join(dir, "audit.log"))
+	if err != nil {
+		t.Fatalf("read audit.log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 line, got %d", len(lines))
+	}
+
+	var decoded AuditEntry
+	if err := json.Unmarshal([]byte(lines[0]), &decoded); err != nil {
+		t.Fatalf("parse JSON: %v", err)
+	}
+
+	if decoded.Event != "cache_summary" {
+		t.Errorf("Event = %q, want %q", decoded.Event, "cache_summary")
+	}
+	if decoded.Source != "oneshot_cli" {
+		t.Errorf("Source = %q, want %q", decoded.Source, "oneshot_cli")
+	}
+	if decoded.Calls != 11 {
+		t.Errorf("Calls = %d, want 11", decoded.Calls)
+	}
+	if decoded.CacheCreationTokens != 82823 {
+		t.Errorf("cc = %d, want 82823", decoded.CacheCreationTokens)
+	}
+	if decoded.CacheReadTokens != 421719 {
+		t.Errorf("cr = %d, want 421719", decoded.CacheReadTokens)
+	}
+	if decoded.CER != 5.09 {
+		t.Errorf("CER = %f, want 5.09", decoded.CER)
+	}
+	if decoded.TailCERLast3 != 63.1 {
+		t.Errorf("TailCERLast3 = %f, want 63.1", decoded.TailCERLast3)
+	}
+	if decoded.WarmStart {
+		t.Error("WarmStart should be false")
+	}
+
+	// Sanity: the JSON must include the cache_summary discriminator so
+	// `grep '"event":"cache_summary"' ~/.shannon/logs/audit.log` works.
+	if !strings.Contains(lines[0], `"event":"cache_summary"`) {
+		t.Error("audit line should contain event discriminator for grep filtering")
+	}
+}
+
+// A regular tool-call entry must NOT serialize the cache-summary fields,
+// so per-source dashboards don't get polluted with zero values.
+func TestAuditLogger_ToolCallOmitsCacheSummaryFields(t *testing.T) {
+	dir := t.TempDir()
+	logger, err := NewAuditLogger(dir)
+	if err != nil {
+		t.Fatalf("NewAuditLogger: %v", err)
+	}
+	logger.Log(AuditEntry{
+		Timestamp: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC),
+		SessionID: "s",
+		ToolName:  "bash",
+		Approved:  true,
+	})
+	logger.Close()
+
+	data, err := os.ReadFile(filepath.Join(dir, "audit.log"))
+	if err != nil {
+		t.Fatalf("read audit.log: %v", err)
+	}
+	line := strings.TrimSpace(string(data))
+	for _, k := range []string{`"calls"`, `"source"`, `"cer"`, `"tail_cer_last3"`, `"warm_start"`} {
+		if strings.Contains(line, k) {
+			t.Errorf("tool-call entry leaked cache-summary field %q in %s", k, line)
+		}
+	}
+}

@@ -199,6 +199,36 @@ func liveToolNames(schemas []client.Tool) []string {
 	return names
 }
 
+// partitionLiveToolNamesBySource splits the given live tool name list into
+// local / MCP / gateway buckets. Names not found in the registry (or registered
+// without a ToolSource) fall into the local bucket — same default as
+// ToolRegistry.partitionBySource. Used by the agent loop to feed
+// prompt.BuildSystemPrompt's per-source fields without disturbing the live
+// schema ordering. See issue #107 (cross-user BP #1 byte stability).
+func partitionLiveToolNamesBySource(reg *ToolRegistry, names []string) (local, mcp, gw []string) {
+	for _, name := range names {
+		t, ok := reg.Get(name)
+		if !ok {
+			local = append(local, name)
+			continue
+		}
+		sourcer, hasSource := t.(ToolSourcer)
+		if !hasSource {
+			local = append(local, name)
+			continue
+		}
+		switch sourcer.ToolSource() {
+		case SourceMCP:
+			mcp = append(mcp, name)
+		case SourceGateway:
+			gw = append(gw, name)
+		default:
+			local = append(local, name)
+		}
+	}
+	return
+}
+
 // schemaToolName extracts the tool name from a client.Tool.
 func schemaToolName(t client.Tool) string {
 	if t.Function.Name != "" {

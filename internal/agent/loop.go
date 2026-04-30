@@ -1136,20 +1136,27 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		toolNames = liveToolNames(toolSchemas)
 	}
 
+	// Partition the live tool name set (toolNames = names actually in tools[])
+	// by origin so the system prompt only contains the byte-stable local set,
+	// while MCP/gateway names ride the user message via BuildToolListing
+	// (BP #3, per-session). Issue #107.
+	localNames, mcpNames, gwNames := partitionLiveToolNamesBySource(effTools, toolNames)
 	parts := prompt.BuildSystemPrompt(prompt.PromptOptions{
-		BasePrompt:    basePrompt,
-		Memory:        mem,
-		Instructions:  instrText,
-		ToolNames:     toolNames,
-		DeferredTools: deferredSummaries,
-		MCPContext:    a.mcpContext,
-		CWD:           cwd,
-		Skills:        a.agentSkills,
-		MemoryDir:     a.memoryDir,
-		StickyContext: a.stickyContext,
-		ModelID:       modelID,
-		ContextWindow: a.contextWindow,
-		OutputFormat:  a.outputFormat,
+		BasePrompt:       basePrompt,
+		Memory:           mem,
+		Instructions:     instrText,
+		LocalToolNames:   localNames,
+		MCPToolNames:     mcpNames,
+		GatewayToolNames: gwNames,
+		DeferredTools:    deferredSummaries,
+		MCPContext:       a.mcpContext,
+		CWD:              cwd,
+		Skills:           a.agentSkills,
+		MemoryDir:        a.memoryDir,
+		StickyContext:    a.stickyContext,
+		ModelID:          modelID,
+		ContextWindow:    a.contextWindow,
+		OutputFormat:     a.outputFormat,
 	})
 
 	// Append cloud delegation guidance and cloud-specific contrast example

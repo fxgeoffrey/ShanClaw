@@ -218,6 +218,16 @@ func buildStableContext(opts PromptOptions) string {
 		sb.WriteString(sticky)
 	}
 
+	// Per-user dynamic tool catalog. Routed here (BP #3, per-session cache)
+	// so it never pollutes BP #1 (system_stable, cross-user shared cache).
+	// See issue #107.
+	if listing := BuildToolListing(opts); listing != "" {
+		if sb.Len() > 0 {
+			sb.WriteString("\n\n")
+		}
+		sb.WriteString(listing)
+	}
+
 	// Guarantee a non-empty stable prefix so the gateway attaches a third
 	// cache_control breakpoint (on the user message stable block). When this
 	// is empty the gateway's Anthropic provider falls through its

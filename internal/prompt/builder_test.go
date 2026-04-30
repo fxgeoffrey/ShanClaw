@@ -553,3 +553,25 @@ func TestBuildToolListing_DeferredDescriptionTruncated(t *testing.T) {
 		t.Errorf("expected truncation marker in long deferred description; got %q", got)
 	}
 }
+
+func TestBuildSystemPrompt_StableContextContainsToolListing(t *testing.T) {
+	parts := BuildSystemPrompt(PromptOptions{
+		BasePrompt:   "Base.",
+		MCPToolNames: []string{"mcp_gmail_send"},
+	})
+	if !strings.Contains(parts.StableContext, "mcp_gmail_send") {
+		t.Errorf("StableContext should contain MCP tool listing; got %q", parts.StableContext)
+	}
+	if !strings.Contains(parts.StableContext, "## Dynamic Tools") {
+		t.Errorf("StableContext should contain ## Dynamic Tools heading")
+	}
+}
+
+func TestBuildSystemPrompt_StableContextOmitsToolListingWhenEmpty(t *testing.T) {
+	parts := BuildSystemPrompt(PromptOptions{
+		BasePrompt: "Base.",
+	})
+	if strings.Contains(parts.StableContext, "## Dynamic Tools") {
+		t.Error("StableContext should not have ## Dynamic Tools when no dynamic tools present")
+	}
+}

@@ -14,8 +14,8 @@ import (
 // once msgs * 1.5 exceeds Anthropic's ~20-block auto-lookback.
 func TestBuildSystemPrompt_NudgesParallelToolUse(t *testing.T) {
 	parts := BuildSystemPrompt(PromptOptions{
-		BasePrompt: "Base.",
-		ToolNames:  []string{"file_read", "bash", "grep"},
+		BasePrompt:     "Base.",
+		LocalToolNames: []string{"file_read", "bash", "grep"},
 	})
 
 	// Text signals — must mention parallelism AND the mechanism (tool_use block / single response).
@@ -43,16 +43,16 @@ func TestBuildSystemPrompt_ParallelNudgeOnlyWhenToolsPresent(t *testing.T) {
 func TestBuildSystemPrompt_SystemIsStatic(t *testing.T) {
 	// Two calls with different volatile content must produce identical System fields
 	opts1 := PromptOptions{
-		BasePrompt: "You are Shannon.",
-		ToolNames:  []string{"bash", "file_read"},
-		Memory:     "User prefers Go.",
-		CWD:        "/home/user/project",
+		BasePrompt:     "You are Shannon.",
+		LocalToolNames: []string{"bash", "file_read"},
+		Memory:         "User prefers Go.",
+		CWD:            "/home/user/project",
 	}
 	opts2 := PromptOptions{
-		BasePrompt: "You are Shannon.",
-		ToolNames:  []string{"bash", "file_read"},
-		Memory:     "User prefers Rust now.",
-		CWD:        "/tmp/other",
+		BasePrompt:     "You are Shannon.",
+		LocalToolNames: []string{"bash", "file_read"},
+		Memory:         "User prefers Rust now.",
+		CWD:            "/tmp/other",
 	}
 
 	parts1 := BuildSystemPrompt(opts1)
@@ -219,23 +219,27 @@ func TestBuildSystemPrompt_EmptyStableContext(t *testing.T) {
 
 func TestBuildSystemPrompt_SystemContainsToolNames(t *testing.T) {
 	parts := BuildSystemPrompt(PromptOptions{
-		BasePrompt: "Base.",
-		ToolNames:  []string{"file_read", "bash"},
+		BasePrompt:     "Base.",
+		LocalToolNames: []string{"file_read", "bash"},
 	})
 
 	if !strings.Contains(parts.System, "file_read") {
-		t.Error("System should contain tool names")
+		t.Error("System should contain local tool names")
 	}
 }
 
-func TestBuildSystemPrompt_SystemContainsServerToolNames(t *testing.T) {
+// TestBuildSystemPrompt_SystemExcludesGatewayToolNames asserts gateway tool
+// names are NOT in the system prompt — they're routed to BuildToolListing for
+// user-message injection (issue #107). Was previously assertion-of-presence;
+// flipped to assertion-of-absence.
+func TestBuildSystemPrompt_SystemExcludesGatewayToolNames(t *testing.T) {
 	parts := BuildSystemPrompt(PromptOptions{
-		BasePrompt:  "Base.",
-		ServerTools: []string{"web_search"},
+		BasePrompt:       "Base.",
+		GatewayToolNames: []string{"web_search"},
 	})
 
-	if !strings.Contains(parts.System, "web_search") {
-		t.Error("System should contain server tool names")
+	if strings.Contains(parts.System, "web_search") {
+		t.Error("System must not contain gateway tool names (per-user drift source)")
 	}
 }
 
@@ -300,31 +304,35 @@ func TestBuildSystemPrompt_InstructionsTruncation(t *testing.T) {
 	}
 }
 
-func TestBuildSystemPrompt_DeferredToolsInStaticSystem(t *testing.T) {
+// TestBuildSystemPrompt_DeferredToolsExcludedFromSystem asserts deferred
+// tools are NOT rendered in the system prompt — they vary per user (only
+// appear when total tool count > 30) so they break BP #1 byte stability
+// (issue #107). Routed to BuildToolListing instead.
+func TestBuildSystemPrompt_DeferredToolsExcludedFromSystem(t *testing.T) {
 	parts := BuildSystemPrompt(PromptOptions{
-		BasePrompt: "Base.",
-		ToolNames:  []string{"bash", "file_read", "tool_search"},
+		BasePrompt:     "Base.",
+		LocalToolNames: []string{"bash", "file_read", "tool_search"},
 		DeferredTools: []DeferredToolSummary{
 			{Name: "playwright_click", Description: "Click an element"},
 			{Name: "playwright_type", Description: "Type text"},
 		},
 	})
 
-	if !strings.Contains(parts.System, "## Deferred Tools") {
-		t.Error("System should contain Deferred Tools section")
+	if strings.Contains(parts.System, "## Deferred Tools") {
+		t.Error("System must not contain Deferred Tools section (per-user drift source)")
 	}
-	if !strings.Contains(parts.System, "playwright_click: Click an element") {
-		t.Error("System should list deferred tool summaries")
+	if strings.Contains(parts.System, "playwright_click") {
+		t.Error("System must not contain deferred tool names")
 	}
 	if !strings.Contains(parts.System, "tool_search") {
-		t.Error("System should mention tool_search in available tools")
+		t.Error("System should still mention tool_search (it's a local tool)")
 	}
 }
 
 func TestBuildSystemPrompt_NoDeferredSection_WhenEmpty(t *testing.T) {
 	parts := BuildSystemPrompt(PromptOptions{
-		BasePrompt: "Base.",
-		ToolNames:  []string{"bash", "file_read"},
+		BasePrompt:     "Base.",
+		LocalToolNames: []string{"bash", "file_read"},
 	})
 
 	if strings.Contains(parts.System, "Deferred Tools") {
@@ -453,31 +461,137 @@ func TestMacOSAutomationGuidance_AccessibilityOnly(t *testing.T) {
 	}
 }
 
-func TestBuildSystemPrompt_DeferredToolsTruncated(t *testing.T) {
-	longDesc := strings.Repeat("abcdefghij", 20) // 200 chars
-	opts := PromptOptions{
-		BasePrompt: "You are Shannon.",
-		DeferredTools: []DeferredToolSummary{
-			{Name: "long-tool", Description: longDesc},
-		},
+// TestBuildSystemPrompt_MacOSGuidanceEmitted is an integration-level test
+// for the BuildSystemPrompt → macOSAutomationGuidance path. Catches the
+// regression class where macOSAutomationGuidance reads a stale field that
+// the caller no longer populates (existing macOS unit tests bypass
+// BuildSystemPrompt and call the helper directly, so they don't catch
+// wiring bugs at the call site).
+func TestBuildSystemPrompt_MacOSGuidanceEmitted(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("darwin-only guidance")
 	}
-	p := BuildSystemPrompt(opts)
-	// Find the bullet line for long-tool and assert it's truncated
-	found := false
-	for _, l := range strings.Split(p.System, "\n") {
-		if strings.HasPrefix(l, "- long-tool:") {
-			found = true
-			// Line = "- long-tool: " (13 chars) + up to 60 chars desc
-			// So total <= 75 including trailing newline excluded.
-			if len(l) > 100 {
-				t.Fatalf("deferred tool line too long (%d chars), truncation regressed: %q", len(l), l)
-			}
-			if !strings.HasSuffix(l, "...") {
-				t.Fatalf("expected truncation marker '...' on long desc, got: %q", l)
-			}
-		}
-	}
-	if !found {
-		t.Fatalf("deferred tool bullet not found in system prompt")
+	parts := BuildSystemPrompt(PromptOptions{
+		BasePrompt:     "Base.",
+		LocalToolNames: []string{"accessibility", "bash"},
+	})
+	if !strings.Contains(parts.System, "## macOS Automation") {
+		t.Error("macOS guidance must appear when accessibility is in LocalToolNames")
 	}
 }
+
+// TestBuildSystemPrompt_BP1ByteStableAcrossMCPConfigs locks in the cross-user
+// cache-share invariant from issue #107: two users running the same agent on
+// the same OS but with different MCP server sets must produce byte-identical
+// System (BP #1) content.
+func TestBuildSystemPrompt_BP1ByteStableAcrossMCPConfigs(t *testing.T) {
+	userA := BuildSystemPrompt(PromptOptions{
+		BasePrompt:     "Persona prompt.",
+		LocalToolNames: []string{"bash", "file_read", "file_write"},
+		MCPToolNames:   []string{"mcp_gmail_send", "mcp_gmail_search"},
+	})
+	userB := BuildSystemPrompt(PromptOptions{
+		BasePrompt:     "Persona prompt.",
+		LocalToolNames: []string{"bash", "file_read", "file_write"},
+		MCPToolNames:   []string{"mcp_notion_create", "mcp_notion_query"},
+	})
+
+	if userA.System != userB.System {
+		t.Errorf("System (BP #1) must be byte-identical across users with different MCP configs.\n"+
+			"User A System len=%d\nUser B System len=%d\nDiff would expose per-user drift in BP #1.",
+			len(userA.System), len(userB.System))
+	}
+}
+
+// TestBuildSystemPrompt_SystemExcludesMCPNames guards that MCP tool names
+// never appear in the system prompt — even if the caller mistakenly populates
+// them. Catches regressions where someone adds them back to the prose line.
+func TestBuildSystemPrompt_SystemExcludesMCPNames(t *testing.T) {
+	parts := BuildSystemPrompt(PromptOptions{
+		BasePrompt:     "Base.",
+		LocalToolNames: []string{"bash"},
+		MCPToolNames:   []string{"mcp_gmail_send"},
+	})
+	if strings.Contains(parts.System, "mcp_gmail_send") {
+		t.Error("System must not contain MCP tool names (per-user drift source — see issue #107)")
+	}
+}
+
+func TestBuildToolListing_EmptyWhenNoDynamicTools(t *testing.T) {
+	got := BuildToolListing(PromptOptions{
+		LocalToolNames: []string{"bash", "file_read"},
+	})
+	if got != "" {
+		t.Errorf("expected empty listing when no MCP/gateway/deferred tools; got %q", got)
+	}
+}
+
+func TestBuildToolListing_IncludesMCPNames(t *testing.T) {
+	got := BuildToolListing(PromptOptions{
+		MCPToolNames: []string{"mcp_gmail_send", "mcp_gmail_search"},
+	})
+	if !strings.Contains(got, "mcp_gmail_send") || !strings.Contains(got, "mcp_gmail_search") {
+		t.Errorf("listing missing MCP tool names; got %q", got)
+	}
+	if !strings.Contains(got, "## Dynamic Tools") {
+		t.Errorf("listing missing section heading; got %q", got)
+	}
+}
+
+func TestBuildToolListing_IncludesGatewayNames(t *testing.T) {
+	got := BuildToolListing(PromptOptions{
+		GatewayToolNames: []string{"web_search", "web_fetch"},
+	})
+	if !strings.Contains(got, "web_search") || !strings.Contains(got, "web_fetch") {
+		t.Errorf("listing missing gateway tool names; got %q", got)
+	}
+}
+
+func TestBuildToolListing_IncludesDeferredTools(t *testing.T) {
+	got := BuildToolListing(PromptOptions{
+		DeferredTools: []DeferredToolSummary{
+			{Name: "playwright_click", Description: "Click an element"},
+		},
+	})
+	if !strings.Contains(got, "playwright_click") {
+		t.Errorf("listing missing deferred tool name; got %q", got)
+	}
+	if !strings.Contains(got, "tool_search") {
+		t.Errorf("listing should mention tool_search for loading deferred schemas; got %q", got)
+	}
+}
+
+func TestBuildToolListing_DeferredDescriptionTruncated(t *testing.T) {
+	longDesc := strings.Repeat("x", 200)
+	got := BuildToolListing(PromptOptions{
+		DeferredTools: []DeferredToolSummary{
+			{Name: "long_tool", Description: longDesc},
+		},
+	})
+	if !strings.Contains(got, "...") {
+		t.Errorf("expected truncation marker in long deferred description; got %q", got)
+	}
+}
+
+func TestBuildSystemPrompt_StableContextContainsToolListing(t *testing.T) {
+	parts := BuildSystemPrompt(PromptOptions{
+		BasePrompt:   "Base.",
+		MCPToolNames: []string{"mcp_gmail_send"},
+	})
+	if !strings.Contains(parts.StableContext, "mcp_gmail_send") {
+		t.Errorf("StableContext should contain MCP tool listing; got %q", parts.StableContext)
+	}
+	if !strings.Contains(parts.StableContext, "## Dynamic Tools") {
+		t.Errorf("StableContext should contain ## Dynamic Tools heading")
+	}
+}
+
+func TestBuildSystemPrompt_StableContextOmitsToolListingWhenEmpty(t *testing.T) {
+	parts := BuildSystemPrompt(PromptOptions{
+		BasePrompt: "Base.",
+	})
+	if strings.Contains(parts.StableContext, "## Dynamic Tools") {
+		t.Error("StableContext should not have ## Dynamic Tools when no dynamic tools present")
+	}
+}
+

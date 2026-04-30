@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -1004,6 +1005,10 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	// "cache_summary" audit entry at Run exit for always-on cliff detection
 	// without requiring SHANNON_CACHE_DEBUG=1. See cache-action-plan §1.3.
 	cacheTracker := &CacheTracker{}
+	// systemStableHash is a sha256-prefix of the system prompt (BP #1) for
+	// cross-user cache-share telemetry. Captured by the deferred closure;
+	// assigned after BuildSystemPrompt below. See issue #107.
+	var systemStableHash string
 	defer func() {
 		if a.auditor == nil {
 			return
@@ -1023,6 +1028,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			CER:                 s.CER,
 			TailCERLast3:        s.TailCERLast3,
 			WarmStart:           s.WarmStart,
+			SystemStableHash:    systemStableHash,
 		})
 	}()
 
@@ -1136,20 +1142,27 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		toolNames = liveToolNames(toolSchemas)
 	}
 
+	// Partition the live tool name set (toolNames = names actually in tools[])
+	// by origin so the system prompt only contains the byte-stable local set,
+	// while MCP/gateway names ride the user message via BuildToolListing
+	// (BP #3, per-session). Issue #107.
+	localNames, mcpNames, gatewayNames := partitionLiveToolNamesBySource(effTools, toolNames)
 	parts := prompt.BuildSystemPrompt(prompt.PromptOptions{
-		BasePrompt:    basePrompt,
-		Memory:        mem,
-		Instructions:  instrText,
-		ToolNames:     toolNames,
-		DeferredTools: deferredSummaries,
-		MCPContext:    a.mcpContext,
-		CWD:           cwd,
-		Skills:        a.agentSkills,
-		MemoryDir:     a.memoryDir,
-		StickyContext: a.stickyContext,
-		ModelID:       modelID,
-		ContextWindow: a.contextWindow,
-		OutputFormat:  a.outputFormat,
+		BasePrompt:       basePrompt,
+		Memory:           mem,
+		Instructions:     instrText,
+		LocalToolNames:   localNames,
+		MCPToolNames:     mcpNames,
+		GatewayToolNames: gatewayNames,
+		DeferredTools:    deferredSummaries,
+		MCPContext:       a.mcpContext,
+		CWD:              cwd,
+		Skills:           a.agentSkills,
+		MemoryDir:        a.memoryDir,
+		StickyContext:    a.stickyContext,
+		ModelID:          modelID,
+		ContextWindow:    a.contextWindow,
+		OutputFormat:     a.outputFormat,
 	})
 
 	// Append cloud delegation guidance and cloud-specific contrast example
@@ -1157,6 +1170,16 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	if _, hasCloud := effTools.Get("cloud_delegate"); hasCloud {
 		systemPrompt += cloudDelegationGuidance
 		systemPrompt += contrastExamplesCloud
+	}
+
+	// Compute BP #1 byte-stability fingerprint for the cache_summary audit
+	// row. 8 bytes (16 hex chars) is sufficient for collision detection at
+	// our user-count scale. Hash the FINAL systemPrompt (post-cloud-delegate
+	// concatenation) so what we measure matches what's actually sent. See
+	// issue #107.
+	{
+		h := sha256.Sum256([]byte(systemPrompt))
+		systemStableHash = hex.EncodeToString(h[:8])
 	}
 
 	messages := make([]client.Message, 0)

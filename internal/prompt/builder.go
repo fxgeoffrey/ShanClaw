@@ -27,8 +27,19 @@ type PromptOptions struct {
 	BasePrompt   string   // persona + core operational rules
 	Memory       string   // from LoadMemory (~500 tokens budget) — rendered in VolatileContext
 	Instructions string   // from LoadInstructions (~4000 tokens budget) — rendered in StableContext so it joins the cacheable prefix
-	ToolNames    []string // from ToolRegistry.SortedNames(), deterministic
-	ServerTools  []string // server tool names (optional)
+	// LocalToolNames is the deterministic-ordered list of locally-registered
+	// tool names (built-ins like file_read, bash, etc.). Rendered in the
+	// system prompt's "## Available Tools" line. Excludes MCP and gateway
+	// tools so the line stays byte-stable across users with different MCP
+	// configurations — see issue #107.
+	LocalToolNames []string
+	// MCPToolNames is the list of names from MCP-origin tools. Rendered in
+	// BuildToolListing for injection into the user message (StableContext),
+	// not in the system prompt — they vary per user.
+	MCPToolNames []string
+	// GatewayToolNames is the list of names from gateway-origin tools.
+	// Same routing rationale as MCPToolNames.
+	GatewayToolNames []string
 	MCPContext   string   // context from MCP servers (auth info, usage hints)
 	Skills       []*skills.Skill
 	CWD          string // current working directory
@@ -40,7 +51,9 @@ type PromptOptions struct {
 	// source/channel/task metadata, or by callers needing persistent session facts.
 	StickyContext string
 	// DeferredTools lists tools available via tool_search (deferred mode only).
-	// Rendered in the static system prompt. Empty when not in deferred mode.
+	// Rendered in BuildToolListing for injection into StableContext (user
+	// message, BP #3). Excluded from the system prompt for BP #1 byte
+	// stability. See issue #107. Empty when not in deferred mode.
 	DeferredTools []DeferredToolSummary
 	// ModelID is the model identifier (e.g., "claude-sonnet-4-20250514").
 	// Injected into volatile context so the model knows its own identity.
@@ -116,19 +129,14 @@ func buildStaticSystem(opts PromptOptions) string {
 		"remain in their original form regardless of response language. " +
 		"Maintain full orthographic correctness — all accents, diacritics, and special characters.")
 
-	// 2. Available Tools (stable once session starts)
+	// 2. Available Tools — only locally-registered tools, byte-stable across
+	// users. MCP and gateway tools are listed in the user message (BuildToolListing)
+	// to keep BP #1 (system_stable) byte-identical across tenants with different
+	// MCP configurations. See issue #107 / docs/cache-strategy.md.
 	sb.WriteString("\n\n## Available Tools\n")
-	if len(opts.ToolNames) > 0 {
+	if len(opts.LocalToolNames) > 0 {
 		sb.WriteString("You have these tools: ")
-		sb.WriteString(strings.Join(opts.ToolNames, ", "))
-		sb.WriteString(".")
-	}
-	if len(opts.ServerTools) > 0 {
-		if len(opts.ToolNames) > 0 {
-			sb.WriteString("\n")
-		}
-		sb.WriteString("You also have server-side tools: ")
-		sb.WriteString(strings.Join(opts.ServerTools, ", "))
+		sb.WriteString(strings.Join(opts.LocalToolNames, ", "))
 		sb.WriteString(".")
 	}
 
@@ -138,7 +146,12 @@ func buildStaticSystem(opts PromptOptions) string {
 	// ONE response collapses N iterations → 1, keeping the rolling marker
 	// reachable. Only add when tools are actually registered — tool-less
 	// agents would just pay extra cached-prefix tokens.
-	if len(opts.ToolNames) > 0 || len(opts.ServerTools) > 0 {
+	// Gate the nudge on LocalToolNames only — MCP/Gateway tool names are
+	// per-user and live outside the system prompt (issue #107). Including
+	// them here would create a theoretical BP #1 drift surface for the
+	// degenerate "MCP-only, zero local tools" agent (does not exist in
+	// production but worth keeping out of the byte-equality contract).
+	if len(opts.LocalToolNames) > 0 {
 		sb.WriteString("\n\nWhen you need independent pieces of information " +
 			"(read multiple files, check several conditions, fetch data from different sources), " +
 			"prefer calling ALL the tools in a SINGLE response with multiple parallel tool_use blocks " +
@@ -152,25 +165,12 @@ func buildStaticSystem(opts PromptOptions) string {
 			"Only sequence when later calls genuinely depend on earlier results.")
 	}
 
-	// Skills are listed in the user message (not system prompt) to preserve
-	// cache prefix stability. See buildSkillListing() in loop.go.
-
-	// 3b. Deferred Tools (only in deferred mode) — name + truncated description.
-	// Model calls tool_search to load full schemas on demand.
-	if len(opts.DeferredTools) > 0 {
-		sb.WriteString("\n\n## Deferred Tools\n")
-		sb.WriteString("Load via `tool_search` when needed, then immediately call the loaded tool.\n")
-		for _, dt := range opts.DeferredTools {
-			desc := dt.Description
-			if len(desc) > 60 {
-				desc = desc[:57] + "..."
-			}
-			fmt.Fprintf(&sb, "- %s: %s\n", dt.Name, desc)
-		}
-	}
+	// Skills and dynamic tool listings (MCP, gateway, deferred) are emitted
+	// in the user message (StableContext via BuildToolListing) to keep this
+	// system prompt byte-stable across users. See issue #107.
 
 	// 4. macOS automation guidance (only on darwin with relevant tools)
-	if guidance := macOSAutomationGuidance(opts.ToolNames); guidance != "" {
+	if guidance := macOSAutomationGuidance(opts.LocalToolNames); guidance != "" {
 		sb.WriteString("\n\n")
 		sb.WriteString(guidance)
 	}
@@ -221,6 +221,16 @@ func buildStableContext(opts PromptOptions) string {
 		}
 		sb.WriteString("## Session Facts\n")
 		sb.WriteString(sticky)
+	}
+
+	// Per-user dynamic tool catalog. Routed here (BP #3, per-session cache)
+	// so it never pollutes BP #1 (system_stable, cross-user shared cache).
+	// See issue #107.
+	if listing := BuildToolListing(opts); listing != "" {
+		if sb.Len() > 0 {
+			sb.WriteString("\n\n")
+		}
+		sb.WriteString(listing)
 	}
 
 	// Guarantee a non-empty stable prefix so the gateway attaches a third
@@ -350,4 +360,57 @@ func macOSAutomationGuidance(toolNames []string) string {
 		return ""
 	}
 	return "## macOS Automation\n" + bullets.String()
+}
+
+// BuildToolListing emits a per-user tool catalog (MCP + gateway + deferred)
+// for injection into the user message's StableContext. Returns "" when
+// nothing dynamic is registered.
+//
+// Routing rationale (issue #107): these names vary per user (different MCP
+// configs, different gateway tool sets) and would break BP #1 (system_stable)
+// cross-user byte stability if rendered into the system prompt. The user
+// message's StableContext is a per-session cache (BP #3), which already does
+// not share across users — putting the listing there is zero-cost relative
+// to the original BP #1 placement, while letting BP #1 become byte-stable.
+//
+// The model still discovers MCP/gateway tools from the tools[] array (their
+// authoritative source); this listing is a discovery hint that mirrors what
+// the deprecated "## Available Tools" prose used to provide.
+func BuildToolListing(opts PromptOptions) string {
+	if len(opts.MCPToolNames) == 0 && len(opts.GatewayToolNames) == 0 && len(opts.DeferredTools) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("## Dynamic Tools\n")
+	sb.WriteString("These tools are also available — they vary per user/configuration. " +
+		"Discover full schemas through the tools[] array; the names below are a quick reference.\n")
+
+	if len(opts.MCPToolNames) > 0 {
+		sb.WriteString("\nMCP tools: ")
+		sb.WriteString(strings.Join(opts.MCPToolNames, ", "))
+		sb.WriteString(".")
+	}
+	if len(opts.GatewayToolNames) > 0 {
+		sb.WriteString("\nGateway tools: ")
+		sb.WriteString(strings.Join(opts.GatewayToolNames, ", "))
+		sb.WriteString(".")
+	}
+	if len(opts.DeferredTools) > 0 {
+		sb.WriteString("\n\nDeferred tools (load via `tool_search` before calling):\n")
+		for _, dt := range opts.DeferredTools {
+			desc := dt.Description
+			runes := []rune(desc)
+			if len(runes) > 60 {
+				desc = string(runes[:57]) + "..."
+			}
+			sb.WriteString("- ")
+			sb.WriteString(dt.Name)
+			sb.WriteString(": ")
+			sb.WriteString(desc)
+			sb.WriteString("\n")
+		}
+	}
+
+	return sb.String()
 }

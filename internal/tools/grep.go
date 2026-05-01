@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,11 +25,19 @@ const (
 type GrepTool struct{}
 
 type grepArgs struct {
-	Pattern    string `json:"pattern"`
-	Path       string `json:"path,omitempty"`
-	Glob       string `json:"glob,omitempty"`
-	OutputMode string `json:"output_mode,omitempty"` // "files_with_matches" (default), "content", "count"
-	MaxResults int    `json:"max_results,omitempty"`
+	Pattern       string `json:"pattern"`
+	Path          string `json:"path,omitempty"`
+	Glob          string `json:"glob,omitempty"`
+	OutputMode    string `json:"output_mode,omitempty"` // "files_with_matches" (default), "content", "count"
+	MaxResults    int    `json:"max_results,omitempty"`
+	Type          string `json:"type,omitempty"`
+	HeadLimit     int    `json:"head_limit,omitempty"`
+	Offset        int    `json:"offset,omitempty"`
+	Context       int    `json:"context,omitempty"`
+	BeforeContext int    `json:"before_context,omitempty"`
+	AfterContext  int    `json:"after_context,omitempty"`
+	IgnoreCase    bool   `json:"ignore_case,omitempty"`
+	Multiline     bool   `json:"multiline,omitempty"`
 }
 
 func (t *GrepTool) Info() agent.ToolInfo {
@@ -47,7 +56,15 @@ func (t *GrepTool) Info() agent.ToolInfo {
 					"enum":        []string{"files_with_matches", "content", "count"},
 					"description": "files_with_matches (default): paths only. content: file:line:text — use when you need to read match context. count: per-file match counts.",
 				},
-				"max_results": map[string]any{"type": "integer", "description": fmt.Sprintf("Global cap on output lines (default: %d). In files_with_matches mode caps file paths; in content mode caps match lines; in count mode caps file:count entries.", defaultGrepMaxResults)},
+				"max_results":    map[string]any{"type": "integer", "description": fmt.Sprintf("Global cap on output lines (default: %d). In files_with_matches mode caps file paths; in content mode caps match lines; in count mode caps file:count entries.", defaultGrepMaxResults)},
+				"type":           map[string]any{"type": "string", "description": "ripgrep file type filter, e.g. go, js, ts, py. Requires rg."},
+				"head_limit":     map[string]any{"type": "integer", "description": "Return only this many output lines after offset."},
+				"offset":         map[string]any{"type": "integer", "description": "Skip this many output lines before returning results."},
+				"context":        map[string]any{"type": "integer", "description": "Include N lines before and after each content match."},
+				"before_context": map[string]any{"type": "integer", "description": "Include N lines before each content match."},
+				"after_context":  map[string]any{"type": "integer", "description": "Include N lines after each content match."},
+				"ignore_case":    map[string]any{"type": "boolean", "description": "Case-insensitive search."},
+				"multiline":      map[string]any{"type": "boolean", "description": "Allow multiline regex matching. Requires rg."},
 			},
 		},
 		Required: []string{"pattern"},
@@ -128,6 +145,24 @@ func (t *GrepTool) Run(ctx context.Context, argsJSON string) (agent.ToolResult, 
 	if args.Glob != "" && bin == "rg" {
 		cmdArgs = append(cmdArgs, "--glob", args.Glob)
 	}
+	if args.IgnoreCase {
+		cmdArgs = append(cmdArgs, "-i")
+	}
+	if args.Context > 0 {
+		cmdArgs = append(cmdArgs, "-C", strconv.Itoa(args.Context))
+	}
+	if args.BeforeContext > 0 {
+		cmdArgs = append(cmdArgs, "-B", strconv.Itoa(args.BeforeContext))
+	}
+	if args.AfterContext > 0 {
+		cmdArgs = append(cmdArgs, "-A", strconv.Itoa(args.AfterContext))
+	}
+	if args.Type != "" && bin == "rg" {
+		cmdArgs = append(cmdArgs, "--type", args.Type)
+	}
+	if args.Multiline && bin == "rg" {
+		cmdArgs = append(cmdArgs, "-U")
+	}
 	cmdArgs = append(cmdArgs, args.Pattern, path)
 
 	cmd := exec.CommandContext(runCtx, bin, cmdArgs...)
@@ -173,13 +208,24 @@ func (t *GrepTool) Run(ctx context.Context, argsJSON string) (agent.ToolResult, 
 		scanBuffer = make([]byte, 0, 64*1024)
 	)
 	scanner.Buffer(scanBuffer, 1024*1024) // handle long lines up to 1 MiB
+	offset := args.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	limit := maxResults
+	if args.HeadLimit > 0 && args.HeadLimit < limit {
+		limit = args.HeadLimit
+	}
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
 			continue
 		}
 		total++
-		if total > maxResults {
+		if total <= offset {
+			continue
+		}
+		if len(capped) >= limit {
 			truncated = true
 			continue
 		}

@@ -79,6 +79,62 @@ func TestGrep_CountMode(t *testing.T) {
 	}
 }
 
+func TestGrepTool_TypeHeadLimitAndOffset(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("a.go", "alpha\nmatch one\nmatch two\nmatch three\n")
+	write("b.txt", "match txt\n")
+
+	tool := &GrepTool{}
+	result, err := tool.Run(cwdctx.WithSessionCWD(context.Background(), dir), `{
+		"pattern":"match",
+		"type":"go",
+		"output_mode":"content",
+		"head_limit":1,
+		"offset":1
+	}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("grep error: %s", result.Content)
+	}
+	if strings.Contains(result.Content, "b.txt") {
+		t.Fatalf("type filter leaked txt file: %s", result.Content)
+	}
+	if !strings.Contains(result.Content, "match two") || strings.Contains(result.Content, "match one") {
+		t.Fatalf("offset/head_limit not honored: %s", result.Content)
+	}
+}
+
+func TestGrepTool_ContextAndIgnoreCase(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("before\nTarget\nafter\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tool := &GrepTool{}
+	result, err := tool.Run(cwdctx.WithSessionCWD(context.Background(), dir), `{
+		"pattern":"target",
+		"output_mode":"content",
+		"ignore_case":true,
+		"context":1
+	}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("grep error: %s", result.Content)
+	}
+	if !strings.Contains(result.Content, "before") || !strings.Contains(result.Content, "after") {
+		t.Fatalf("context lines missing: %s", result.Content)
+	}
+}
+
 // TestGrep_InvalidMode rejects unknown output_mode values.
 func TestGrep_InvalidMode(t *testing.T) {
 	tmp := t.TempDir()

@@ -78,6 +78,12 @@ type fileReadEntry struct {
 	when   time.Time
 }
 
+type fileReadKey struct {
+	path   string
+	offset int
+	limit  int
+}
+
 // ReadTracker tracks which files have been read during the current agent turn.
 // Used to enforce read-before-edit: file_edit and file_write on existing files
 // must be preceded by a file_read of that file. Also tracks per-range read
@@ -88,7 +94,7 @@ type fileReadEntry struct {
 type ReadTracker struct {
 	mu        sync.Mutex
 	read      map[string]bool
-	lastReads map[string]fileReadEntry
+	lastReads map[fileReadKey]fileReadEntry
 	cwd       string
 }
 
@@ -96,13 +102,21 @@ type ReadTracker struct {
 func NewReadTracker() *ReadTracker {
 	return &ReadTracker{
 		read:      make(map[string]bool),
-		lastReads: make(map[string]fileReadEntry),
+		lastReads: make(map[fileReadKey]fileReadEntry),
 	}
 }
 
 // SetCWD sets the session CWD used for relative path resolution.
 func (rt *ReadTracker) SetCWD(cwd string) {
 	rt.cwd = cwd
+}
+
+// ResetTurnReads clears per-turn read-before-write state while preserving
+// session-scoped file_read dedup history.
+func (rt *ReadTracker) ResetTurnReads() {
+	rt.mu.Lock()
+	rt.read = make(map[string]bool)
+	rt.mu.Unlock()
 }
 
 // MarkRead records that a file has been read.
@@ -141,13 +155,14 @@ func CheckFileReadDedup(ctx context.Context, path string, offset, limit int, mti
 	if norm == "" {
 		return false, ""
 	}
+	key := fileReadKey{path: norm, offset: offset, limit: limit}
 	rt.mu.Lock()
-	entry, exists := rt.lastReads[norm]
+	entry, exists := rt.lastReads[key]
 	rt.mu.Unlock()
 	if !exists {
 		return false, ""
 	}
-	if entry.mtime.Equal(mtime) && entry.size == size && entry.offset == offset && entry.limit == limit {
+	if entry.mtime.Equal(mtime) && entry.size == size {
 		stub := fmt.Sprintf(
 			"[file unchanged since last read at %s — to force re-read, modify the file or use a different offset/limit range]",
 			entry.when.Format("15:04:05"),
@@ -168,8 +183,9 @@ func RecordFileRead(ctx context.Context, path string, offset, limit int, mtime t
 	if norm == "" {
 		return
 	}
+	key := fileReadKey{path: norm, offset: offset, limit: limit}
 	rt.mu.Lock()
-	rt.lastReads[norm] = fileReadEntry{
+	rt.lastReads[key] = fileReadEntry{
 		mtime:  mtime,
 		size:   size,
 		offset: offset,

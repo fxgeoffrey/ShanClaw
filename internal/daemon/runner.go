@@ -478,6 +478,11 @@ type ServerDeps struct {
 	WSClient        *Client              // WebSocket client for proactive messages
 	SecretsStore    *skills.SecretsStore // skill secrets for env injection
 	MemSvc          *memory.Service      // structured memory orchestrator (Phase 2.3)
+	// ReadTrackerCache holds per-session ReadTrackers so file_read dedup
+	// history persists across the per-message AgentLoop instances created
+	// by RunAgent. nil-safe: callers can leave it unset (each turn falls
+	// back to a fresh tracker, equivalent to pre-fix behavior).
+	ReadTrackerCache *ReadTrackerCache
 }
 
 // Snapshot returns current Config, Registry, and Supervisor under read lock.
@@ -1106,6 +1111,10 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		loop.SetInjectCh(routeInjectCh)
 	}
 	loop.SetSessionID(sess.ID)
+	// Inject the per-session ReadTracker so file_read dedup history persists
+	// across the per-message AgentLoop instances created here. nil-safe: an
+	// unset cache returns a fresh tracker, which keeps the pre-fix behavior.
+	loop.SetReadTracker(deps.ReadTrackerCache.GetOrCreate(sess.ID))
 	loop.SetSessionCWD(effectiveCWD)
 	loop.SetWorkingSet(sessMgr.WorkingSet(sess.ID))
 	// Always set (even nil) to clear paths from a previous run on a reused loop.

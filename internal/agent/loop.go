@@ -438,10 +438,11 @@ type AgentLoop struct {
 	runMsgInjected    []bool           // parallel to runMessages: true = system-injected guardrail/nudge
 	runMsgTimestamps  []time.Time      // parallel to runMessages: when each message was created
 	lastRunStatus     RunStatus
-	toolRefSupported  bool   // true when the configured model supports defer_loading + tool_reference protocol
-	cacheSource       string // tag sent to gateway on every Complete call for prompt-cache TTL routing
-	skillDiscovery    bool              // call small-tier model on first turn to identify relevant skills (default true)
-	sentSkillNames    map[string]bool   // delta tracking: skills already announced to the LLM (persists across Run() calls)
+	toolRefSupported  bool            // true when the configured model supports defer_loading + tool_reference protocol
+	cacheSource       string          // tag sent to gateway on every Complete call for prompt-cache TTL routing
+	skillDiscovery    bool            // call small-tier model on first turn to identify relevant skills (default true)
+	sentSkillNames    map[string]bool // delta tracking: skills already announced to the LLM (persists across Run() calls)
+	readTracker       *ReadTracker    // per-loop: current-turn reads reset each Run; file_read dedup history persists across session Runs
 
 	// Time-based microcompact (see internal/agent/timebasedcompact.go).
 	// Default disabled. When enabled, fires only when (now - lastAssistantAt)
@@ -518,6 +519,7 @@ func NewAgentLoop(gw client.LLMClient, tools *ToolRegistry, modelTier string, sh
 		hookRunner:     hookRunner,
 		workingSet:     NewWorkingSet(),
 		skillDiscovery: true,
+		readTracker:    NewReadTracker(),
 	}
 }
 
@@ -618,6 +620,19 @@ func (a *AgentLoop) SetMCPContext(ctx string) {
 // Empty string is treated as "unknown" (5m fallback) by Shannon.
 func (a *AgentLoop) SetCacheSource(src string) {
 	a.cacheSource = src
+}
+
+// SetReadTracker injects an externally-owned ReadTracker so file_read dedup
+// history can persist across multiple AgentLoop instances within one logical
+// session. Daemon callers create one tracker per session_id and inject it
+// into every per-turn AgentLoop instance — without this, each new turn loses
+// the dedup map (NewAgentLoop creates a fresh tracker by default). Pass nil
+// to keep the default per-loop tracker. Must be called before Run().
+func (a *AgentLoop) SetReadTracker(rt *ReadTracker) {
+	if rt == nil {
+		return
+	}
+	a.readTracker = rt
 }
 
 func (a *AgentLoop) SetBypassPermissions(bypass bool) {
@@ -1315,8 +1330,14 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	// of the messages slice. Call immediately after appending any message.
 	stampMessage := func() { msgTimestamps[len(messages)-1] = time.Now() }
 
-	// Read tracker: enforces read-before-edit for file_edit/file_write
-	readTracker := NewReadTracker()
+	// Read tracker: read-before-edit is per turn, but file_read dedup history is
+	// session-scoped when the same AgentLoop instance is reused across Runs.
+	readTracker := a.readTracker
+	if readTracker == nil {
+		readTracker = NewReadTracker()
+		a.readTracker = readTracker
+	}
+	readTracker.ResetTurnReads()
 	readTracker.SetCWD(cwd)
 	// Pre-seed MEMORY.md as "read" — its content is already in the system prompt,
 	// so the agent can file_edit it directly without a redundant file_read.
@@ -1365,34 +1386,34 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		}
 	}
 	var (
-		detector             = NewLoopDetector()
-		toolsUsed            = make(map[string]int)
-		totalToolCalls       int
-		lastText             string
-		streamingText        strings.Builder // accumulates streaming deltas for cancel recovery
-		truncatedText        strings.Builder // accumulates text from max_tokens continuations
-		continuationCount    int
-		afterCheckpoint      bool
-		checkpointDone       bool
-		nudges               = newNudgeWindow(maxNudges, nudgeWindowIters)
-		hallucinationNudges  int
-		lastPromptTokens     int    // total prompt tokens (input + cache_read + cache_creation) from last LLM response; cached tokens still consume the model's context window
-		lastOutputTokens     int    // actual output tokens from last LLM response
-		compactionSummary    string // cached summary from compaction
-		compactionApplied    bool   // true once messages have been shaped
-		reactiveCompacted    bool   // true once reactive compaction fired (never resets)
-		summaryFailures        int // consecutive summary failures; backs off after 3
+		detector            = NewLoopDetector()
+		toolsUsed           = make(map[string]int)
+		totalToolCalls      int
+		lastText            string
+		streamingText       strings.Builder // accumulates streaming deltas for cancel recovery
+		truncatedText       strings.Builder // accumulates text from max_tokens continuations
+		continuationCount   int
+		afterCheckpoint     bool
+		checkpointDone      bool
+		nudges              = newNudgeWindow(maxNudges, nudgeWindowIters)
+		hallucinationNudges int
+		lastPromptTokens    int    // total prompt tokens (input + cache_read + cache_creation) from last LLM response; cached tokens still consume the model's context window
+		lastOutputTokens    int    // actual output tokens from last LLM response
+		compactionSummary   string // cached summary from compaction
+		compactionApplied   bool   // true once messages have been shaped
+		reactiveCompacted   bool   // true once reactive compaction fired (never resets)
+		summaryFailures     int    // consecutive summary failures; backs off after 3
 		// lastSummaryFailureIter records the iteration of the most recent summary
 		// failure; summaryBackedOff measures the cool-off distance from this iter.
 		// Zero value is fine: the `summaryFailures >= maxSummaryFailures` guard
 		// short-circuits the distance check until a real failure streak writes it.
 		lastSummaryFailureIter int
 		toolSearchFired        bool
-		latestUserText       = buildReanchorText(userMessage, userContent) // most recent real user request — raw prompt plus every current-turn user text block (includes resolved attachment hints); excludes tool results and injected nudges
-		cloudNudgeFired      bool
-		cloudDelegateClaimed bool   // set on first cloud_delegate attempt; blocks subsequent calls unless it fails
-		cloudResultContent   string // non-empty when a cloud deliverable should bypass LLM summarization
-		lastDiscoveryInput   string // dedup: skip discovery when user text hasn't changed between iterations
+		latestUserText         = buildReanchorText(userMessage, userContent) // most recent real user request — raw prompt plus every current-turn user text block (includes resolved attachment hints); excludes tool results and injected nudges
+		cloudNudgeFired        bool
+		cloudDelegateClaimed   bool   // set on first cloud_delegate attempt; blocks subsequent calls unless it fails
+		cloudResultContent     string // non-empty when a cloud deliverable should bypass LLM summarization
+		lastDiscoveryInput     string // dedup: skip discovery when user text hasn't changed between iterations
 
 		// Cross-iteration dedup: cache successful results from previous iteration
 		// to prevent re-execution of identical tool calls across consecutive iterations.

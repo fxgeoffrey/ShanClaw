@@ -31,6 +31,16 @@ func TestBash_Run(t *testing.T) {
 	}
 }
 
+func TestBash_DescriptionDoesNotClaimShellStatePersists(t *testing.T) {
+	desc := (&BashTool{}).Info().Description
+	if strings.Contains(desc, "working directory persists between commands") {
+		t.Fatalf("bash description must not claim cd/shell state persists between calls: %s", desc)
+	}
+	if !strings.Contains(desc, "Each command runs in a fresh shell") {
+		t.Fatalf("bash description should state the fresh-shell behavior, got: %s", desc)
+	}
+}
+
 func TestBash_IsSafe(t *testing.T) {
 	tests := []struct {
 		cmd  string
@@ -333,9 +343,9 @@ func TestBashTool_ScopesToActivatedSkill(t *testing.T) {
 }
 
 // TestBash_DefaultTimeoutPrecedence verifies the timeout resolution order:
-//   1. per-call args.Timeout > 0  -> use it
-//   2. else tool.DefaultTimeoutSecs > 0 -> use it (wired from config.Tools.BashTimeout)
-//   3. else fall back to 120s
+//  1. per-call args.Timeout > 0  -> use it
+//  2. else tool.DefaultTimeoutSecs > 0 -> use it (wired from config.Tools.BashTimeout)
+//  3. else fall back to 120s
 //
 // We assert the EFFECTIVE timeout by running `sleep N` where N is slightly
 // greater than the expected timeout; the error content carries "timed out

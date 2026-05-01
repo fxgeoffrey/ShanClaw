@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/cwdctx"
 )
@@ -115,6 +116,64 @@ func TestReadTracker_NormalizesWithSessionCWD(t *testing.T) {
 	}
 	if rt.HasRead("/other/src/main.go") {
 		t.Error("should not match different absolute path")
+	}
+}
+
+func TestReadTracker_ResetTurnReadsKeepsDedupHistory(t *testing.T) {
+	rt := NewReadTracker()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+	if err := os.WriteFile(path, []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.WithValue(context.Background(), ReadTrackerKey(), rt)
+	rt.MarkRead(path)
+	RecordFileRead(ctx, path, 0, 0, info.ModTime(), info.Size())
+
+	rt.ResetTurnReads()
+
+	if rt.HasRead(path) {
+		t.Fatal("ResetTurnReads must clear read-before-write state for the next user turn")
+	}
+	if hit, _ := CheckFileReadDedup(ctx, path, 0, 0, info.ModTime(), info.Size()); !hit {
+		t.Fatal("ResetTurnReads must preserve file_read dedup history across turns")
+	}
+}
+
+func TestReadTracker_FileReadDedupKeepsMultipleRangesPerPath(t *testing.T) {
+	rt := NewReadTracker()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+	if err := os.WriteFile(path, []byte("line1\nline2\nline3\nline4\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.WithValue(context.Background(), ReadTrackerKey(), rt)
+	mtime := info.ModTime()
+	size := info.Size()
+	RecordFileRead(ctx, path, 0, 2, mtime, size)
+	RecordFileRead(ctx, path, 0, 4, mtime, size)
+
+	if hit, _ := CheckFileReadDedup(ctx, path, 0, 2, mtime, size); !hit {
+		t.Fatal("dedup history should retain the earlier limit=2 range after reading limit=4")
+	}
+	if hit, _ := CheckFileReadDedup(ctx, path, 0, 4, mtime, size); !hit {
+		t.Fatal("dedup history should retain the later limit=4 range")
+	}
+	if hit, _ := CheckFileReadDedup(ctx, path, 2, 2, mtime, size); hit {
+		t.Fatal("different offset+limit range must not dedup")
+	}
+	if hit, _ := CheckFileReadDedup(ctx, path, 0, 2, mtime.Add(time.Second), size); hit {
+		t.Fatal("changed mtime must not dedup")
 	}
 }
 

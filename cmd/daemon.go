@@ -126,20 +126,21 @@ var daemonStartCmd = &cobra.Command{
 		}()
 
 		deps := &daemon.ServerDeps{
-			Config:          cfg,
-			GW:              gw,
-			Registry:        reg,
-			MCPManager:      mcpMgr,
-			Cleanup:         cleanup,
-			ShannonDir:      shanDir,
-			AgentsDir:       agentsDir,
-			Auditor:         auditor,
-			HookRunner:      hookRunner,
-			SessionCache:    sessionCache,
-			ScheduleManager: scheduleManager,
-			BaselineReg:     baselineReg,
-			GatewayOverlay:  gatewayOverlay,
-			PostOverlays:    postOverlays,
+			Config:           cfg,
+			GW:               gw,
+			Registry:         reg,
+			MCPManager:       mcpMgr,
+			Cleanup:          cleanup,
+			ShannonDir:       shanDir,
+			AgentsDir:        agentsDir,
+			Auditor:          auditor,
+			HookRunner:       hookRunner,
+			SessionCache:     sessionCache,
+			ScheduleManager:  scheduleManager,
+			BaselineReg:      baselineReg,
+			GatewayOverlay:   gatewayOverlay,
+			PostOverlays:     postOverlays,
+			ReadTrackerCache: daemon.NewReadTrackerCache(),
 		}
 		defer func() {
 			if deps.Supervisor != nil {

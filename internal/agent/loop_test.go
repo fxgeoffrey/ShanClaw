@@ -115,6 +115,93 @@ func (m *mockSimpleTool) Run(ctx context.Context, args string) (ToolResult, erro
 
 func (m *mockSimpleTool) RequiresApproval() bool { return false }
 
+type dedupProbeReadTool struct {
+	path  string
+	mtime time.Time
+	size  int64
+}
+
+func (t *dedupProbeReadTool) Info() ToolInfo {
+	return ToolInfo{
+		Name:        "file_read",
+		Description: "test file read",
+		Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
+	}
+}
+
+func (t *dedupProbeReadTool) Run(ctx context.Context, args string) (ToolResult, error) {
+	if hit, stub := CheckFileReadDedup(ctx, t.path, 0, 0, t.mtime, t.size); hit {
+		return ToolResult{Content: stub}, nil
+	}
+	RecordFileRead(ctx, t.path, 0, 0, t.mtime, t.size)
+	return ToolResult{Content: "FULL FILE CONTENT"}, nil
+}
+
+func (t *dedupProbeReadTool) RequiresApproval() bool { return false }
+func (t *dedupProbeReadTool) IsReadOnlyCall(string) bool {
+	return true
+}
+
+type collectingHandler struct {
+	mockHandler
+	results []ToolResult
+}
+
+func (h *collectingHandler) OnToolResult(name string, args string, result ToolResult, elapsed time.Duration) {
+	h.results = append(h.results, result)
+}
+
+func TestAgentLoop_FileReadDedupPersistsAcrossRuns(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+	if err := os.WriteFile(path, []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var callCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		switch callCount {
+		case 1, 3:
+			json.NewEncoder(w).Encode(nativeResponse("", "tool_use", toolCall("file_read", `{}`), 10, 5))
+		case 2:
+			json.NewEncoder(w).Encode(nativeResponse("first done", "end_turn", nil, 10, 5))
+		case 4:
+			json.NewEncoder(w).Encode(nativeResponse("second done", "end_turn", nil, 10, 5))
+		default:
+			t.Fatalf("unexpected LLM call %d", callCount)
+		}
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&dedupProbeReadTool{path: path, mtime: info.ModTime(), size: info.Size()})
+	handler := &collectingHandler{}
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+	loop.SetHandler(handler)
+
+	if _, _, err := loop.Run(context.Background(), "read it", nil, nil); err != nil {
+		t.Fatalf("first run failed: %v", err)
+	}
+	if _, _, err := loop.Run(context.Background(), "read it again", nil, nil); err != nil {
+		t.Fatalf("second run failed: %v", err)
+	}
+	if len(handler.results) != 2 {
+		t.Fatalf("expected 2 tool results, got %d", len(handler.results))
+	}
+	if handler.results[0].Content != "FULL FILE CONTENT" {
+		t.Fatalf("first read should return full content, got %q", handler.results[0].Content)
+	}
+	if !strings.Contains(handler.results[1].Content, "unchanged since last read") {
+		t.Fatalf("second run should dedup same file read, got %q", handler.results[1].Content)
+	}
+}
+
 // mockApprovalTool requires approval but implements SafeChecker.
 type mockApprovalTool struct {
 	name     string
@@ -2821,9 +2908,9 @@ func TestAgentLoop_CloudDelegateLock(t *testing.T) {
 // exploration where most queries naturally return zero on misses.
 func TestCoreRules_EmptyResultRule_KeepsSearchCase(t *testing.T) {
 	wantSubstrings := []string{
-		"search/filesystem",        // names the preserved case
-		"IS the answer",            // the canonical outcome for search
-		"grep", "glob",             // concrete tool examples reach the agent
+		"search/filesystem", // names the preserved case
+		"IS the answer",     // the canonical outcome for search
+		"grep", "glob",      // concrete tool examples reach the agent
 	}
 	for _, s := range wantSubstrings {
 		if !strings.Contains(coreOperationalRules, s) {
@@ -2861,8 +2948,8 @@ func TestCoreRules_EmptyResultRule_AddsDiversificationCase(t *testing.T) {
 // the model to cross-account/folder-hunt past the user's contract.
 func TestCoreRules_EmptyResultRule_ProtectsUserSpecifiedScope(t *testing.T) {
 	wantSubstrings := []string{
-		"user explicitly named",     // names the protected case
-		"user-specified contract",   // frames the boundary
+		"user explicitly named",   // names the protected case
+		"user-specified contract", // frames the boundary
 	}
 	for _, s := range wantSubstrings {
 		if !strings.Contains(coreOperationalRules, s) {

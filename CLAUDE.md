@@ -288,7 +288,7 @@ E2E tests in `test/e2e/` are split into offline (no API, runs in CI) and live (n
 
 - GoReleaser: `.goreleaser.yaml`
 - npm: `@kocoro/shanclaw` → `npm install -g @kocoro/shanclaw`
-- **Versioning: PATCH only (0.0.x)** — do NOT bump minor/major unless explicitly asked
+- **Versioning: PATCH-only by default** — do NOT bump minor/major unless explicitly asked
 - Release: `git tag -a vX.Y.Z` → `git push origin vX.Y.Z` → CI builds + publishes
 - `docs/` is gitignored — documentation lives locally only
 

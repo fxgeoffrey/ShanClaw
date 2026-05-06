@@ -252,4 +252,133 @@ func TestShapeHistory(t *testing.T) {
 			}
 		}
 	})
+
+	// Boundary-orphan regression: ShapeHistory keeps the last keepLast*2 messages
+	// from the post-firstUser tail. If the slice boundary lands between an
+	// assistant tool_use and the matching user tool_result, the result contains
+	// an orphaned tool_result that Anthropic's API rejects with 400. The fix
+	// must strip orphaned tool blocks at the slice boundary WITHOUT merging
+	// consecutive same-role messages (which would drop the original first
+	// user prompt next to the summary-as-user message).
+	t.Run("strips orphaned tool_result at slice boundary", func(t *testing.T) {
+		system := client.Message{Role: "system", Content: client.NewTextContent("system prompt")}
+		firstUser := client.Message{Role: "user", Content: client.NewTextContent("user msg A")}
+
+		// Build rest of length 51. With defaultKeepLast=20, keepMsgs=40,
+		// recent = rest[11:51]; rest[10] is dropped, rest[11] is recent[0].
+		// Place tool_use at rest[10] (dropped) and matching tool_result at
+		// rest[11] (kept) so the boundary cuts the pair.
+		rest := make([]client.Message, 51)
+		for i := 0; i < 51; i++ {
+			if i%2 == 0 {
+				rest[i] = client.Message{Role: "assistant", Content: client.NewTextContent("a" + string(rune('A'+i)))}
+			} else {
+				rest[i] = client.Message{Role: "user", Content: client.NewTextContent("u" + string(rune('A'+i)))}
+			}
+		}
+		// Replace rest[10] (assistant, dropped) and rest[11] (user, recent[0]).
+		rest[10] = client.Message{Role: "assistant", Content: client.NewBlockContent([]client.ContentBlock{
+			{Type: "text", Text: "running tool"},
+			client.NewToolUseBlock("toolu_boundary", "bash", nil),
+		})}
+		rest[11] = client.Message{Role: "user", Content: client.NewBlockContent([]client.ContentBlock{
+			client.NewToolResultBlock("toolu_boundary", "ok", false),
+		})}
+
+		all := append([]client.Message{system, firstUser}, rest...)
+		got := ShapeHistory(all, "summary text", 128000)
+
+		// The original first user message must be preserved (regression guard
+		// against a naive post-shape SanitizeHistory that would merge it into
+		// the summary user message).
+		if len(got) < 2 || got[1].Content.Text() != "user msg A" {
+			t.Fatalf("first user message must be preserved verbatim, got %+v", got[1])
+		}
+
+		// No orphaned tool_result blocks anywhere in the output.
+		toolUseIDs := make(map[string]bool)
+		for _, m := range got {
+			if !m.Content.HasBlocks() {
+				continue
+			}
+			for _, b := range m.Content.Blocks() {
+				if b.Type == "tool_use" && b.ID != "" {
+					toolUseIDs[b.ID] = true
+				}
+			}
+		}
+		for i, m := range got {
+			if !m.Content.HasBlocks() {
+				continue
+			}
+			for _, b := range m.Content.Blocks() {
+				if b.Type == "tool_result" && b.ToolUseID != "" && !toolUseIDs[b.ToolUseID] {
+					t.Errorf("orphaned tool_result with id %q at position %d (role=%s)", b.ToolUseID, i, m.Role)
+				}
+			}
+		}
+
+		// Specifically: the orphaned tool_result for toolu_boundary must not
+		// survive (its tool_use was dropped by the slice).
+		for _, m := range got {
+			if !m.Content.HasBlocks() {
+				continue
+			}
+			for _, b := range m.Content.Blocks() {
+				if b.Type == "tool_result" && b.ToolUseID == "toolu_boundary" {
+					t.Error("orphaned tool_result for toolu_boundary should have been stripped at slice boundary")
+				}
+			}
+		}
+	})
+
+	// Symmetric case: orphaned tool_use at the back of recent (slice boundary
+	// drops the matching tool_result). Anthropic also rejects unpaired tool_use.
+	t.Run("strips orphaned tool_use at slice boundary", func(t *testing.T) {
+		system := client.Message{Role: "system", Content: client.NewTextContent("system prompt")}
+		firstUser := client.Message{Role: "user", Content: client.NewTextContent("user msg A")}
+
+		// Construct rest where the last assistant message has a tool_use whose
+		// matching tool_result lives in a later position that does not exist
+		// (i.e. tool_use is the final message). This exercises the back-end
+		// orphan path that ShapeHistory does not currently sanitize.
+		rest := make([]client.Message, 51)
+		for i := 0; i < 50; i++ {
+			if i%2 == 0 {
+				rest[i] = client.Message{Role: "assistant", Content: client.NewTextContent("a" + string(rune('A'+i)))}
+			} else {
+				rest[i] = client.Message{Role: "user", Content: client.NewTextContent("u" + string(rune('A'+i)))}
+			}
+		}
+		// Final message is an assistant whose only block is an unpaired tool_use.
+		rest[50] = client.Message{Role: "assistant", Content: client.NewBlockContent([]client.ContentBlock{
+			client.NewToolUseBlock("toolu_tail", "bash", nil),
+		})}
+
+		all := append([]client.Message{system, firstUser}, rest...)
+		got := ShapeHistory(all, "summary text", 128000)
+
+		// No orphaned tool_use should remain.
+		toolResultIDs := make(map[string]bool)
+		for _, m := range got {
+			if !m.Content.HasBlocks() {
+				continue
+			}
+			for _, b := range m.Content.Blocks() {
+				if b.Type == "tool_result" && b.ToolUseID != "" {
+					toolResultIDs[b.ToolUseID] = true
+				}
+			}
+		}
+		for i, m := range got {
+			if !m.Content.HasBlocks() {
+				continue
+			}
+			for _, b := range m.Content.Blocks() {
+				if b.Type == "tool_use" && b.ID != "" && !toolResultIDs[b.ID] {
+					t.Errorf("orphaned tool_use with id %q at position %d", b.ID, i)
+				}
+			}
+		}
+	})
 }

@@ -90,6 +90,19 @@ func ShapeHistory(messages []client.Message, summary string, contextWindow int) 
 }
 
 // buildShaped assembles the shaped message array.
+//
+// The recent slice is taken positionally from the tail of rest, which means
+// the slice boundary can land between an assistant tool_use and the matching
+// user tool_result, leaving an orphaned tool_result at recent[0] (or, at the
+// other end, an orphaned tool_use at recent[end] when the trailing tool_result
+// got dropped). Anthropic's API rejects either with HTTP 400.
+//
+// We re-run stripOrphanedToolPairs on the assembled output to strip those
+// boundary orphans. This intentionally avoids the rest of SanitizeHistory:
+// mergeConsecutiveRoles would collapse firstUser and the summary-as-user
+// message (both role=user) and drop the original first prompt, which is
+// load-bearing as the conversation primer. Boundary tool-pair stripping
+// only touches blocks whose pair is genuinely missing — not roles.
 func buildShaped(system, firstUser client.Message, summary string, rest []client.Message, keepLast int) []client.Message {
 	keepMsgs := keepLast * 2 // turn pairs = user + assistant
 	if keepMsgs > len(rest) {
@@ -109,7 +122,7 @@ func buildShaped(system, firstUser client.Message, summary string, rest []client
 	}
 
 	result = append(result, recent...)
-	return result
+	return stripOrphanedToolPairs(result)
 }
 
 // imageTokenEstimate is the approximate token cost of an image block.

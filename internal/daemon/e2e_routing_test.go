@@ -42,6 +42,16 @@ func TestE2E_RouteKeyComputation(t *testing.T) {
 			expected: "default:slack:%23general",
 		},
 		{
+			name:     "slack thread routing",
+			req:      RunAgentRequest{Text: "hi", Source: "slack", Channel: "slack", ThreadID: "C123-1710000000.000100"},
+			expected: "default:slack:C123-1710000000.000100",
+		},
+		{
+			name:     "wecom named agent thread routing",
+			req:      RunAgentRequest{Text: "hi", Agent: "ops-bot", Source: "wecom", Channel: "wecom", ThreadID: "g:group-a"},
+			expected: "agent:ops-bot:wecom:g:group-a",
+		},
+		{
 			name:     "line channel routing",
 			req:      RunAgentRequest{Text: "hi", Source: "line", Channel: "group-abc"},
 			expected: "default:line:group-abc",
@@ -88,6 +98,75 @@ func TestE2E_RouteKeyComputation(t *testing.T) {
 	}
 }
 
+func TestE2E_MessagingThreadRoutesDoNotInjectAcrossThreads(t *testing.T) {
+	tests := []struct {
+		name string
+		a    RunAgentRequest
+		b    RunAgentRequest
+	}{
+		{
+			name: "wecom group and dm default agent",
+			a:    RunAgentRequest{Source: ChannelWeCom, Channel: ChannelWeCom, ThreadID: "g:group-a"},
+			b:    RunAgentRequest{Source: ChannelWeCom, Channel: ChannelWeCom, ThreadID: "u:user-a"},
+		},
+		{
+			name: "wecom two groups default agent",
+			a:    RunAgentRequest{Source: ChannelWeCom, Channel: ChannelWeCom, ThreadID: "g:group-a"},
+			b:    RunAgentRequest{Source: ChannelWeCom, Channel: ChannelWeCom, ThreadID: "g:group-b"},
+		},
+		{
+			name: "slack two threads default agent",
+			a:    RunAgentRequest{Source: ChannelSlack, Channel: ChannelSlack, ThreadID: "C123-1710000000.000100"},
+			b:    RunAgentRequest{Source: ChannelSlack, Channel: ChannelSlack, ThreadID: "C123-1710000000.000200"},
+		},
+		{
+			name: "wecom group and dm named agent",
+			a:    RunAgentRequest{Agent: "ops-bot", Source: ChannelWeCom, Channel: ChannelWeCom, ThreadID: "g:group-a"},
+			b:    RunAgentRequest{Agent: "ops-bot", Source: ChannelWeCom, Channel: ChannelWeCom, ThreadID: "u:user-a"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sc := NewSessionCache(t.TempDir())
+			defer sc.CloseAll()
+
+			routeA := ComputeRouteKey(tt.a)
+			routeB := ComputeRouteKey(tt.b)
+			if routeA == "" || routeB == "" {
+				t.Fatalf("expected non-empty route keys, got %q and %q", routeA, routeB)
+			}
+			if routeA == routeB {
+				t.Fatalf("expected distinct route keys, both were %q", routeA)
+			}
+
+			injectCh := make(chan agent.InjectedMessage, 10)
+			sc.mu.Lock()
+			sc.routes[routeA] = &routeEntry{
+				injectCh: injectCh,
+				done:     make(chan struct{}),
+			}
+			sc.mu.Unlock()
+
+			if result := sc.InjectMessage(routeB, agent.InjectedMessage{Text: "different thread"}); result != InjectNoActiveRun {
+				t.Fatalf("expected different thread to start a new run, got %d", result)
+			}
+			if result := sc.InjectMessage(routeA, agent.InjectedMessage{Text: "same thread"}); result != InjectOK {
+				t.Fatalf("expected same thread to inject, got %d", result)
+			}
+
+			select {
+			case msg := <-injectCh:
+				if msg.Text != "same thread" {
+					t.Errorf("expected same-thread injection, got %q", msg.Text)
+				}
+			default:
+				t.Fatal("expected same-thread message in inject channel")
+			}
+		})
+	}
+}
+
 // TestE2E_InjectMessage_FullFlow verifies inject → drain flow.
 // InjectMessage is called from a separate goroutine (as in production)
 // while the route lock is held by the "running" goroutine.
@@ -95,7 +174,11 @@ func TestE2E_InjectMessage_FullFlow(t *testing.T) {
 	sc := NewSessionCache(t.TempDir())
 	defer sc.CloseAll()
 
-	routeKey := "default:slack:%23general"
+	routeKey := ComputeRouteKey(RunAgentRequest{
+		Source:   ChannelSlack,
+		Channel:  ChannelSlack,
+		ThreadID: "C123-1710000000.000100",
+	})
 
 	// Simulate an active route with injectCh (as RunAgent sets up)
 	injectCh := make(chan agent.InjectedMessage, 10)

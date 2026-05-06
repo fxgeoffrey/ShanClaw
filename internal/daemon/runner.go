@@ -98,11 +98,17 @@ func ComputeRouteKey(req RunAgentRequest) string {
 	if req.BypassRouting {
 		return ""
 	}
-	if req.Agent != "" {
-		return "agent:" + req.Agent
-	}
 	if req.SessionID != "" {
 		return "session:" + sanitizeRouteValue(req.SessionID)
+	}
+	if IsMessagingPlatform(req.Source) && req.ThreadID != "" {
+		if req.Agent != "" {
+			return "agent:" + req.Agent + ":" + sanitizeRouteValue(req.Source) + ":" + sanitizeRouteValue(req.ThreadID)
+		}
+		return "default:" + sanitizeRouteValue(req.Source) + ":" + sanitizeRouteValue(req.ThreadID)
+	}
+	if req.Agent != "" {
+		return "agent:" + req.Agent
 	}
 	if req.NewSession || shouldBypassRouteCache(req.Source) {
 		return ""
@@ -111,6 +117,13 @@ func ComputeRouteKey(req RunAgentRequest) string {
 		return "default:" + sanitizeRouteValue(req.Source) + ":" + sanitizeRouteValue(req.Channel)
 	}
 	return ""
+}
+
+func isPlainAgentRouteKey(routeKey string) bool {
+	if !strings.HasPrefix(routeKey, "agent:") {
+		return false
+	}
+	return !strings.Contains(strings.TrimPrefix(routeKey, "agent:"), ":")
 }
 
 func shouldBypassRouteCache(source string) bool {
@@ -696,7 +709,7 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		} else {
 			resumed = true
 		}
-	case strings.HasPrefix(req.RouteKey, "agent:"):
+	case isPlainAgentRouteKey(req.RouteKey):
 		// Named-agent cold start (first run or after daemon restart).
 		// route.sessionID is empty — resume latest from disk, or start fresh if none.
 		if resumedLatest, err := resumeNamedAgentColdStart(sessMgr); err != nil {
@@ -1417,7 +1430,7 @@ func RunSlashWorkflow(ctx context.Context, deps *ServerDeps, req RunAgentRequest
 			log.Printf("daemon: failed to resume routed session %q for %q: %v", route.sessionID, req.RouteKey, err)
 			sessMgr.NewSession()
 		}
-	case strings.HasPrefix(req.RouteKey, "agent:"):
+	case isPlainAgentRouteKey(req.RouteKey):
 		// Named-agent cold start — resume latest from disk, or NewSession if none.
 		if _, err := resumeNamedAgentColdStart(sessMgr); err != nil {
 			log.Printf("daemon: failed to resume latest named-agent session: %v", err)

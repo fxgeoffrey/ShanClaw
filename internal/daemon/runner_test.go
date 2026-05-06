@@ -178,6 +178,69 @@ func TestComputeRouteKey_AgentWithoutBypass(t *testing.T) {
 	}
 }
 
+func TestComputeRouteKey_MessagingPlatformThreadRouting(t *testing.T) {
+	tests := []struct {
+		name string
+		req  RunAgentRequest
+		want string
+	}{
+		{
+			name: "wecom group default agent",
+			req:  RunAgentRequest{Source: ChannelWeCom, Channel: ChannelWeCom, ThreadID: "g:group-a"},
+			want: "default:wecom:g:group-a",
+		},
+		{
+			name: "wecom dm default agent",
+			req:  RunAgentRequest{Source: ChannelWeCom, Channel: ChannelWeCom, ThreadID: "u:user-a"},
+			want: "default:wecom:u:user-a",
+		},
+		{
+			name: "slack thread default agent",
+			req:  RunAgentRequest{Source: ChannelSlack, Channel: ChannelSlack, ThreadID: "C123-1710000000.000100"},
+			want: "default:slack:C123-1710000000.000100",
+		},
+		{
+			name: "wecom group named agent",
+			req:  RunAgentRequest{Agent: "ops-bot", Source: ChannelWeCom, Channel: ChannelWeCom, ThreadID: "g:group-a"},
+			want: "agent:ops-bot:wecom:g:group-a",
+		},
+		{
+			name: "session id wins over messaging thread",
+			req:  RunAgentRequest{Agent: "ops-bot", SessionID: "sess-123", Source: ChannelWeCom, Channel: ChannelWeCom, ThreadID: "g:group-a"},
+			want: "session:sess-123",
+		},
+		{
+			name: "messaging source without thread keeps old fallback",
+			req:  RunAgentRequest{Source: ChannelSlack, Channel: "#general"},
+			want: "default:slack:%23general",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ComputeRouteKey(tt.req); got != tt.want {
+				t.Errorf("ComputeRouteKey(%+v) = %q, want %q", tt.req, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsPlainAgentRouteKey(t *testing.T) {
+	tests := []struct {
+		key  string
+		want bool
+	}{
+		{"agent:ops-bot", true},
+		{"agent:ops-bot:wecom:g:group-a", false},
+		{"default:wecom:g:group-a", false},
+		{"session:sess-123", false},
+	}
+	for _, tt := range tests {
+		if got := isPlainAgentRouteKey(tt.key); got != tt.want {
+			t.Errorf("isPlainAgentRouteKey(%q) = %v, want %v", tt.key, got, tt.want)
+		}
+	}
+}
+
 func TestRouteTitle(t *testing.T) {
 	tests := []struct {
 		source, channel, sender, want string

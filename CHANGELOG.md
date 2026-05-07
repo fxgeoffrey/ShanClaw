@@ -2,6 +2,48 @@
 
 All notable changes to ShanClaw are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## v0.1.2 — 2026-05-07 — Tool-layer cost optimization + release-blocker fixes
+
+Bundles PR #114 (tool-layer cost optimization), PR #113 (webhook agent isolation), the daemon WS approval-message fix, and the five release-blocker fixes that came out of the cross-branch code review.
+
+### Added
+- **Per-turn 200K aggregate cap on tool results** (`internal/agent/spill.go`) — mirrors Claude Code's `MAX_TOOL_RESULTS_PER_MESSAGE_CHARS`. When parallel tools return >200K runes total, the largest results spill until the aggregate drops back under the cap.
+- **Per-tool result spill policy + unified spill path** — `MaxResultSizeChars` per tool: default 50K runes; `grep` ~20K; `file_read` is `UnlimitedToolResultSizeChars` and falls back to the 50K spill threshold. Spill files at `~/.shannon/tmp/tool_result_<session>_<call_id>.txt`.
+- **Persisted tool-result budget state** (`internal/agent/toolresult_budget.go`) — `ToolResultReplacements` + `ToolResultSeen` on `session.Session` survive across turns and resume; mid-turn checkpoints (`applyTurnState`) and both terminal save paths persist them.
+- **Context-bloat run-status nudge** (`internal/agent/context_bloat.go`) — `OnRunStatus("tool_result_bloat", …)` surfaces when a single tool's per-turn output exceeds the bloat threshold; SSE/Desktop subscribers can show why a loop slowed.
+- **`file_read` dedup with daemon session cache** (`internal/agent/readtracker.go` + `internal/daemon/readtracker_cache.go`) — repeat reads of the same `(path, offset, limit)` return a short "unchanged since last read" stub when mtime/size match; one tracker per session, released via `SessionManager.OnSessionClose`.
+- **`grep` precise search controls** — `output_mode` (default `files_with_matches`, also `content`/`count`), `glob` filter list, `head_limit`, `offset`, `type`, `ignore_case`, `multiline`, `before_context`/`after_context`, and `sort_by` (`mtime` newest-first). VCS metadata (`.git`, etc.) auto-skipped; rg uses `--max-columns 500` to cap minified-line output.
+- **`file_edit` `replace_all` parameter** — opt-in to rewrite every occurrence (useful for renames); `old_string` uniqueness still enforced by default.
+- **`bash` caller-controlled output cap** — default 30K-char head+tail truncation; `max_output_chars` overrides (raise or lower).
+- **`file_read` streaming + oversized-error guard** — bounded reads stream via `bufio.Scanner`; reads estimated above ~25K tokens return an error directing the caller to use `offset+limit` instead of falling back to spill.
+- **`think` ack-only result** — thought is captured in the tool call; result returns a short ack so the prose does not echo back into context. ~50% reduction in think-related cache writes.
+
+### Fixed
+- **`CancelBySessionID` data race** — `routeEntry.sessionID` is now `atomic.Pointer[string]`; the cancel scan reads lock-free instead of taking `sc.mu` and reading a field protected by `entry.mu`. Reviewer-flagged on PR #113.
+- **`Manager.Delete` callback wiring** (`internal/session/manager.go`) — fires registered `OnSessionClose` callbacks, holds the manager lock across `store.Delete` so concurrent `Save` cannot recreate the file mid-delete, and leaves in-memory state intact when the disk delete fails.
+- **`ReadTrackerCache.Forget` lifecycle** — daemon registers `Forget(sessionID)` as an `OnSessionClose` hook so per-session tracker entries no longer leak for the daemon's lifetime.
+- **`applyAggregateCap` byte/rune unit mismatch** — char counting now uses `utf8.RuneCountInString`, matching per-result spill and `applyToolResultBudget`. CJK/emoji content no longer fires the cap ~3x early.
+- **Final-save and hard-error save paths persist budget state** — both terminal `runner.go` save paths copy `ToolResultReplacements` + `ToolResultSeen` from the loop, so fast turns and crashed turns retain dedup/replacement bookkeeping on resume (was previously only saved by mid-turn checkpoints).
+- **`file_read` offset-without-limit slicing** — when `offset > 0` and `limit <= 0`, the unlimited-read branch now slices `lines[start:]` before printing; line numbers are correct rather than shifted by `offset`.
+- **WS envelope `MessageID` on `approval_request`** — `cmd/daemon.go` passes the inbound claim's MessageID into `ApprovalBroker.Request` and `Client.SendApprovalRequest` stamps it onto the envelope. Empty MessageID triggered Cloud's fail-closed drop; users never saw the approval card and the tool call hung until timeout.
+- **Webhook agent isolation + thread-route bindings** (#113) — `ComputeRouteKey` no longer collapses webhook/cron/schedule traffic onto `agent:<name>`; persisted thread-route bindings prevent silent cross-channel session sharing.
+- **Inject ack suppression on messaging platforms** — `InjectMessage` no longer surfaces a confusing "ok" reply on follow-up turns to messaging channels.
+
+### Changed
+- **Default grep `output_mode` flipped to `files_with_matches`** — previously returned match lines; users/agents that relied on the old default need to pass `output_mode: "content"` explicitly.
+- **`file_read` now hard-errors on oversized reads** instead of spilling — historically a >256KB read fell through to spill; now returns `"file is too large… Use offset+limit"` to nudge ranged reads.
+- **Kocoro skill** — instructions forbid translating user-provided agent slugs (e.g. Pinyin → Chinese); pass byte-for-byte or ask for a valid slug.
+
+### Docs
+- README, CLAUDE.md, AGENTS.md updated for the tool-description changes (grep `output_mode`, `file_edit replace_all`, `bash max_output_chars`, `think` ack-only, `file_read` dedup + 25K throw) and for the new agent files (`toolresult_budget.go`, `context_bloat.go`) and daemon file (`readtracker_cache.go`). New "Tool Result Sizing" subsection in README.
+
+## v0.1.1 — 2026-05-06 — Messaging-platform routing hardening
+
+### Fixed
+- **Per-thread route keys for messaging platforms** (`internal/daemon/router.go`) — `ComputeRouteKey` ignored `ThreadID` for default-agent traffic on Slack, WeCom, Feishu, LINE, etc., collapsing every group/DM/thread under one bot/source onto a single route key. A second message arriving while the first was in-flight was silently injected into the running loop via `SessionCache.InjectMessage`; two prompts merged into one LLM call, the reply landed only in the originating thread, and the other thread saw the friendly-error fallback. New shape: `agent:<name>:<source>:<thread>` (or `default:<source>:<thread>`) for messaging platforms with a non-empty ThreadID. `isPlainAgentRouteKey` distinguishes plain `agent:<name>` from the new thread-scoped form at the cold-start switch arms.
+- **`ShapeHistory` orphaned tool-pair guard** — the positional `keepLast*2` cut could land between an assistant `tool_use` and the matching user `tool_result`, leaving an orphan that Anthropic rejects with HTTP 400. Runs `stripOrphanedToolPairs` on the assembled output of `buildShaped` — intentionally narrower than `SanitizeHistory`, which would merge consecutive role=user messages and drop the original first prompt.
+- **`@mention` agent fallback skipped on messaging platforms** (#112) — for Slack/Feishu/Lark/WeCom/LINE/WeChat/Teams/Discord/Telegram the gateway delivers an explicit `AgentName` (empty = "use default"). Dispatch no longer falls back to `ParseAgentMention(msg.Text)`, which previously broke group chats where the literal `@<botname>` prefix is part of the inbound text.
+
 ## v0.1.0 — 2026-05-01 — Prompt-cache stability + observability
 
 ### Added

@@ -317,22 +317,22 @@ Local tools executed on your macOS machine:
 
 | Tool | Approval | Description |
 |------|----------|-------------|
-| `file_read` | CWD auto | Read files with line numbers (offset/limit). Images (png/jpg/gif/webp) returned as base64 vision blocks. PDFs rendered page-by-page via Swift/PDFKit (offset=start page, limit=page count). |
+| `file_read` | CWD auto | Read files with line numbers (offset/limit). Repeat reads of the same range return a short "unchanged since last read" stub when the file has not been modified. Oversized text reads (~25K tokens estimated) return an error directing the caller to use `offset+limit`. Images (png/jpg/gif/webp) returned as base64 vision blocks. PDFs rendered page-by-page via Swift/PDFKit (offset=start page, limit=page count). |
 | `file_write` | Yes | Write/create files, creates parent dirs |
-| `file_edit` | Yes | Find-and-replace (old_string must be unique) |
+| `file_edit` | Yes | Find-and-replace. `old_string` must be unique by default; pass `replace_all: true` to rewrite every occurrence (useful for renames). |
 | `glob` | CWD auto | Find files by pattern (supports `**` recursive) |
-| `grep` | CWD auto | Search file contents (ripgrep, falls back to grep) |
+| `grep` | CWD auto | Search file contents (ripgrep, falls back to grep). `output_mode` selects `files_with_matches` (default), `content`, or `count`. Supports `glob` filtering, `head_limit`, `offset`, `type`, `ignore_case`, `multiline`, `before_context`/`after_context`, and `sort_by` (`mtime` newest-first). VCS metadata directories (`.git`, etc.) are skipped automatically; rg output uses `--max-columns 500` to keep minified lines from dominating results. |
 | `directory_list` | CWD auto | List directory contents with sizes |
 
 ### System & Shell
 
 | Tool | Approval | Description |
 |------|----------|-------------|
-| `bash` | Auto for safe | Shell commands, 120s timeout, safe commands auto-approved |
+| `bash` | Auto for safe | Shell commands, 120s timeout, safe commands auto-approved. Output is capped (default 30K chars) with head+tail truncation; pass `max_output_chars` to override (raise or lower). |
 | `system_info` | No | OS, arch, hostname, CPU, memory, disk |
 | `process` | Auto for list/ports | Process management: list, ports, kill |
 | `http` | Network allowlist | HTTP client, localhost auto-approved |
-| `think` | No | Scratchpad for reasoning — not sent to tools, stays in context |
+| `think` | No | Scratchpad for reasoning — the thought is captured in the tool call and the result is an `ack` so it does not echo back into context. |
 
 ### macOS Control
 
@@ -390,6 +390,16 @@ Tool call from LLM
 - **Denied-call blocking**: If you deny a tool call, the same tool+args won't be re-prompted for the rest of the turn
 - **`-y` flag**: Auto-approves everything in one-shot mode
 - **No handler**: Denied by default (security fail-safe)
+
+### Tool Result Sizing
+
+ShanClaw protects context window pressure with three layered caps:
+
+- **Per-result spill**: any single tool result over ~50K characters is written to a temp file under `~/.shannon/tmp/` and replaced in-context with a 2K preview plus the file path. Cleaned up per-run (daemon/TUI) or on manager close (one-shot).
+- **Per-turn aggregate cap**: when a turn returns more than 200K characters total across all parallel tool calls, the largest results are spilled until the aggregate drops back under the cap (counted in runes, so multibyte content is measured fairly).
+- **Bloat nudge**: a high-water-mark detector surfaces a `tool_result_bloat` run-status hint when a single tool emits unusually large output for the agent's context budget, so the user/UI can see why the loop slowed down.
+
+Per-tool overrides apply where it matters: `file_read` is treated as unlimited at the budget layer (its own 25K-token throw guards growth), `grep` ranks tighter (~20K), and unspecified tools use the 50K default.
 
 ## Permission Engine
 

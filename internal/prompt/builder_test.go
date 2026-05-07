@@ -613,7 +613,7 @@ func TestBuildSystemPrompt_CommunicatingSection_Present(t *testing.T) {
 		"Brief is good — silent is not",
 		"Don't narrate your internal deliberation",
 		"Don't open with conversational interjections",
-		"End-of-turn summary",
+		"For routine task-completion summaries",
 		"Do not use a colon before a tool call",
 	}
 	for _, phrase := range required {
@@ -661,4 +661,3 @@ func TestBuildSystemPrompt_CommunicatingSection_ByteStableAcrossOutputFormat(t *
 		t.Fatalf("System must be byte-equal across OutputFormat values (D2). plain len=%d, markdown len=%d", len(plainParts), len(mdParts))
 	}
 }
-

@@ -182,7 +182,8 @@ func buildStaticSystem(opts PromptOptions) string {
 		"When you do write updates, write so the reader can pick up cold: complete sentences, " +
 		"no unexplained jargon or shorthand from earlier in the session. " +
 		"But keep it tight — a clear sentence is better than a clear paragraph.\n\n" +
-		"End-of-turn summary: one or two sentences. What changed and what's next. Nothing else.\n\n" +
+		"For routine task-completion summaries, use one or two sentences: what changed and what's next. " +
+		"Do not add extra wrap-up prose when the user asked for a richer answer.\n\n" +
 		"Don't open with conversational interjections like \"Done!\", \"Got it\", \"Sure\", or \"Great question\" — " +
 		"lead with the substance (\"Reading the four files in parallel.\") instead.\n\n" +
 		"Avoid markdown headers, tables, and heavy formatting in updates, since some channels strip rich text.\n\n" +

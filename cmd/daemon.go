@@ -631,6 +631,9 @@ func (h *daemonEventHandler) OnText(text string) {
 // the surrounding TOOL_RUNNING / TOOL_COMPLETED frames, so reusing the same
 // wire event preserves the existing channel rendering on Slack/Feishu/etc.
 func (h *daemonEventHandler) OnPreamble(text string) {
+	if text == "" {
+		return
+	}
 	if h.wsClient != nil && h.messageID != "" {
 		if err := h.wsClient.SendEvent(h.messageID, "LLM_OUTPUT", text, nil); err != nil {
 			log.Printf("daemon: event forward failed: %v", err)

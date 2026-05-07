@@ -7,7 +7,7 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
 )
 
-func TestBuildContextBloatReminder_FileReadDominates(t *testing.T) {
+func TestBuildContextBloatSuggestion_FileReadDominates(t *testing.T) {
 	msgs := []client.Message{
 		{Role: "assistant", Content: client.NewBlockContent([]client.ContentBlock{
 			client.NewToolUseBlock("toolu_read", "file_read", nil),
@@ -16,7 +16,7 @@ func TestBuildContextBloatReminder_FileReadDominates(t *testing.T) {
 			client.NewToolResultBlock("toolu_read", strings.Repeat("x", 9000), false),
 		})},
 	}
-	got := buildContextBloatReminder(msgs, ContextBloatOptions{
+	got := buildContextBloatSuggestion(msgs, ContextBloatOptions{
 		RecentToolResultBytes: 5000,
 	})
 	if !strings.Contains(got, "file_read") || !strings.Contains(got, "offset+limit") {
@@ -24,7 +24,7 @@ func TestBuildContextBloatReminder_FileReadDominates(t *testing.T) {
 	}
 }
 
-func TestBuildContextBloatReminder_SmallContextNoop(t *testing.T) {
+func TestBuildContextBloatSuggestion_SmallContextNoop(t *testing.T) {
 	msgs := []client.Message{
 		{Role: "assistant", Content: client.NewBlockContent([]client.ContentBlock{
 			client.NewToolUseBlock("toolu_grep", "grep", nil),
@@ -33,7 +33,7 @@ func TestBuildContextBloatReminder_SmallContextNoop(t *testing.T) {
 			client.NewToolResultBlock("toolu_grep", "short", false),
 		})},
 	}
-	if got := buildContextBloatReminder(msgs, ContextBloatOptions{RecentToolResultBytes: 5000}); got != "" {
+	if got := buildContextBloatSuggestion(msgs, ContextBloatOptions{RecentToolResultBytes: 5000}); got != "" {
 		t.Fatalf("expected no reminder, got %q", got)
 	}
 }

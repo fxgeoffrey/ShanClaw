@@ -385,9 +385,10 @@ type EventHandler interface {
 //
 // Known codes:
 //
-//	"idle_soft"  — no activity for IdleSoftTimeout; informational, turn continues
-//	"idle_hard"  — no activity for IdleHardTimeout; turn about to be cancelled
-//	"llm_retry"  — transient LLM error, retrying
+//	"idle_soft"     — no activity for IdleSoftTimeout; informational, turn continues
+//	"idle_hard"     — no activity for IdleHardTimeout; turn about to be cancelled
+//	"llm_retry"     — transient LLM error, retrying
+//	"context_bloat" — large tool results are dominating context; informational
 type RunStatusHandler interface {
 	OnRunStatus(code string, detail string)
 }
@@ -1483,14 +1484,14 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		// failure; summaryBackedOff measures the cool-off distance from this iter.
 		// Zero value is fine: the `summaryFailures >= maxSummaryFailures` guard
 		// short-circuits the distance check until a real failure streak writes it.
-		lastSummaryFailureIter   int
-		toolSearchFired          bool
-		latestUserText           = buildReanchorText(userMessage, userContent) // most recent real user request — raw prompt plus every current-turn user text block (includes resolved attachment hints); excludes tool results and injected nudges
-		cloudNudgeFired          bool
-		cloudDelegateClaimed     bool   // set on first cloud_delegate attempt; blocks subsequent calls unless it fails
-		cloudResultContent       string // non-empty when a cloud deliverable should bypass LLM summarization
-		lastDiscoveryInput       string // dedup: skip discovery when user text hasn't changed between iterations
-		contextBloatReminderSent bool
+		lastSummaryFailureIter int
+		toolSearchFired        bool
+		latestUserText         = buildReanchorText(userMessage, userContent) // most recent real user request — raw prompt plus every current-turn user text block (includes resolved attachment hints); excludes tool results and injected nudges
+		cloudNudgeFired        bool
+		cloudDelegateClaimed   bool   // set on first cloud_delegate attempt; blocks subsequent calls unless it fails
+		cloudResultContent     string // non-empty when a cloud deliverable should bypass LLM summarization
+		lastDiscoveryInput     string // dedup: skip discovery when user text hasn't changed between iterations
+		contextBloatStatusSent bool
 
 		// Cross-iteration dedup: cache successful results from previous iteration
 		// to prevent re-execution of identical tool calls across consecutive iterations.
@@ -2046,14 +2047,12 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			stickyInjectPending = false
 		}
 
-		if !contextBloatReminderSent {
-			if reminder := buildContextBloatReminder(messages, ContextBloatOptions{}); reminder != "" {
-				messages = append(messages, client.Message{
-					Role:    "user",
-					Content: client.NewTextContent(reminder),
-				})
-				markInjected()
-				contextBloatReminderSent = true
+		if !contextBloatStatusSent {
+			if detail := buildContextBloatSuggestion(messages, ContextBloatOptions{}); detail != "" {
+				if rs, ok := a.handler.(RunStatusHandler); ok {
+					rs.OnRunStatus("context_bloat", detail)
+				}
+				contextBloatStatusSent = true
 			}
 		}
 

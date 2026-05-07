@@ -224,6 +224,40 @@ func TestAgentLoop_FileReadDedupPersistsAcrossRuns(t *testing.T) {
 	}
 }
 
+func TestAgentLoop_ContextBloatEmitsRunStatusWithoutPromptInjection(t *testing.T) {
+	first := nativeResponseWithID("", "tool_use", toolCallWithID("file_read", `{}`, "toolu_read"), 10, 5)
+	second := nativeResponse("done", "end_turn", nil, 10, 5)
+	gw := &budgetCaptureLLMClient{
+		responses: []*client.CompletionResponse{&first, &second},
+	}
+	reg := NewToolRegistry()
+	reg.Register(&mockSimpleTool{
+		name: "file_read",
+		result: ToolResult{
+			Content: strings.Repeat("readable line with content\n", 1_000),
+		},
+	})
+	handler := &recordingHandler{mockHandler: mockHandler{approveResult: true}}
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 100_000, 200, nil, nil, nil)
+	loop.SetEnableStreaming(false)
+	loop.SetHandler(handler)
+
+	if _, _, err := loop.Run(context.Background(), "read large file", nil, nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(gw.requests) < 2 {
+		t.Fatalf("expected at least 2 LLM requests, got %d", len(gw.requests))
+	}
+	if !handler.HasCode("context_bloat") {
+		t.Fatalf("expected context_bloat run status, got: %v", handler.Statuses())
+	}
+	for _, msg := range gw.requests[1].Messages {
+		if strings.Contains(msg.Content.Text(), "Large file_read output is dominating context") {
+			t.Fatalf("context bloat suggestion should not be injected into prompt: %+v", gw.requests[1].Messages)
+		}
+	}
+}
+
 func TestAgentLoop_ToolResultBudgetAppliedBeforeLLMCall(t *testing.T) {
 	gw := &budgetCaptureLLMClient{
 		responses: []*client.CompletionResponse{

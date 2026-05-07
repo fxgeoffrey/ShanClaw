@@ -11,7 +11,7 @@ type ContextBloatOptions struct {
 	RecentToolResultBytes int
 }
 
-func buildContextBloatReminder(messages []client.Message, opts ContextBloatOptions) string {
+func buildContextBloatSuggestion(messages []client.Message, opts ContextBloatOptions) string {
 	if opts.RecentToolResultBytes <= 0 {
 		opts.RecentToolResultBytes = 20000
 	}
@@ -49,12 +49,12 @@ func buildContextBloatReminder(messages []client.Message, opts ContextBloatOptio
 	top := pairs[0]
 	switch top.name {
 	case "file_read":
-		return fmt.Sprintf("<system-reminder>Large file_read output is dominating context (~%d chars). Prefer offset+limit, grep, or a narrower path before reading more.</system-reminder>", top.n)
+		return fmt.Sprintf("Large file_read output is dominating context (~%d chars). Prefer offset+limit, grep, or a narrower path before reading more.", top.n)
 	case "grep":
-		return fmt.Sprintf("<system-reminder>Large grep output is dominating context (~%d chars). Prefer files_with_matches, head_limit, type, glob, or count before requesting content.</system-reminder>", top.n)
+		return fmt.Sprintf("Large grep output is dominating context (~%d chars). Prefer files_with_matches, head_limit, type, glob, or count before requesting content.", top.n)
 	case "bash":
-		return fmt.Sprintf("<system-reminder>Large bash output is dominating context (~%d chars). Redirect noisy output to a file and inspect small slices.</system-reminder>", top.n)
+		return fmt.Sprintf("Large bash output is dominating context (~%d chars). Redirect noisy output to a file and inspect small slices.", top.n)
 	default:
-		return fmt.Sprintf("<system-reminder>Large %s tool output is dominating context (~%d chars). Narrow the next tool call before producing more output.</system-reminder>", top.name, top.n)
+		return fmt.Sprintf("Large %s tool output is dominating context (~%d chars). Narrow the next tool call before producing more output.", top.name, top.n)
 	}
 }

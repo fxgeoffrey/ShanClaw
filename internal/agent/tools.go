@@ -167,6 +167,36 @@ type ReadOnlyChecker interface {
 	IsReadOnlyCall(argsJSON string) bool
 }
 
+// SkillExempt is an optional interface tools can implement to opt out of skill
+// allowed-tools enforcement. Reserved for pure-infrastructure tools that have
+// no I/O side effects and are needed for the skill mechanism itself or for
+// reasoning hygiene (e.g. think, tool_search, use_skill). Tools that touch the
+// filesystem, network, or external services MUST NOT implement this — those
+// remain subject to per-skill restriction.
+type SkillExempt interface {
+	SkillExempt() bool
+}
+
+// IsSkillExempt reports whether a tool opts out of skill restriction.
+func IsSkillExempt(t Tool) bool {
+	if e, ok := t.(SkillExempt); ok {
+		return e.SkillExempt()
+	}
+	return false
+}
+
+// DisallowsAutoApproval reports tools that require a fresh human decision for
+// every call. These tools may still be approved once, but global auto-approve,
+// unattended runs, and session-level "always allow" must not cover them.
+func DisallowsAutoApproval(toolName string) bool {
+	switch toolName {
+	case "publish_to_web":
+		return true
+	default:
+		return false
+	}
+}
+
 // ToolSummary is a lightweight name+description pair for deferred tool listings.
 type ToolSummary struct {
 	Name        string

@@ -93,6 +93,7 @@ var daemonStartCmd = &cobra.Command{
 		_ = skillsPtr // skills are set per-request in RunAgent
 
 		tools.RegisterCloudDelegate(reg, gw, cfg, nil, "", "") // daemon: agent forwarding per-message not yet supported
+		tools.RegisterPublishTool(reg, gw, cfg)
 
 		gatewayOverlay := tools.ExtractGatewayTools(reg)
 		postOverlays := tools.ExtractPostOverlays(reg, baselineReg)
@@ -673,6 +674,10 @@ func (h *daemonEventHandler) OnRunStatus(code, detail string) {}
 
 func (h *daemonEventHandler) OnApprovalNeeded(tool string, args string) bool {
 	if h.autoApprove {
+		if agent.DisallowsAutoApproval(tool) {
+			log.Printf("daemon: refusing auto-approval for %s (per-call approval required)", tool)
+			return false
+		}
 		log.Printf("daemon: auto-approving %s (auto_approve=true)", tool)
 		return true
 	}
@@ -705,6 +710,10 @@ func (h *daemonEventHandler) OnApprovalNeeded(tool string, args string) bool {
 					log.Printf("daemon: always-allow persisted: %s", cmd)
 				}
 			}
+		} else if agent.DisallowsAutoApproval(tool) {
+			emitApprovalNotice(h.deps, "warn",
+				"Allowed for this call only. This tool cannot be saved as always-allow.")
+			log.Printf("daemon: always-allow treated as one-time allow for %s", tool)
 		} else {
 			h.broker.SetToolAutoApprove(tool)
 			log.Printf("daemon: always-allow (session): %s", tool)
@@ -749,7 +758,9 @@ func (h *autoApproveHandler) OnUsage(usage agent.TurnUsage)                     
 func (h *autoApproveHandler) OnCloudAgent(agentID, status, message string)           {}
 func (h *autoApproveHandler) OnCloudProgress(completed, total int)                   {}
 func (h *autoApproveHandler) OnCloudPlan(planType, content string, needsReview bool) {}
-func (h *autoApproveHandler) OnApprovalNeeded(tool string, args string) bool         { return true }
+func (h *autoApproveHandler) OnApprovalNeeded(tool string, args string) bool {
+	return !agent.DisallowsAutoApproval(tool)
+}
 
 func containsString(slice []string, s string) bool {
 	for _, v := range slice {

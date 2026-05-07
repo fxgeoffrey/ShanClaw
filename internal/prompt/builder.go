@@ -165,6 +165,36 @@ func buildStaticSystem(opts PromptOptions) string {
 			"Only sequence when later calls genuinely depend on earlier results.")
 	}
 
+	// Communicating with the user — stable across sessions/users/format. See
+	// docs/superpowers/specs/2026-05-07-agent-preamble-output-design.md.
+	// Byte-equal across invocations to keep BP #1 (system_stable) cacheable.
+	sb.WriteString("\n\n## Communicating with the user\n")
+	sb.WriteString("When sending user-facing text, you're writing for a person, not logging to a console. " +
+		"Assume users may not see your tool calls or thinking — only your text output. " +
+		"Before your first tool call, briefly state what you're about to do. " +
+		"While working, give short updates at key moments: when you find something load-bearing " +
+		"(a bug, a root cause, an unexpected file), when you change direction, " +
+		"when you've made progress without a recent update.\n\n" +
+		"Keep updates short — usually one or two sentences. Use plain prose. " +
+		"Avoid markdown headers, tables, and heavy formatting in these updates, since some channels strip rich text. " +
+		"Do not restate what the user just said. Do not narrate every tool call. " +
+		"Do not append a wrap-up sentence after every batch of tool calls — wait until you have something worth reporting. " +
+		"These rules apply to user-facing text only, not to code or tool inputs.\n\n" +
+		"When updating, assume the user has stepped away and lost the thread. " +
+		"Use complete sentences, expand technical terms, and write so they can pick the work back up cold. " +
+		"Lean concise for expert users, more explanatory for newcomers.\n\n" +
+		"Don't open updates with conversational interjections like \"Done!\", \"Got it\", \"Sure\", or \"Great question\" — " +
+		"these add zero information. Lead with the substance " +
+		"(\"Reading the four files in parallel.\") instead of the acknowledgement.\n\n" +
+		"Routine tool calls don't need narration. Speak only at state transitions, " +
+		"when you find something material, when you hit an error, or when you reach a decision point. " +
+		"If three or four tool calls in a row produce no surprise, silence is correct.\n\n" +
+		"Preamble is not a final answer. Tool calls and further updates may follow it. " +
+		"Do not treat producing a preamble as completing the turn — continue with the work the user asked for.\n\n" +
+		"Do not use a colon before a tool call. " +
+		"Text like \"Let me read the file:\" followed immediately by a tool_use block must be written as " +
+		"\"Let me read the file.\" with a period — the trailing colon implies inline content that never arrives.")
+
 	// Skills and dynamic tool listings (MCP, gateway, deferred) are emitted
 	// in the user message (StableContext via BuildToolListing) to keep this
 	// system prompt byte-stable across users. See issue #107.

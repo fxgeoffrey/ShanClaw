@@ -595,3 +595,69 @@ func TestBuildSystemPrompt_StableContextOmitsToolListingWhenEmpty(t *testing.T) 
 	}
 }
 
+// TestBuildSystemPrompt_CommunicatingSection_Present verifies the static
+// system prompt includes the user-communication section that instructs the
+// model to emit preamble text blocks. Asserts the section header and several
+// load-bearing phrases (mid-sentence anchors that survive minor wording
+// edits but break if the section is dropped).
+func TestBuildSystemPrompt_CommunicatingSection_Present(t *testing.T) {
+	parts := BuildSystemPrompt(PromptOptions{
+		BasePrompt:     "Base.",
+		LocalToolNames: []string{"file_read", "bash"},
+	})
+
+	required := []string{
+		"## Communicating with the user",
+		"Before your first tool call, briefly state what you're about to do",
+		"give short updates at key moments",
+		"Don't open updates with conversational interjections",
+		"Routine tool calls don't need narration",
+		"Preamble is not a final answer",
+		"Do not use a colon before a tool call",
+	}
+	for _, phrase := range required {
+		if !strings.Contains(parts.System, phrase) {
+			t.Errorf("system prompt missing required phrase %q", phrase)
+		}
+	}
+}
+
+// TestBuildSystemPrompt_CommunicatingSection_ByteStableAcrossInvocations
+// verifies that two invocations with identical input produce byte-equal
+// System fields. Cache-stability prerequisite: the section must contain no
+// per-invocation variables (time, IDs, randomness).
+func TestBuildSystemPrompt_CommunicatingSection_ByteStableAcrossInvocations(t *testing.T) {
+	opts := PromptOptions{
+		BasePrompt:     "You are Shannon.",
+		LocalToolNames: []string{"bash", "file_read"},
+	}
+	a := BuildSystemPrompt(opts).System
+	b := BuildSystemPrompt(opts).System
+	if a != b {
+		t.Fatalf("System differs between identical invocations.\nA len=%d\nB len=%d", len(a), len(b))
+	}
+}
+
+// TestBuildSystemPrompt_CommunicatingSection_ByteStableAcrossOutputFormat
+// verifies that the System field is byte-identical when OutputFormat differs
+// between "plain" and "markdown". This locks D2 of the spec: the
+// communication section must NOT branch on OutputFormat, otherwise BP #1
+// cache fragments across cloud-distributed (plain) vs TUI/Desktop (markdown)
+// users.
+func TestBuildSystemPrompt_CommunicatingSection_ByteStableAcrossOutputFormat(t *testing.T) {
+	base := PromptOptions{
+		BasePrompt:     "You are Shannon.",
+		LocalToolNames: []string{"bash", "file_read"},
+	}
+	plain := base
+	plain.OutputFormat = "plain"
+	markdown := base
+	markdown.OutputFormat = "markdown"
+
+	plainParts := BuildSystemPrompt(plain).System
+	mdParts := BuildSystemPrompt(markdown).System
+	if plainParts != mdParts {
+		t.Fatalf("System must be byte-equal across OutputFormat values (D2). plain len=%d, markdown len=%d", len(plainParts), len(mdParts))
+	}
+}
+

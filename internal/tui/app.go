@@ -2379,10 +2379,19 @@ func (h *tuiEventHandler) OnToolResult(name string, args string, result agent.To
 }
 
 func (h *tuiEventHandler) OnText(text string) {
-	// Response display is handled by agentDoneMsg to avoid a race where the
-	// Println Cmd from flushPrints arrives after agentDoneMsg has already
-	// switched the view, causing the first line to render mid-screen.
-	// The text is available as agentDoneMsg.result.
+	// Final-answer rendering happens in agentDoneMsg (app.go ~line 1037) which
+	// uses the markdown renderer. Rendering here would double the output.
+}
+
+// OnPreamble renders mid-turn agent narration (preamble emitted alongside
+// native tool_use blocks) inline through the Bubbletea event loop, so the
+// user sees the agent's "what I'm about to do" text between tool calls.
+// Triggered by the tool-call branch in AgentLoop.Run (loop.go ~line 2499).
+func (h *tuiEventHandler) OnPreamble(text string) {
+	if text == "" {
+		return
+	}
+	h.model.sendOutput(text)
 }
 
 func (h *tuiEventHandler) OnStreamDelta(delta string) {

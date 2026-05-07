@@ -165,6 +165,32 @@ func buildStaticSystem(opts PromptOptions) string {
 			"Only sequence when later calls genuinely depend on earlier results.")
 	}
 
+	// Text output — stable across sessions/users/format. See
+	// docs/superpowers/specs/2026-05-07-agent-preamble-output-design.md.
+	// Byte-equal across invocations to keep BP #1 (system_stable) cacheable.
+	// Wording aligned with Claude Code's latest "# Text output" section
+	// (2026-05-07 iteration after observing Claude 4 over-applied "silence is correct").
+	sb.WriteString("\n\n## Text output (does not apply to tool calls)\n")
+	sb.WriteString("Assume users can't see most tool calls or thinking — only your text output. " +
+		"Before your first tool call, state in one sentence what you're about to do. " +
+		"While working, give short updates at key moments: when you find something, " +
+		"when you change direction, or when you hit a blocker. " +
+		"Brief is good — silent is not. One sentence per update is almost always enough.\n\n" +
+		"Don't narrate your internal deliberation. User-facing text should be relevant " +
+		"communication to the user, not a running commentary on your thought process. " +
+		"State results and decisions directly, and focus user-facing text on relevant updates for the user.\n\n" +
+		"When you do write updates, write so the reader can pick up cold: complete sentences, " +
+		"no unexplained jargon or shorthand from earlier in the session. " +
+		"But keep it tight — a clear sentence is better than a clear paragraph.\n\n" +
+		"For routine task-completion summaries, use one or two sentences: what changed and what's next. " +
+		"Do not add extra wrap-up prose when the user asked for a richer answer.\n\n" +
+		"Don't open with conversational interjections like \"Done!\", \"Got it\", \"Sure\", or \"Great question\" — " +
+		"lead with the substance (\"Reading the four files in parallel.\") instead.\n\n" +
+		"Avoid markdown headers, tables, and heavy formatting in updates, since some channels strip rich text.\n\n" +
+		"Do not use a colon before a tool call. " +
+		"Text like \"Let me read the file:\" followed immediately by a tool_use block must be written as " +
+		"\"Let me read the file.\" with a period — the trailing colon implies inline content that never arrives.")
+
 	// Skills and dynamic tool listings (MCP, gateway, deferred) are emitted
 	// in the user message (StableContext via BuildToolListing) to keep this
 	// system prompt byte-stable across users. See issue #107.

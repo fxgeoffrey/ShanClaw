@@ -342,6 +342,7 @@ func (h *mockHandler) OnToolCall(name string, args string) {}
 func (h *mockHandler) OnToolResult(name string, args string, result ToolResult, elapsed time.Duration) {
 }
 func (h *mockHandler) OnText(text string)                                     { h.lastText = text }
+func (h *mockHandler) OnPreamble(text string)                                 { h.lastText = text }
 func (h *mockHandler) OnStreamDelta(delta string)                             {}
 func (h *mockHandler) OnUsage(usage TurnUsage)                                {}
 func (h *mockHandler) OnCloudAgent(agentID, status, message string)           {}
@@ -2874,6 +2875,7 @@ func (h *cloudDelegateHandler) OnToolResult(name string, args string, result Too
 	h.results = append(h.results, cloudDelegateResult{name: name, content: result.Content, isError: result.IsError})
 }
 func (h *cloudDelegateHandler) OnText(text string)                                     {}
+func (h *cloudDelegateHandler) OnPreamble(text string)                                 {}
 func (h *cloudDelegateHandler) OnStreamDelta(delta string)                             {}
 func (h *cloudDelegateHandler) OnUsage(usage TurnUsage)                                {}
 func (h *cloudDelegateHandler) OnCloudAgent(agentID, status, message string)           {}
@@ -4450,5 +4452,124 @@ func TestTemporalDelta_CheckIsPureAndIdempotent(t *testing.T) {
 		if got := d.Check(); len(got) != 0 {
 			t.Errorf("idempotent Check call #%d should return no deltas, got %d", i, len(got))
 		}
+	}
+}
+
+// preambleHandler accumulates every OnText / OnPreamble / OnToolCall invocation.
+// Tracks the two text channels separately so tests can assert the agent loop
+// routes preamble through OnPreamble and final answer through OnText, rather
+// than collapsing both into one bucket. Distinct from mockHandler (only stores
+// the last text) because we need the full call history. Distinct from the
+// existing recordingHandler (in watchdog_integration_test.go, focused on
+// OnRunStatus) so the two don't collide.
+type preambleHandler struct {
+	textCalls     []string
+	preambleCalls []string
+	toolCallCount int
+}
+
+func (h *preambleHandler) OnToolCall(name string, args string) { h.toolCallCount++ }
+func (h *preambleHandler) OnToolResult(name string, args string, result ToolResult, elapsed time.Duration) {
+}
+func (h *preambleHandler) OnText(text string) {
+	h.textCalls = append(h.textCalls, text)
+}
+func (h *preambleHandler) OnPreamble(text string) {
+	h.preambleCalls = append(h.preambleCalls, text)
+}
+func (h *preambleHandler) OnStreamDelta(delta string)                             {}
+func (h *preambleHandler) OnUsage(usage TurnUsage)                                {}
+func (h *preambleHandler) OnCloudAgent(agentID, status, message string)           {}
+func (h *preambleHandler) OnCloudProgress(completed, total int)                   {}
+func (h *preambleHandler) OnCloudPlan(planType, content string, needsReview bool) {}
+func (h *preambleHandler) OnApprovalNeeded(tool string, args string) bool         { return true }
+
+// TestAgentLoop_ToolCallBranch_TriggersOnText is the load-bearing test for
+// the gap-#2 fix in the spec: when the model emits a real preamble alongside
+// native tool_use blocks, the agent loop must invoke handler.OnPreamble so
+// the daemon forwards LLM_OUTPUT to Cloud and SSE clients label the text as
+// `assistant_text`. The final answer (no-tool-call exit) goes through OnText
+// instead so transports can route the two semantically.
+//
+// Pre-fix history: OnText was called only on the no-tool-call exit branch,
+// so Slack/Feishu users never saw the preamble. The first iteration of the
+// fix also fired OnText for preamble, which conflated the two semantics.
+// This test pins the final shape: preamble → OnPreamble, final → OnText.
+func TestAgentLoop_ToolCallBranch_TriggersOnText(t *testing.T) {
+	const preamble = "Reading the four files in parallel."
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		switch callCount {
+		case 1:
+			// Iteration 1: real preamble + native tool_use block.
+			json.NewEncoder(w).Encode(nativeResponseWithID(preamble, "tool_use",
+				toolCallWithID("noop_tool", `{}`, "toolu_test_1"), 12, 8))
+		default:
+			// Iteration 2: clean termination.
+			json.NewEncoder(w).Encode(nativeResponse("All four files read.", "end_turn", nil, 5, 4))
+		}
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	reg := NewToolRegistry()
+	reg.Register(&mockSimpleTool{
+		name:   "noop_tool",
+		result: ToolResult{Content: "ok"},
+	})
+
+	handler := &preambleHandler{}
+	loop := NewAgentLoop(gw, reg, "medium", "", 25, 2000, 200, nil, nil, nil)
+	loop.SetHandler(handler)
+
+	_, _, err := loop.Run(context.Background(), "do the thing", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Assert: preamble reached OnPreamble (NOT OnText). Final answer ("All
+	// four files read.") reaches OnText. Routing both through the same
+	// callback would let SSE/bus transports double-render the final answer
+	// as both `assistant_text` and `agent_reply`.
+	foundPreamble := false
+	for _, txt := range handler.preambleCalls {
+		if txt == preamble {
+			foundPreamble = true
+			break
+		}
+	}
+	if !foundPreamble {
+		t.Fatalf("expected OnPreamble to be invoked with preamble %q in tool-call branch.\nOnPreamble calls: %#v\nOnText calls: %#v",
+			preamble, handler.preambleCalls, handler.textCalls)
+	}
+	for _, txt := range handler.textCalls {
+		if txt == preamble {
+			t.Fatalf("preamble %q leaked into OnText — must route through OnPreamble only.\nOnText calls: %#v",
+				preamble, handler.textCalls)
+		}
+	}
+	const finalAnswer = "All four files read."
+	foundFinal := false
+	for _, txt := range handler.textCalls {
+		if txt == finalAnswer {
+			foundFinal = true
+			break
+		}
+	}
+	if !foundFinal {
+		t.Fatalf("expected final answer %q to reach OnText. OnText calls: %#v", finalAnswer, handler.textCalls)
+	}
+
+	// Assert: the tool was invoked exactly once (sanity — confirms we hit
+	// the tool-call branch and the test isn't accidentally taking the
+	// no-tool-call path).
+	if handler.toolCallCount != 1 {
+		t.Errorf("expected 1 OnToolCall, got %d", handler.toolCallCount)
+	}
+
+	// Assert: callCount confirms the loop ran two iterations as designed.
+	if callCount != 2 {
+		t.Errorf("expected 2 LLM calls (preamble+tool, then end_turn), got %d", callCount)
 	}
 }

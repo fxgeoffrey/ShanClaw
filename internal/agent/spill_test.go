@@ -232,7 +232,7 @@ func TestApplyAggregateCap_MixedSizes(t *testing.T) {
 		{result: ToolResult{Content: strings.Repeat("a", 80_000)}}, // largest
 		{result: ToolResult{Content: strings.Repeat("b", 80_000)}},
 		{result: ToolResult{Content: strings.Repeat("c", 80_000)}},
-		{result: ToolResult{Content: strings.Repeat("d", 1_000)}},  // small, must not spill
+		{result: ToolResult{Content: strings.Repeat("d", 1_000)}}, // small, must not spill
 	}
 	// total = 241K > 200K
 	applyAggregateCap(results, dir, "test-sess-mixed")
@@ -274,5 +274,38 @@ func TestApplyAggregateCap_CooperatesWithPerResultSpill(t *testing.T) {
 	// The 100K one should be the first picked.
 	if !strings.HasPrefix(results[0].result.Content, "[Output saved to disk:") {
 		t.Errorf("largest (100K) result should be spilled first, but content[0] is: %.80s", results[0].result.Content)
+	}
+}
+
+func TestApplyPerResultSpill_UsesPerToolPolicy(t *testing.T) {
+	dir := t.TempDir()
+	policy := map[string]int{
+		"grep": 20_000,
+	}
+
+	content := strings.Repeat("g", 20_001)
+	got := applyPerResultSpill(content, "grep", dir, "test-sess-grep", policy)
+	if !strings.HasPrefix(got, "[Output saved to disk:") {
+		t.Fatalf("grep result above 20K policy should spill, got prefix: %.80s", got)
+	}
+	if strings.Contains(got, strings.Repeat("g", 20_001)) {
+		t.Fatal("spilled preview should not keep the entire original result in context")
+	}
+}
+
+func TestContextResultMaxChars_UsesPerToolPolicy(t *testing.T) {
+	policy := map[string]int{
+		"grep":      20_000,
+		"file_read": UnlimitedToolResultSizeChars,
+	}
+
+	if got := contextResultMaxChars("grep", false, 30_000, policy); got != 20_000 {
+		t.Fatalf("grep should use 20K context limit, got %d", got)
+	}
+	if got := contextResultMaxChars("file_read", false, 30_000, policy); got != 30_000 {
+		t.Fatalf("unlimited tool should preserve loop default limit, got %d", got)
+	}
+	if got := contextResultMaxChars("grep", true, 30_000, policy); got != 60_000 {
+		t.Fatalf("cloud result should preserve cloud context limit, got %d", got)
 	}
 }

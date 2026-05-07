@@ -109,6 +109,46 @@ func applyAggregateCap(execResults []toolExecResult, shannonDir, sessionID strin
 	}
 }
 
+func applyPerResultSpill(content, toolName, shannonDir, sessionID string, policy map[string]int) string {
+	threshold := perToolResultSpillThreshold(toolName, policy)
+	if threshold <= 0 || len([]rune(content)) <= threshold {
+		return content
+	}
+	spilled, err := spillToDisk(shannonDir, sessionID, generateCallID(), content)
+	if err != nil {
+		return content
+	}
+	return spilled
+}
+
+func perToolResultSpillThreshold(toolName string, policy map[string]int) int {
+	maxChars := resolveToolResultMax(toolName, ToolResultBudgetOptions{ToolMaxResultSizeChars: policy})
+	if maxChars == UnlimitedToolResultSizeChars {
+		return spillThreshold
+	}
+	if maxChars > 0 && maxChars < spillThreshold {
+		return maxChars
+	}
+	return spillThreshold
+}
+
+func contextResultMaxChars(toolName string, cloudResult bool, defaultMax int, policy map[string]int) int {
+	if cloudResult {
+		return 60000
+	}
+	if defaultMax <= 0 {
+		defaultMax = 30000
+	}
+	maxChars := resolveToolResultMax(toolName, ToolResultBudgetOptions{ToolMaxResultSizeChars: policy})
+	if maxChars == UnlimitedToolResultSizeChars {
+		return defaultMax
+	}
+	if maxChars > 0 && maxChars < defaultMax {
+		return maxChars
+	}
+	return defaultMax
+}
+
 // cleanupSpills removes all spill files for a given session ID.
 func cleanupSpills(shannonDir, sessionID string) {
 	if shannonDir == "" {

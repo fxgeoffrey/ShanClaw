@@ -2748,6 +2748,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 
 		// ---- Phase 3 (serial): post-hooks, audit, events, context recording, loop detection ----
 		// Iterate ALL tool calls in original order so results are recorded in the correct sequence.
+		toolResultPolicy := a.toolResultPolicy()
 		for idx, fc := range toolCalls {
 			argsStr := callMeta[idx].argsStr
 			decision := callMeta[idx].decision
@@ -2811,19 +2812,12 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				}
 			}
 
-			// Disk spill: results > 50K chars are saved to a temp file and
-			// replaced with a short preview so they don't blow up context.
-			if len([]rune(cleanResult)) > spillThreshold {
-				if spilled, spillErr := spillToDisk(a.shannonDir, a.sessionID, generateCallID(), cleanResult); spillErr == nil {
-					cleanResult = spilled
-				}
-				// On spill error, fall through to normal truncation.
-			}
+			// Disk spill: large results are saved to disk and replaced with a
+			// preview before they enter conversation context. Per-tool policy
+			// can lower the default 50K threshold (e.g. grep=20K, bash=30K).
+			cleanResult = applyPerResultSpill(cleanResult, fc.Name, a.shannonDir, a.sessionID, toolResultPolicy)
 
-			maxChars := a.resultTrunc
-			if result.CloudResult {
-				maxChars = 60000
-			}
+			maxChars := contextResultMaxChars(fc.Name, result.CloudResult, a.resultTrunc, toolResultPolicy)
 			contextResult := truncateStr(cleanResult, maxChars)
 
 			// System reminders: append short contextual hints to high-signal

@@ -188,12 +188,21 @@ func (c *Client) SetApprovalBroker(b *ApprovalBroker) {
 }
 
 // SendApprovalRequest sends an approval_request message over WS.
+//
+// The envelope's MessageID is set from req.MessageID (the inbound claim's ID).
+// Cloud reads it from the envelope, not the payload, to resolve the originating
+// channel/thread for the approval card. Sending without a MessageID will be
+// rejected fail-closed by Cloud.
 func (c *Client) SendApprovalRequest(req ApprovalRequest) error {
 	payload, err := json.Marshal(req)
 	if err != nil {
 		return err
 	}
-	return c.sendEnvelope(DaemonMessage{Type: MsgTypeApprovalRequest, Payload: payload})
+	return c.sendEnvelope(DaemonMessage{
+		Type:      MsgTypeApprovalRequest,
+		MessageID: req.MessageID,
+		Payload:   payload,
+	})
 }
 
 // SendApprovalResolved sends an approval_resolved message over WS to Cloud.

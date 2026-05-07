@@ -398,3 +398,71 @@ func TestClient_SendReply_CleansUpSeq(t *testing.T) {
 		t.Error("eventSeqs entry should have been deleted by SendReply")
 	}
 }
+
+// Locks down the cross-repo contract with shannon-cloud: approval_request must
+// carry the inbound claim's WS envelope MessageID. Cloud reads it from the
+// envelope (not the payload) to look up channel/thread context for the
+// approval card. Empty MessageID triggers Cloud's fail-closed drop.
+func TestClient_SendApprovalRequest_PutsMessageIDOnEnvelope(t *testing.T) {
+	received := make(chan DaemonMessage, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var dm DaemonMessage
+		if err := conn.ReadJSON(&dm); err != nil {
+			return
+		}
+		received <- dm
+	}))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	c := NewClient(wsURL, "", nil, nil)
+	if err := c.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	req := ApprovalRequest{
+		MessageID: "claim-msg-42",
+		Channel:   "slack",
+		ThreadID:  "C123-1700000000.000050",
+		RequestID: "apr_test",
+		Tool:      "bash",
+		Args:      `{"command":"ls"}`,
+		Agent:     "test-agent",
+	}
+	if err := c.SendApprovalRequest(req); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case dm := <-received:
+		if dm.Type != MsgTypeApprovalRequest {
+			t.Errorf("envelope Type = %q, want %q", dm.Type, MsgTypeApprovalRequest)
+		}
+		if dm.MessageID != "claim-msg-42" {
+			t.Errorf("envelope MessageID = %q, want %q (Cloud will fail-closed without this)",
+				dm.MessageID, "claim-msg-42")
+		}
+		// Confirm MessageID is NOT also serialized into the payload — that
+		// would suggest the field accidentally lost its `json:"-"` tag.
+		if strings.Contains(string(dm.Payload), "claim-msg-42") {
+			t.Errorf("payload should not echo MessageID; got: %s", string(dm.Payload))
+		}
+		// Sanity-check the payload still carries what Cloud expects.
+		var payload ApprovalRequest
+		if err := json.Unmarshal(dm.Payload, &payload); err != nil {
+			t.Fatalf("payload not valid ApprovalRequest JSON: %v", err)
+		}
+		if payload.RequestID != "apr_test" || payload.Tool != "bash" || payload.Agent != "test-agent" {
+			t.Errorf("unexpected payload contents: %+v", payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not receive approval_request envelope")
+	}
+}

@@ -28,7 +28,15 @@ const (
 )
 
 // ApprovalRequest is sent by daemon when a tool needs user approval.
+//
+// MessageID carries the WebSocket envelope's `message_id` (the inbound claim's
+// ID) — Cloud reads it from DaemonMessage.MessageID to look up channel/thread
+// context for the approval card. Marked `json:"-"` so it does not leak into
+// the payload body; Client.SendApprovalRequest is responsible for copying it
+// onto the envelope at send time. When MessageID is empty, Cloud will
+// fail-closed (see shannon-cloud `handleApprovalRequest`).
 type ApprovalRequest struct {
+	MessageID string `json:"-"`
 	Channel   string `json:"channel"`
 	ThreadID  string `json:"thread_id"`
 	RequestID string `json:"request_id"`

@@ -53,7 +53,12 @@ func (b *ApprovalBroker) SetOnRequest(fn func(requestID, tool, args string)) {
 
 // Request sends an approval_request and blocks until the response arrives
 // or ctx is cancelled. Returns DecisionDeny if send fails or ctx is done.
-func (b *ApprovalBroker) Request(ctx context.Context, channel, threadID, agent, tool, args string) ApprovalDecision {
+//
+// messageID must be the inbound claim's WS envelope ID — Cloud uses it to
+// resolve the originating channel/thread for the approval card. Pass "" only
+// from non-channel-routed paths (e.g. the local SSE dev server, where there
+// is no Cloud claim and the approval flow stays in-process).
+func (b *ApprovalBroker) Request(ctx context.Context, messageID, channel, threadID, agent, tool, args string) ApprovalDecision {
 	if b.IsToolAutoApproved(tool) {
 		return DecisionAllow
 	}
@@ -83,6 +88,7 @@ func (b *ApprovalBroker) Request(ctx context.Context, channel, threadID, agent, 
 	}
 
 	req := ApprovalRequest{
+		MessageID: messageID,
 		Channel:   channel,
 		ThreadID:  threadID,
 		RequestID: reqID,

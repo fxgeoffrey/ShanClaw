@@ -34,7 +34,7 @@ func TestApprovalBroker_RequestResolve(t *testing.T) {
 		broker.Resolve(reqID, DecisionAllow)
 	}()
 
-	decision := broker.Request(context.Background(), "ch1", "th1", "bot", "bash", `{"command":"ls"}`)
+	decision := broker.Request(context.Background(), "msg-1", "ch1", "th1", "bot", "bash", `{"command":"ls"}`)
 	if decision != DecisionAllow {
 		t.Errorf("expected allow, got %s", decision)
 	}
@@ -43,6 +43,9 @@ func TestApprovalBroker_RequestResolve(t *testing.T) {
 	}
 	if sent[0].Tool != "bash" {
 		t.Errorf("expected tool=bash, got %s", sent[0].Tool)
+	}
+	if sent[0].MessageID != "msg-1" {
+		t.Errorf("expected MessageID=msg-1 on the broker request, got %q", sent[0].MessageID)
 	}
 }
 
@@ -55,7 +58,7 @@ func TestApprovalBroker_ContextCancel(t *testing.T) {
 		cancel()
 	}()
 
-	decision := broker.Request(ctx, "ch1", "th1", "bot", "bash", `{}`)
+	decision := broker.Request(ctx, "msg-1", "ch1", "th1", "bot", "bash", `{}`)
 	if decision != DecisionDeny {
 		t.Errorf("expected deny on ctx cancel, got %s", decision)
 	}
@@ -67,7 +70,7 @@ func TestApprovalBroker_CancelAll(t *testing.T) {
 	results := make(chan ApprovalDecision, 3)
 	for i := 0; i < 3; i++ {
 		go func() {
-			results <- broker.Request(context.Background(), "ch1", "th1", "bot", "bash", `{}`)
+			results <- broker.Request(context.Background(), "msg-1", "ch1", "th1", "bot", "bash", `{}`)
 		}()
 	}
 
@@ -93,7 +96,7 @@ func TestApprovalBroker_SendFails(t *testing.T) {
 		return fmt.Errorf("not connected")
 	})
 
-	decision := broker.Request(context.Background(), "ch1", "th1", "bot", "bash", `{}`)
+	decision := broker.Request(context.Background(), "msg-1", "ch1", "th1", "bot", "bash", `{}`)
 	if decision != DecisionDeny {
 		t.Errorf("expected deny on send failure, got %s", decision)
 	}
@@ -120,7 +123,7 @@ func TestApprovalBroker_ConcurrentRequests(t *testing.T) {
 
 	for i := 0; i < n; i++ {
 		go func() {
-			results <- broker.Request(context.Background(), "ch1", "th1", "bot", "bash", `{}`)
+			results <- broker.Request(context.Background(), "msg-1", "ch1", "th1", "bot", "bash", `{}`)
 		}()
 	}
 

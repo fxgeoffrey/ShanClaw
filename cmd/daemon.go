@@ -651,7 +651,7 @@ func (h *daemonEventHandler) OnApprovalNeeded(tool string, args string) bool {
 		log.Printf("daemon: auto-approving %s (auto_approve=true)", tool)
 		return true
 	}
-	decision := h.broker.Request(h.ctx, h.channel, h.threadID, h.agent, tool, args)
+	decision := h.broker.Request(h.ctx, h.messageID, h.channel, h.threadID, h.agent, tool, args)
 	if decision == daemon.DecisionAlwaysAllow {
 		if tool == "bash" {
 			cmd := permissions.ExtractField(args, "command")

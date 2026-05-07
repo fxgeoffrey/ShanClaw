@@ -1451,7 +1451,9 @@ func (h *sseEventHandler) OnApprovalNeeded(tool string, args string) bool {
 		log.Printf("sse: auto-approving %s (auto_approve=true)", tool)
 		return true
 	}
-	decision := h.broker.Request(h.ctx, "", "", "", tool, args)
+	// Local SSE path: no Cloud claim, so messageID is empty. The broker stays
+	// in-process via its own pending map, no WS envelope round-trips Cloud.
+	decision := h.broker.Request(h.ctx, "", "", "", "", tool, args)
 	if decision == DecisionAlwaysAllow {
 		if tool == "bash" {
 			cmd := permissions.ExtractField(args, "command")

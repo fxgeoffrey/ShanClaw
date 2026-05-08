@@ -82,6 +82,45 @@ func shouldPreflightCompact(messages []client.Message, contextWindow int) bool {
 	return ctxwin.EstimateTokens(messages) >= threshold
 }
 
+// emitCompactionFailureStatus surfaces a compaction failure as a non-fatal
+// run-status event so daemon SSE / Desktop subscribers can show degradation
+// to operators. Replaces 9 stderr-only sites scattered through the proactive
+// and reactive compaction paths.
+//
+// Safe to call with nil handler or any handler that doesn't implement
+// RunStatusHandler — both are silently skipped.
+func emitCompactionFailureStatus(handler any, phase string, err error) {
+	if handler == nil {
+		return
+	}
+	rs, ok := handler.(RunStatusHandler)
+	if !ok {
+		return
+	}
+	rs.OnRunStatus(string(runstatus.CodeContextCompactionFailed),
+		fmt.Sprintf("%s: %v", phase, err))
+}
+
+// recordCompactionFailure emits a compaction-failed run-status event and an
+// audit row in one call. Replaces the emit + if-auditor-then-Log pair that was
+// duplicated across the proactive, preflight, and reactive compaction paths.
+//
+// The phase tag goes into OutputSummary (alongside the error) instead of
+// ToolName, matching the schema convention at audit/audit.go:13 — non-tool
+// entries leave ToolName empty (force_stop is the existing precedent).
+func (a *AgentLoop) recordCompactionFailure(phase string, err error) {
+	emitCompactionFailureStatus(a.handler, phase, err)
+	if a.auditor != nil {
+		a.auditor.Log(audit.AuditEntry{
+			Timestamp:     time.Now(),
+			SessionID:     a.sessionID,
+			Event:         "compaction_failed",
+			OutputSummary: fmt.Sprintf("phase=%s err=%v", phase, err),
+			Approved:      false,
+		})
+	}
+}
+
 // buildSkillListing formats a <system-reminder> with skill descriptions
 // for injection as a user message. Uses rune-safe truncation with a total
 // character budget.
@@ -2000,9 +2039,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 						restoreLLM()
 						a.emitInternalUsage(pUsage)
 						if pErr != nil {
-							fmt.Fprintf(os.Stderr, "[context] persist learnings failed: %v\n", pErr)
-						} else {
-							fmt.Fprintf(os.Stderr, "[context] persisted learnings to MEMORY.md\n")
+							a.recordCompactionFailure("proactive_persist_learnings", pErr)
 						}
 					}
 
@@ -2015,7 +2052,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 					case sumErr != nil:
 						summaryFailures++
 						lastSummaryFailureIter = i
-						fmt.Fprintf(os.Stderr, "[context] compaction summary failed (%d/%d): %v\n", summaryFailures, maxSummaryFailures, sumErr)
+						a.recordCompactionFailure("proactive_summary_failure", sumErr)
 					case trimmedSummary == "":
 						// Non-error empty summary: the small-tier model produced output that
 						// extractSummary filtered to "" (e.g. <analysis> only, no <summary>
@@ -2023,7 +2060,8 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 						// fires instead of trying compaction every iteration.
 						summaryFailures++
 						lastSummaryFailureIter = i
-						fmt.Fprintf(os.Stderr, "[context] compaction summary empty (%d/%d) — prompt under-fit; backing off\n", summaryFailures, maxSummaryFailures)
+						a.recordCompactionFailure("proactive_summary_empty",
+							fmt.Errorf("empty summary (%d/%d) — prompt under-fit", summaryFailures, maxSummaryFailures))
 					default:
 						summaryFailures = 0 // reset on real success
 						// lastSummaryFailureIter intentionally NOT reset: the summaryFailures
@@ -2182,8 +2220,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				messages = ctxwin.ShapeHistory(emergencyMessages, strings.TrimSpace(summary), a.contextWindow)
 			} else {
 				// Summary failed; ShapeHistory without summary still drops middle messages.
-				// Telemetry handled in Task 5 — for this task, keep stderr to avoid duplicate work.
-				fmt.Fprintf(os.Stderr, "[context] preflight summary failed, shaping without summary: %v\n", sumErr)
+				a.recordCompactionFailure("preflight_summary_failure", sumErr)
 				messages = ctxwin.ShapeHistory(emergencyMessages, "", a.contextWindow)
 			}
 			if dropped := before - len(messages); dropped > 0 {
@@ -2318,7 +2355,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 					restoreLLM()
 					a.emitInternalUsage(pUsage)
 					if pErr != nil {
-						fmt.Fprintf(os.Stderr, "[context] reactive persist learnings failed: %v\n", pErr)
+						a.recordCompactionFailure("reactive_persist_learnings", pErr)
 					}
 				}
 
@@ -2332,11 +2369,11 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				restoreLLM()
 				a.emitInternalUsage(sumUsage)
 				if sumErr != nil {
+					phaseTag := "reactive_summary_no_prior"
 					if nextSummary != "" {
-						fmt.Fprintf(os.Stderr, "[context] reactive summary failed, reusing prior summary: %v\n", sumErr)
-					} else {
-						fmt.Fprintf(os.Stderr, "[context] reactive summary failed, shaping without summary: %v\n", sumErr)
+						phaseTag = "reactive_summary_with_prior"
 					}
+					a.recordCompactionFailure(phaseTag, sumErr)
 				} else if trimmed := strings.TrimSpace(summary); trimmed != "" {
 					nextSummary = trimmed
 				}
@@ -2352,11 +2389,11 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 					restoreLLM()
 					a.emitInternalUsage(sumUsage)
 					if sumErr != nil {
+						phaseTag := "emergency_summary_no_prior"
 						if nextSummary != "" {
-							fmt.Fprintf(os.Stderr, "[context] emergency reactive summary failed, keeping prior summary: %v\n", sumErr)
-						} else {
-							fmt.Fprintf(os.Stderr, "[context] emergency reactive summary failed, shaping without summary: %v\n", sumErr)
+							phaseTag = "emergency_summary_with_prior"
 						}
+						a.recordCompactionFailure(phaseTag, sumErr)
 					} else if trimmed := strings.TrimSpace(summary); trimmed != "" {
 						nextSummary = trimmed
 					}

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
 )
@@ -1334,6 +1336,76 @@ func TestEffectiveContextWindow_AutoFromModel(t *testing.T) {
 				t.Errorf("got %d, want %d", got, tc.want)
 			}
 		})
+	}
+}
+
+// statusRecorder captures OnRunStatus calls for assertions. It also satisfies
+// EventHandler with no-op stubs so it can be assigned to AgentLoop.handler in
+// tests that exercise recordCompactionFailure end-to-end.
+type statusRecorder struct {
+	events []recordedStatus
+}
+
+type recordedStatus struct{ code, detail string }
+
+func (s *statusRecorder) OnRunStatus(code, detail string) {
+	s.events = append(s.events, recordedStatus{code, detail})
+}
+
+// EventHandler stubs — no behavior, just to satisfy the interface.
+func (s *statusRecorder) OnToolCall(name string, args string)                          {}
+func (s *statusRecorder) OnToolResult(string, string, ToolResult, time.Duration)       {}
+func (s *statusRecorder) OnText(string)                                                {}
+func (s *statusRecorder) OnPreamble(string)                                            {}
+func (s *statusRecorder) OnStreamDelta(string)                                         {}
+func (s *statusRecorder) OnApprovalNeeded(string, string) bool                         { return false }
+func (s *statusRecorder) OnUsage(TurnUsage)                                            {}
+func (s *statusRecorder) OnCloudAgent(agentID string, status string, message string)   {}
+func (s *statusRecorder) OnCloudProgress(int, int)                                     {}
+func (s *statusRecorder) OnCloudPlan(planType string, content string, needsReview bool) {
+}
+
+func TestEmitCompactionFailureStatus_PostsToHandler(t *testing.T) {
+	rec := &statusRecorder{}
+	emitCompactionFailureStatus(rec, "reactive_summary_with_prior", errors.New("synthetic 500"))
+
+	if len(rec.events) != 1 {
+		t.Fatalf("expected 1 OnRunStatus event, got %d", len(rec.events))
+	}
+	if rec.events[0].code != "compaction_failed" {
+		t.Errorf("code = %q, want compaction_failed", rec.events[0].code)
+	}
+	if !strings.Contains(rec.events[0].detail, "reactive_summary_with_prior") ||
+		!strings.Contains(rec.events[0].detail, "synthetic 500") {
+		t.Errorf("detail missing context: %q", rec.events[0].detail)
+	}
+}
+
+func TestEmitCompactionFailureStatus_HandlesNilHandler(t *testing.T) {
+	// nil handler must not panic.
+	emitCompactionFailureStatus(nil, "any_phase", errors.New("err"))
+}
+
+func TestEmitCompactionFailureStatus_HandlesNonRunStatusHandler(t *testing.T) {
+	// Handler that doesn't implement RunStatusHandler must be silently skipped.
+	bareHandler := struct{}{}
+	emitCompactionFailureStatus(bareHandler, "any_phase", errors.New("err"))
+}
+
+func TestRecordCompactionFailure_EmitsBothChannels(t *testing.T) {
+	rec := &statusRecorder{}
+	a := &AgentLoop{handler: rec, auditor: nil} // auditor=nil exercises the nil guard
+	a.recordCompactionFailure("test_phase", errors.New("boom"))
+
+	if len(rec.events) != 1 {
+		t.Fatalf("expected 1 OnRunStatus event, got %d", len(rec.events))
+	}
+	if rec.events[0].code != "compaction_failed" {
+		t.Errorf("code = %q, want compaction_failed", rec.events[0].code)
+	}
+	if !strings.Contains(rec.events[0].detail, "test_phase") ||
+		!strings.Contains(rec.events[0].detail, "boom") {
+		t.Errorf("detail missing context: %q", rec.events[0].detail)
 	}
 }
 

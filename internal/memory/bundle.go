@@ -51,7 +51,7 @@ func NewPuller(cfg Config, sidecar *Sidecar, audit AuditLogger) *Puller {
 	}
 }
 
-// versionInRange enforces [0.4.0, 0.5.0). Hand-rolled (no semver dep) — the
+// versionInRange enforces [0.4.0, 0.7.0). Hand-rolled (no semver dep) — the
 // constraint is fixed and trivially encodable as integer triplets.
 func versionInRange(v string) bool {
 	parts := strings.SplitN(v, ".", 3)
@@ -65,7 +65,7 @@ func versionInRange(v string) bool {
 	if maj != 0 {
 		return false
 	}
-	if min != 4 {
+	if min < 4 || min >= 7 {
 		return false
 	}
 	return pat >= 0
@@ -121,7 +121,7 @@ func (p *Puller) tick(ctx context.Context) error {
 		return err
 	}
 	if !versionInRange(mf.BundleVersion) {
-		return fmt.Errorf("bundle_version %q outside [0.4.0, 0.5.0)", mf.BundleVersion)
+		return fmt.Errorf("bundle_version %q outside [0.4.0, 0.7.0)", mf.BundleVersion)
 	}
 
 	// Step 4: compare ts

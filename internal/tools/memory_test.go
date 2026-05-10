@@ -72,14 +72,16 @@ func TestMemoryTool_RejectsMalformedJSON(t *testing.T) {
 	}
 }
 
-func TestMemoryTool_RejectsBroadStructuredDirectRelation(t *testing.T) {
+func TestMemoryTool_AllowsDirectRelationWithoutConstraints(t *testing.T) {
+	// direct_relation without relation_constraints is valid — TLM performs a
+	// general neighborhood lookup. Only broad vague relations are blocked.
 	tool := &MemoryTool{
 		Service:  &stubQuerier{status: memory.StatusReady, env: &memory.ResponseEnvelope{}, class: memory.ClassOK},
 		Fallback: &fakeFallback{},
 	}
 	res, _ := tool.Run(context.Background(), `{"mode":"direct_relation","anchor_mentions":["Nexus"]}`)
-	if !res.IsError || !strings.Contains(res.Content, "direct_relation requires") {
-		t.Fatalf("expected direct_relation relation guard, got %+v", res)
+	if res.IsError {
+		t.Fatalf("direct_relation without constraints should be allowed, got error: %s", res.Content)
 	}
 }
 

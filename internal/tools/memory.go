@@ -150,10 +150,6 @@ func validateMemoryArgs(a memoryArgs) string {
 		}
 	}
 	switch memory.QueryMode(a.Mode) {
-	case memory.ModeDirectRelation:
-		if len(a.RelationConstraints) == 0 {
-			return "direct_relation requires at least one relation_constraints value. Choose a concrete relation for the user's question, or use session_search for raw private-context lookup."
-		}
 	case memory.ModeTypedNeighborhood:
 		if a.CandidateType == nil || strings.TrimSpace(*a.CandidateType) == "" {
 			return "typed_neighborhood requires candidate_type. Ask the user to narrow the target type, or use direct_relation/path_query when a relation is clear."

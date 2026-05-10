@@ -113,7 +113,7 @@ func (t *MemoryTool) IsReadOnlyCall(string) bool { return true }
 
 func (t *MemoryTool) Run(ctx context.Context, argsJSON string) (agent.ToolResult, error) {
 	var a memoryArgs
-	if err := json.Unmarshal([]byte(argsJSON), &a); err != nil {
+	if err := json.Unmarshal([]byte(coerceMemoryArgs(argsJSON)), &a); err != nil {
 		return agent.ToolResult{Content: fmt.Sprintf("invalid input: %v", err), IsError: true}, nil
 	}
 	if len(a.AnchorMentions) == 0 {
@@ -175,6 +175,48 @@ func isBroadMemoryRelation(rel string) bool {
 	default:
 		return false
 	}
+}
+
+// coerceMemoryArgs handles the model occasionally passing array/int fields as
+// JSON-encoded strings (e.g. `"anchor_mentions": "[\"Foo\"]"` instead of
+// `"anchor_mentions": ["Foo"]`). Parses the raw map and re-encodes only if
+// coercion was needed; returns argsJSON unchanged on any error.
+func coerceMemoryArgs(argsJSON string) string {
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(argsJSON), &raw); err != nil {
+		return argsJSON
+	}
+	changed := false
+	for _, field := range []string{"anchor_mentions", "relation_constraints", "scope_filter"} {
+		if v, ok := raw[field]; ok {
+			if s, isStr := v.(string); isStr {
+				var arr []string
+				if err := json.Unmarshal([]byte(s), &arr); err == nil {
+					raw[field] = arr
+					changed = true
+				}
+			}
+		}
+	}
+	for _, field := range []string{"result_limit", "evidence_budget"} {
+		if v, ok := raw[field]; ok {
+			if s, isStr := v.(string); isStr {
+				var n float64
+				if err := json.Unmarshal([]byte(s), &n); err == nil {
+					raw[field] = n
+					changed = true
+				}
+			}
+		}
+	}
+	if !changed {
+		return argsJSON
+	}
+	out, err := json.Marshal(raw)
+	if err != nil {
+		return argsJSON
+	}
+	return string(out)
 }
 
 // run is the post-validation path. Implements the four class branches

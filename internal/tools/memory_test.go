@@ -548,3 +548,20 @@ func TestMemoryTool_FallbackInvokesProvider(t *testing.T) {
 		t.Fatalf("expected 2 fallback candidates (1 session hit + 1 MEMORY.md snippet), got %d: %+v", len(cands), cands)
 	}
 }
+
+func TestMemoryTool_CoercesStringEncodedArrays(t *testing.T) {
+	// Model sometimes passes arrays/ints as JSON-encoded strings.
+	// coerceMemoryArgs should fix these transparently.
+	tool := &MemoryTool{Fallback: &fakeFallback{}}
+
+	// anchor_mentions and relation_constraints as JSON-encoded strings, result_limit as string
+	res, err := tool.Run(context.Background(),
+		`{"mode":"direct_relation","anchor_mentions":"[\"Wayland Zhang\"]","relation_constraints":"[\"created\"]","result_limit":"10"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Should not error on parsing — falls back (no service) but input was valid after coercion
+	if res.IsError {
+		t.Fatalf("expected successful coercion, got error: %s", res.Content)
+	}
+}

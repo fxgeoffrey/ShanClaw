@@ -2,6 +2,58 @@
 
 All notable changes to ShanClaw are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## v0.1.5 — 2026-05-11 — Episodic memory (TLM sidecar + session sync default-on)
+
+Ships the full local episodic memory pipeline. The TLM sidecar is now managed by the daemon — it spawns, health-probes, restarts on crash, pulls fresh bundles from Kocoro Cloud every 24h, and hot-reloads the sidecar on install. Session sync is on by default for cloud-connected installs so the training pipeline runs without manual config. CLI and TUI paths now correctly apply cwd-local memory overlays.
+
+### Added
+
+- **TLM sidecar lifecycle management** (`internal/memory/`) — daemon spawns the `tlm` binary, probes `/health`, restarts on crash (up to `memory.sidecar_restart_max` attempts), and tracks `MemoryStatus` (provider, reason, restart_attempts) on `GET /status`. Sidecar process is isolated via `SysProcAttr` + `Pdeathsig` so orphaned sidecar processes are reaped on daemon exit.
+- **`memory_recall` tool** — structured long-term memory lookup via the TLM sidecar's `/query` Unix socket. Modes: `direct_relation` (one-hop predicate) and `path_query` (multi-hop). Returns `memory_block.groups[]` with `via_relations` / `observed_path[]`, `no_data_reason`, and `supporting_event_ids`. Falls back to `session_search` + `MEMORY.md` when sidecar is unavailable.
+- **Bundle puller loop** (`internal/memory/bundle.go`) — 24h ticker with configurable startup delay; `NotifySyncDone()` channel wakes the puller out-of-schedule after a successful session sync. Atomic install via staging dir → `rename` → `current` symlink swap (POSIX-atomic). SHA256-verifies every file. `retain(3)` prunes old bundles to the newest 3.
+- **`OnSyncDone` hook** (`internal/daemon/server.go`) — wires `memSvc.NotifySyncDone()` into the sync loop so a successful session upload immediately triggers a bundle freshness check.
+- **`MemoryStatus` on `GET /status`** — `{ provider: "enabled"|"disabled", reason: null|"startup_timeout"|"repeated_crash"|"tlm_binary_missing"|..., detail: { restart_attempts: N } }`. Updated every 5s by the existing polling loop.
+
+### Fixed
+
+- **`memory_recall` string-encoded array coercion** — TLM occasionally returned `relation_candidates` / `scope_clues` as JSON-encoded strings (`"[...]"`) instead of arrays. Input validator now detects and re-parses these before the pydantic validation step, eliminating `extraction_tool_invalid_input` skips on those sessions.
+- **`direct_relation` no longer requires `relation_constraints`** — the field is optional for direct-relation queries; requiring it was blocking valid queries. `relation_constraints` remains required for `path_query`.
+- **CLI / TUI memory config now uses runtime overlays** (`cmd/root.go`, `internal/tui/app.go`) — both paths now call `memory.LoadConfigFromRuntime(runCfg)` instead of reading from process-global viper. Project-local `.shannon/config.yaml` memory overrides (`socket_path`, `provider`, `tlm_path`) now take effect for one-shot and TUI runs.
+
+### Changed
+
+- **`sync.enabled` default is now `true`** — session sync is on by default when `cloud.api_key` and `cloud.endpoint` are configured. OSS users without credentials skip each tick with a single log line; no user-visible impact. Disable with `sync.enabled: false` or the Episodic Memory toggle in Kocoro Desktop settings.
+
+### Cross-repo consumers
+
+- **ShanClaw Desktop 0.1.5**: helper bundle rebuilt against this tag. Episodic Memory toggle in Settings → Advanced → Beta controls `memory.provider` + `sync.enabled` together via `PATCH /config`.
+- **Shannon Cloud**: `UpsertTenantTrainState` (PR #128) ensures the first accepted session sync immediately schedules training. `cloud_memory_enabled` feature flag must be set per tenant for the manifest endpoint to serve bundles.
+- **tensorlogic-memory**: sidecar binary (`tlm`) must be at `v0.6.0`; bundle format version `0.6.x` required. Earlier bundle versions are rejected at the version gate (`versionInRange`).
+
+---
+
+## v0.1.4 — 2026-05-09 — Image generation + approval broker hardening
+
+Adds `generate_image` and `edit_image` cloud tools, fixes the approval broker for `DisallowsAutoApproval` tools so they always route through a human decision, and patches the memory bundle gate to accept v0.6 bundles.
+
+### Added
+
+- **`generate_image` tool** — calls Shannon Cloud `POST /api/v1/images/generations`. Requires `cloud.enabled: true` + `api_key`. Returns an inline image result; per-call approval gated via `DisallowsAutoApproval`.
+- **`edit_image` tool** — calls Shannon Cloud `POST /api/v1/images/edits`. Same cloud + approval requirements as `generate_image`. Accepts an existing image path + prompt; returns edited image.
+
+### Fixed
+
+- **`DisallowsAutoApproval` tools now route through approval broker** (`internal/daemon`) — image tools and other per-call-gated tools were bypassing the broker on the daemon WS path. Now correctly sends an `approval_request` envelope and waits for the human decision rather than auto-approving.
+- **Memory bundle gate accepts v0.6 downloads** (`internal/memory`) — `versionInRange` was rejecting `0.6.x` bundles; upper bound raised to accept the current TLM bundle format.
+- **Prompt length uses rune count** (`internal/tools`) — image prompt length validation was byte-counting; switched to `utf8.RuneCountInString` so CJK prompts are not incorrectly rejected.
+- **Generative UI skill scoped to visualization only** — skill description tightened to prevent the model from using the HTML artifact path for general-purpose output.
+
+### Docs
+
+- Image tool registration guide added to CLAUDE.md / AGENTS.md.
+
+---
+
 ## v0.1.3 — 2026-05-08 — Cross-repo coordination + publish_to_web
 
 Bundles two cross-repo tracks and one major new tool. The WS handshake + `delivery_ack` capability close the loop with Shannon Cloud's Phase 4 inbound queue / replay buffer (Cloud-side ships in parallel, gates on the capability so old daemons stay on legacy fire-and-forget). The new **publish_to_web** tool (#116) ships permanent-public-URL file upload with multi-layer guards and a framework-level per-call approval gate. 429 sub-codes are now properly disambiguated so quota / credits-exhausted users see actionable messages instead of the generic "try again in a moment". Plus the **agent preamble** feature (#115) that gives Slack / Feishu / Desktop users live "about to run X" narration between tool calls.

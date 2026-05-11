@@ -96,16 +96,29 @@ func (a *AgentLoop) shortSessionTruncate(messages []client.Message, sourceTag st
 	if len(messages) > ctxwin.MinShapeable() {
 		return messages
 	}
-	var dropped int
-	messages, dropped = ctxwin.TruncateOversizedLastUserMessage(messages, a.contextWindow)
-	if dropped > 0 {
+	totalDropped := 0
+	truncations := 0
+	maxAttempts := len(messages)
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	for shouldPreflightCompact(messages, a.contextWindow) && truncations < maxAttempts {
+		var dropped int
+		messages, dropped = ctxwin.TruncateOversizedLastUserMessage(messages, a.contextWindow)
+		if dropped <= 0 {
+			break
+		}
+		totalDropped += dropped
+		truncations++
+	}
+	if totalDropped > 0 {
 		if rs, ok := a.handler.(RunStatusHandler); ok {
 			rs.OnRunStatus("preflight_user_truncate",
-				fmt.Sprintf("%s: truncated user message by %d chars (short session, %d msgs, est %d tokens)",
-					sourceTag, dropped, len(messages), ctxwin.EstimateTokens(messages)))
+				fmt.Sprintf("%s: truncated user messages by %d chars across %d message(s) (short session, %d msgs, est %d tokens)",
+					sourceTag, totalDropped, truncations, len(messages), ctxwin.EstimateTokens(messages)))
 		}
 		a.recordCompactionSuccess("short_session_truncate",
-			fmt.Sprintf("source=%s msgs=%d chars_dropped=%d", sourceTag, len(messages), dropped))
+			fmt.Sprintf("source=%s msgs=%d truncations=%d chars_dropped=%d", sourceTag, len(messages), truncations, totalDropped))
 	}
 	return messages
 }
@@ -1530,7 +1543,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				if first && msg.Role == "user" && !msg.Content.HasBlocks() && msg.Content.Text() == scaffoldedUserText {
 					msg = client.Message{
 						Role:    "user",
-						Content: client.NewTextContent(userMessage),
+						Content: client.NewTextContent(rawUserMessage),
 					}
 				}
 				first = false
@@ -1689,6 +1702,44 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		}
 	}
 
+	truncateRawUserForPersistence := func(raw string) string {
+		if raw == "" {
+			return raw
+		}
+		rawMsgs := []client.Message{
+			{Role: "user", Content: client.NewTextContent(raw)},
+		}
+		rawMsgs, dropped := ctxwin.TruncateOversizedLastUserMessage(rawMsgs, a.contextWindow)
+		if dropped <= 0 || len(rawMsgs) == 0 || rawMsgs[0].Content.HasBlocks() {
+			return raw
+		}
+		return rawMsgs[0].Content.Text()
+	}
+
+	applyShortSessionTruncate := func(sourceTag string) {
+		currentBefore := ""
+		if newMsgOffset >= 0 && newMsgOffset < len(messages) {
+			m := messages[newMsgOffset]
+			if m.Role == "user" && !m.Content.HasBlocks() {
+				currentBefore = m.Content.Text()
+			}
+		}
+		messages = a.shortSessionTruncate(messages, sourceTag)
+		if currentBefore == "" || currentBefore != scaffoldedUserText || newMsgOffset < 0 || newMsgOffset >= len(messages) {
+			return
+		}
+		m := messages[newMsgOffset]
+		if m.Role != "user" || m.Content.HasBlocks() {
+			return
+		}
+		currentAfter := m.Content.Text()
+		if currentAfter == currentBefore {
+			return
+		}
+		scaffoldedUserText = currentAfter
+		rawUserMessage = truncateRawUserForPersistence(rawUserMessage)
+	}
+
 	// runForceStopTurn issues the final non-tool LLM turn after the loop
 	// detector decided to stop. It preserves the live agent config so this
 	// turn behaves like every other turn (MaxTokens, Thinking, SpecificModel,
@@ -1722,7 +1773,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		// Short-session fallback: if the prompt is over preflight threshold but
 		// len(messages) <= MinShapeable, ShapeHistory below is gated off but
 		// a single huge user message can still be rune-safely truncated.
-		messages = a.shortSessionTruncate(messages, "force_stop")
+		applyShortSessionTruncate("force_stop")
 
 		// Pre-flight guard for the force-stop final turn. Same rationale as the
 		// main loop guard above. We do NOT gate on compactionApplied here:
@@ -2283,7 +2334,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		// Short-session fallback: catches single huge user message when
 		// len(messages) is below MinShapeable. See shortSessionTruncate
 		// docstring + 2026-05-11 stress P0-#1.
-		messages = a.shortSessionTruncate(messages, "main_preflight")
+		applyShortSessionTruncate("main_preflight")
 
 		// Pre-flight prompt-size guard: if the soon-to-be-sent prompt estimates
 		// over 95% of the context window, force an emergency compaction before

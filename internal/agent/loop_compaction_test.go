@@ -1336,15 +1336,15 @@ func (s *statusRecorder) OnRunStatus(code, detail string) {
 }
 
 // EventHandler stubs — no behavior, just to satisfy the interface.
-func (s *statusRecorder) OnToolCall(name string, args string)                          {}
-func (s *statusRecorder) OnToolResult(string, string, ToolResult, time.Duration)       {}
-func (s *statusRecorder) OnText(string)                                                {}
-func (s *statusRecorder) OnPreamble(string)                                            {}
-func (s *statusRecorder) OnStreamDelta(string)                                         {}
-func (s *statusRecorder) OnApprovalNeeded(string, string) bool                         { return false }
-func (s *statusRecorder) OnUsage(TurnUsage)                                            {}
-func (s *statusRecorder) OnCloudAgent(agentID string, status string, message string)   {}
-func (s *statusRecorder) OnCloudProgress(int, int)                                     {}
+func (s *statusRecorder) OnToolCall(name string, args string)                        {}
+func (s *statusRecorder) OnToolResult(string, string, ToolResult, time.Duration)     {}
+func (s *statusRecorder) OnText(string)                                              {}
+func (s *statusRecorder) OnPreamble(string)                                          {}
+func (s *statusRecorder) OnStreamDelta(string)                                       {}
+func (s *statusRecorder) OnApprovalNeeded(string, string) bool                       { return false }
+func (s *statusRecorder) OnUsage(TurnUsage)                                          {}
+func (s *statusRecorder) OnCloudAgent(agentID string, status string, message string) {}
+func (s *statusRecorder) OnCloudProgress(int, int)                                   {}
 func (s *statusRecorder) OnCloudPlan(planType string, content string, needsReview bool) {
 }
 
@@ -1421,6 +1421,77 @@ func TestPreflightCompaction_TriggersBeforeOversizedCall(t *testing.T) {
 	// Edge: contextWindow=0 (disabled) → never trigger.
 	if shouldPreflightCompact(messages, 0) {
 		t.Errorf("shouldPreflightCompact = true with contextWindow=0; should be disabled")
+	}
+}
+
+func TestShortSessionTruncate_RepeatsUntilUnderPreflightThreshold(t *testing.T) {
+	loop := &AgentLoop{contextWindow: 200_000}
+	hugeA := strings.Repeat("a", 700_000)
+	hugeB := strings.Repeat("b", 700_000)
+	messages := []client.Message{
+		{Role: "system", Content: client.NewTextContent("sys")},
+		{Role: "user", Content: client.NewTextContent(hugeA)},
+		{Role: "assistant", Content: client.NewTextContent("ack")},
+		{Role: "user", Content: client.NewTextContent(hugeB)},
+	}
+	if !shouldPreflightCompact(messages, loop.contextWindow) {
+		t.Fatal("test setup invariant: input must exceed preflight threshold")
+	}
+
+	out := loop.shortSessionTruncate(messages, "test")
+	if shouldPreflightCompact(out, loop.contextWindow) {
+		t.Fatalf("shortSessionTruncate left prompt over preflight threshold")
+	}
+	if !strings.Contains(out[1].Content.Text(), "user message truncated") {
+		t.Errorf("first oversized user message was not truncated")
+	}
+	if !strings.Contains(out[3].Content.Text(), "user message truncated") {
+		t.Errorf("second oversized user message was not truncated")
+	}
+}
+
+func TestShortSessionTruncate_CurrentTurnRunMessagesStripScaffold(t *testing.T) {
+	var captured []client.CompletionRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req client.CompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		captured = append(captured, req)
+		json.NewEncoder(w).Encode(nativeResponse("ok", "end_turn", nil, 500, 50))
+	}))
+	defer server.Close()
+
+	gw := client.NewGatewayClient(server.URL, "")
+	loop := NewAgentLoop(gw, NewToolRegistry(), "medium", "", 5, 2000, 200, nil, nil, nil)
+	loop.SetContextWindow(200_000)
+
+	huge := strings.Repeat("x", 800_000)
+	result, _, err := loop.Run(context.Background(), huge, nil, nil)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if result != "ok" {
+		t.Fatalf("result = %q, want ok", result)
+	}
+	if len(captured) != 1 {
+		t.Fatalf("expected one main request, got %d", len(captured))
+	}
+	if !strings.Contains(captured[0].Messages[1].Content.Text(), "user message truncated") {
+		t.Fatalf("test setup invariant: outgoing user prompt was not truncated")
+	}
+
+	runMsgs := loop.RunMessages()
+	if len(runMsgs) == 0 {
+		t.Fatal("RunMessages empty")
+	}
+	first := runMsgs[0].Content.Text()
+	if strings.Contains(first, "<!-- cache_break -->") ||
+		strings.Contains(first, "Active agent context") {
+		t.Fatalf("RunMessages leaked scaffolded user prompt after truncation; head=%q", first[:min(200, len(first))])
+	}
+	if !strings.Contains(first, "user message truncated") {
+		t.Fatalf("RunMessages should persist truncated raw user content, got head=%q", first[:min(200, len(first))])
 	}
 }
 

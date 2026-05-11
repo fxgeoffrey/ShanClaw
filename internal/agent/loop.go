@@ -608,27 +608,29 @@ type AgentLoop struct {
 	specificModel     string
 	agentBasePrompt   string
 	agentSkills       []*skills.Skill
+	// contextWindowExplicit is true when set via user config (e.g. per-agent
+	// override); locks against auto-detect from observed model.
 	contextWindow         int
-	contextWindowExplicit bool // true when set via user config; locks against auto-detect from observed model
-	memoryDir         string      // directory containing MEMORY.md; re-read each Run(), write-before-compact target
-	stickyContext     string      // session-scoped facts injected verbatim into system prompt; never truncated
-	outputFormat      string      // "markdown" (default) or "plain" — controls formatting guidance in volatile context
-	userFilePaths     []string    // paths from user-attached file_ref blocks — auto-approved for tool access
-	workingSet        *WorkingSet // session-scoped deferred schema cache injected by the caller
-	sessionID         string      // session ID for audit log correlation
-	sessionCWD        string      // session-scoped working directory; set by runner/TUI before Run()
-	deltaProvider     DeltaProvider
-	injectCh          chan InjectedMessage
-	injectedMessages  []string         // messages injected during the last Run(); cleared on each Run() call
-	runMessages       []client.Message // conversation messages accumulated during the last Run() (excludes system+history)
-	runMsgInjected    []bool           // parallel to runMessages: true = system-injected guardrail/nudge
-	runMsgTimestamps  []time.Time      // parallel to runMessages: when each message was created
-	lastRunStatus     RunStatus
-	toolRefSupported  bool            // true when the configured model supports defer_loading + tool_reference protocol
-	cacheSource       string          // tag sent to gateway on every Complete call for prompt-cache TTL routing
-	skillDiscovery    bool            // call small-tier model on first turn to identify relevant skills (default true)
-	sentSkillNames    map[string]bool // delta tracking: skills already announced to the LLM (persists across Run() calls)
-	readTracker       *ReadTracker    // per-loop: current-turn reads reset each Run; file_read dedup history persists across session Runs
+	contextWindowExplicit bool
+	memoryDir             string      // directory containing MEMORY.md; re-read each Run(), write-before-compact target
+	stickyContext         string      // session-scoped facts injected verbatim into system prompt; never truncated
+	outputFormat          string      // "markdown" (default) or "plain" — controls formatting guidance in volatile context
+	userFilePaths         []string    // paths from user-attached file_ref blocks — auto-approved for tool access
+	workingSet            *WorkingSet // session-scoped deferred schema cache injected by the caller
+	sessionID             string      // session ID for audit log correlation
+	sessionCWD            string      // session-scoped working directory; set by runner/TUI before Run()
+	deltaProvider         DeltaProvider
+	injectCh              chan InjectedMessage
+	injectedMessages      []string         // messages injected during the last Run(); cleared on each Run() call
+	runMessages           []client.Message // conversation messages accumulated during the last Run() (excludes system+history)
+	runMsgInjected        []bool           // parallel to runMessages: true = system-injected guardrail/nudge
+	runMsgTimestamps      []time.Time      // parallel to runMessages: when each message was created
+	lastRunStatus         RunStatus
+	toolRefSupported      bool            // true when the configured model supports defer_loading + tool_reference protocol
+	cacheSource           string          // tag sent to gateway on every Complete call for prompt-cache TTL routing
+	skillDiscovery        bool            // call small-tier model on first turn to identify relevant skills (default true)
+	sentSkillNames        map[string]bool // delta tracking: skills already announced to the LLM (persists across Run() calls)
+	readTracker           *ReadTracker    // per-loop: current-turn reads reset each Run; file_read dedup history persists across session Runs
 	// toolResultReplacements stores stable query-time replacements for large
 	// historical tool_result blocks. It is session-scoped and persisted by
 	// daemon/TUI callers so resumed sessions replay identical bytes.

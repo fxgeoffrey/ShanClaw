@@ -165,22 +165,28 @@ func TruncateOversizedLastUserMessage(messages []client.Message, contextWindow i
 		return messages, 0
 	}
 
-	// Find the most recent user message.
+	// Find the LARGEST plain-text user message — the one actually pushing
+	// the prompt over the threshold. "Most recent" misses the resume case
+	// (daemon/TUI loaded a huge prior user message from session.json, the
+	// new user message is a small follow-up — truncating the small one
+	// does nothing while the huge one continues to blow up the prompt).
+	// Structured content (tool_result / image blocks) is skipped here;
+	// ShapeHistory's full path handles those when message count allows.
 	idx := -1
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == "user" {
+	maxLen := 0
+	for i := 0; i < len(messages); i++ {
+		if messages[i].Role != "user" {
+			continue
+		}
+		if messages[i].Content.HasBlocks() {
+			continue
+		}
+		if l := len(messages[i].Content.Text()); l > maxLen {
+			maxLen = l
 			idx = i
-			break
 		}
 	}
 	if idx < 0 {
-		return messages, 0
-	}
-
-	// Only handle plain-text user messages here. Structured content
-	// (tool_result / image blocks) needs different handling that lives in
-	// ShapeHistory's full path.
-	if messages[idx].Content.HasBlocks() {
 		return messages, 0
 	}
 	text := messages[idx].Content.Text()

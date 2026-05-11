@@ -411,6 +411,32 @@ func TestTruncateOversizedLastUserMessage(t *testing.T) {
 		}
 	})
 
+	// Regression: a huge first user message followed by a small follow-up
+	// (the daemon/TUI resume case) — must still truncate the huge one, not
+	// the small one. Picking "most recent" would silently miss this and
+	// the huge message escapes to the API. (See 2026-05-11 GPT review F1.)
+	t.Run("huge first user message followed by small follow-up", func(t *testing.T) {
+		huge := strings.Repeat("padding ", 100000) // 800K chars
+		msgs := []client.Message{
+			{Role: "system", Content: client.NewTextContent("system")},
+			{Role: "user", Content: client.NewTextContent(huge)},
+			{Role: "assistant", Content: client.NewTextContent("ok")},
+			{Role: "user", Content: client.NewTextContent("继续")},
+		}
+		out, dropped := TruncateOversizedLastUserMessage(msgs, 200000)
+		if dropped == 0 {
+			t.Fatalf("expected truncation of huge first user message, dropped=0")
+		}
+		// Truncation must hit messages[1] (the huge one), not messages[3] (the small one).
+		if !strings.Contains(out[1].Content.Text(), "user message truncated") {
+			t.Errorf("huge first user message (msgs[1]) was not truncated — got body of length %d, head %q",
+				len(out[1].Content.Text()), out[1].Content.Text()[:min(120, len(out[1].Content.Text()))])
+		}
+		if out[3].Content.Text() != "继续" {
+			t.Errorf("small follow-up user message (msgs[3]) was mutated; got %q want \"继续\"", out[3].Content.Text())
+		}
+	})
+
 	t.Run("under-threshold message is unchanged", func(t *testing.T) {
 		small := strings.Repeat("hello ", 100) // 600 chars, ~170 tokens
 		msgs := []client.Message{

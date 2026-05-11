@@ -1745,11 +1745,51 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			if sumErr == nil {
 				messages = ctxwin.ShapeHistory(emergencyMessages, strings.TrimSpace(summary), a.contextWindow)
 			} else {
+				// Summary failed on the force-stop fallback path: emit telemetry
+				// (parity with main-loop preflight at line ~2279) so this last-resort
+				// degradation is visible. ShapeHistory without summary still drops
+				// middle messages. (See 2026-05-11 GPT review F3.)
+				a.recordCompactionFailure("force_stop_summary_failure", sumErr)
 				messages = ctxwin.ShapeHistory(emergencyMessages, "", a.contextWindow)
 			}
-			if len(messages) < fsBefore {
+			if dropped := fsBefore - len(messages); dropped > 0 {
 				a.recordCompactionSuccess("force_stop_preflight",
-					fmt.Sprintf("msgs=%d→%d dropped=%d", fsBefore, len(messages), fsBefore-len(messages)))
+					fmt.Sprintf("msgs=%d→%d dropped=%d", fsBefore, len(messages), dropped))
+				// Rebase run-local indices — same bookkeeping as the main-loop
+				// preflight site above. Without this, captureRunMessages picks
+				// up a stale offset and the force-stop synthesis reply either
+				// fails to persist or carries the wrong metadata.
+				// (See 2026-05-11 GPT review F2.)
+				newMsgOffset -= dropped
+				if newMsgOffset < 1 {
+					newMsgOffset = 1
+				}
+				rebased := make(map[int]bool, len(injectedIndices))
+				for idx := range injectedIndices {
+					newIdx := idx - dropped
+					if newIdx >= newMsgOffset {
+						rebased[newIdx] = true
+					}
+				}
+				injectedIndices = rebased
+
+				rebasedDelta := make(map[int]bool, len(deltaIndices))
+				for idx := range deltaIndices {
+					newIdx := idx - dropped
+					if newIdx >= newMsgOffset {
+						rebasedDelta[newIdx] = true
+					}
+				}
+				deltaIndices = rebasedDelta
+
+				rebasedTS := make(map[int]time.Time, len(msgTimestamps))
+				for idx, ts := range msgTimestamps {
+					newIdx := idx - dropped
+					if newIdx >= newMsgOffset {
+						rebasedTS[newIdx] = ts
+					}
+				}
+				msgTimestamps = rebasedTS
 			}
 		}
 

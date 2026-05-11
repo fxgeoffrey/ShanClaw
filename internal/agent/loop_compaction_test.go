@@ -885,8 +885,19 @@ func TestAgentLoop_ReactiveCompaction_UsesEmergencyFallbackWhenSoftStillOverBudg
 	loop.SetContextWindow(100000)
 
 	huge := strings.Repeat("x", 450000)
+	// Wrap the huge first user message in a block-content envelope so the
+	// shortSessionTruncate preflight (added 2026-05-11) skips it — this
+	// test specifically exercises the reactive emergency fallback path,
+	// which only fires when client-side defenses cannot recover the
+	// prompt size pre-flight. A plain-text huge message would now get
+	// truncated by TruncateOversizedLastUserMessage before reaching the
+	// API and the soft compaction alone would suffice. Real-world
+	// equivalent: a session whose bulk lives in tool_result / image
+	// blocks, which our preflight intentionally leaves untouched.
 	history := []client.Message{
-		{Role: "user", Content: client.NewTextContent(huge)},
+		{Role: "user", Content: client.NewBlockContent([]client.ContentBlock{
+			{Type: "text", Text: huge},
+		})},
 		{Role: "assistant", Content: client.NewTextContent("ack")},
 		{Role: "user", Content: client.NewTextContent("second turn")},
 		{Role: "assistant", Content: client.NewTextContent("second reply")},
@@ -1672,4 +1683,3 @@ func TestAgentLoop_ReactiveCompaction_RecoversFromOversizedTranscript(t *testing
 			peakSummaryChars, summarizeInputCapCharsLocal/2)
 	}
 }
-

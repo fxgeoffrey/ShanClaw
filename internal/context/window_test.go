@@ -451,6 +451,41 @@ func TestTruncateOversizedLastUserMessage(t *testing.T) {
 		}
 	})
 
+	// Regression for PR review #5: TruncateOversizedLastUserMessage used to
+	// pass a rune-count budget into truncateMessageBody which slices by
+	// bytes. For CJK content (~3 bytes/rune) the function silently
+	// over-truncated to ~1/3 the intended size — safe direction but wasteful.
+	// After the fix, the surviving content for CJK should be at least
+	// half of what it would be for ASCII at the same budget (we don't
+	// expect exact parity, but a 1/3 ratio is too aggressive).
+	t.Run("CJK content not over-truncated to byte-budget interpretation", func(t *testing.T) {
+		// 200K repeats of "你好世界 " = 1M runes, ~3.2M bytes. Default
+		// 0.90 * 200K = 180K tokens × 3.5 chars/token = 630K rune budget.
+		// Pre-fix: truncate to 630K *bytes* = ~210K runes (over-trunc 3x).
+		// Post-fix: truncate to ~3.2M/1M × 630K bytes = ~2M bytes = ~660K
+		// runes — much closer to the intended 630K runes.
+		chinese := strings.Repeat("你好世界 ", 200000)
+		msgs := []client.Message{
+			{Role: "user", Content: client.NewTextContent(chinese)},
+		}
+		out, dropped := TruncateOversizedLastUserMessage(msgs, 200000)
+		if dropped == 0 {
+			t.Fatalf("expected truncation; this input is well over threshold")
+		}
+		body := out[0].Content.Text()
+		if !utf8.ValidString(body) {
+			t.Errorf("truncation produced invalid UTF-8")
+		}
+		surviveRunes := utf8.RuneCountInString(body)
+		// Floor for "not over-truncated": at least 400K runes survive.
+		// Pre-fix this was ~210K runes (over-trunc). Post-fix expected ~660K.
+		const minExpectedRunes = 400_000
+		if surviveRunes < minExpectedRunes {
+			t.Errorf("CJK content over-truncated: %d runes survived, want >= %d (pre-fix bug)",
+				surviveRunes, minExpectedRunes)
+		}
+	})
+
 	t.Run("CJK content stays rune-aligned", func(t *testing.T) {
 		// EstimateTokens counts runes (not bytes), so the input has to push
 		// rune-count past 0.90 × 200K = 180K tokens × 3.5 chars/token = 630K

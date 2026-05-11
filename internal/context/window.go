@@ -194,7 +194,17 @@ func TruncateOversizedLastUserMessage(messages []client.Message, contextWindow i
 		return messages, 0
 	}
 
-	userTokenEst := int(math.Ceil(float64(len([]rune(text)))/charsPerToken)) + overheadPerMessage
+	// EstimateTokens measures content in RUNES (chars/3.5 ratio), but
+	// truncateMessageBody slices by BYTES. For pure ASCII bytes == runes so
+	// the two collapse to the same number, but for CJK/emoji (~3 bytes per
+	// rune) a rune-count budget interpreted as byte cap would over-truncate
+	// the content to ~1/3 of the intended size. Convert by sampling this
+	// text's actual bytes-per-rune ratio. (PR review item #5.)
+	runeCount := utf8.RuneCountInString(text)
+	if runeCount == 0 {
+		return messages, 0
+	}
+	userTokenEst := int(math.Ceil(float64(runeCount)/charsPerToken)) + overheadPerMessage
 	otherTokens := estimated - userTokenEst
 	if otherTokens < 0 {
 		otherTokens = 0
@@ -204,13 +214,15 @@ func TruncateOversizedLastUserMessage(messages []client.Message, contextWindow i
 	if userTokenBudget < minUserTokenFloor {
 		userTokenBudget = minUserTokenFloor
 	}
-	userCharBudget := int(float64(userTokenBudget) * charsPerToken)
+	userRuneBudget := int(float64(userTokenBudget) * charsPerToken)
+	bytesPerRune := float64(len(text)) / float64(runeCount)
+	userByteBudget := int(float64(userRuneBudget) * bytesPerRune)
 
-	if len(text) <= userCharBudget {
+	if len(text) <= userByteBudget {
 		return messages, 0
 	}
 
-	truncated := truncateMessageBody(text, userCharBudget)
+	truncated := truncateMessageBody(text, userByteBudget)
 	dropped := len(text) - len(truncated)
 	messages[idx] = client.Message{
 		Role:    messages[idx].Role,

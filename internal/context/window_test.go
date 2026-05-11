@@ -59,7 +59,7 @@ func TestEstimateTokens(t *testing.T) {
 
 func TestShouldCompact(t *testing.T) {
 	t.Run("below threshold returns false", func(t *testing.T) {
-		// 85% of 128000 = 108800
+		// 90% of 128000 = 115200
 		got := ShouldCompact(50000, 1000, 128000)
 		if got {
 			t.Error("ShouldCompact should be false when well below threshold")
@@ -67,16 +67,16 @@ func TestShouldCompact(t *testing.T) {
 	})
 
 	t.Run("input plus output above threshold returns true", func(t *testing.T) {
-		// 100000 + 10000 = 110000 > 108800
-		got := ShouldCompact(100000, 10000, 128000)
+		// 105000 + 15000 = 120000 > 115200
+		got := ShouldCompact(105000, 15000, 128000)
 		if !got {
-			t.Error("ShouldCompact should be true when input+output exceeds 85% of context window")
+			t.Error("ShouldCompact should be true when input+output exceeds 90% of context window")
 		}
 	})
 
 	t.Run("exactly at threshold returns true", func(t *testing.T) {
-		// 85% of 128000 = 108800
-		got := ShouldCompact(100000, 8800, 128000)
+		// 90% of 128000 = 115200
+		got := ShouldCompact(110000, 5200, 128000)
 		if !got {
 			t.Error("ShouldCompact should be true at exactly the threshold")
 		}

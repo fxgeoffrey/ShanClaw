@@ -15,7 +15,11 @@ const (
 	overheadPerMessage = 4
 
 	// compactThreshold is the fraction of context window that triggers compaction.
-	compactThreshold = 0.85
+	// 0.90 leaves the cliff at 180K on a 200K cap, vs 170K at the historical
+	// 0.85 setting; ~5% of sessions in the 170K–180K band skip the cliff entirely.
+	// The preflight emergency gate at 0.95 (internal/agent/loop.go) is the safety
+	// net for the remaining 10K headroom.
+	compactThreshold = 0.90
 
 	// defaultKeepLast is the default number of recent turn pairs to keep.
 	defaultKeepLast = 20
@@ -43,7 +47,7 @@ func EstimateTokens(messages []client.Message) int {
 }
 
 // ShouldCompact returns true if the total tokens (input + output) exceed
-// 85% of the context window.
+// 90% of the context window.
 func ShouldCompact(inputTokens, outputTokens, contextWindow int) bool {
 	if contextWindow <= 0 {
 		return false

@@ -21,12 +21,12 @@ import (
 //
 //  1. Agent loop runs multiple tool-call iterations within a single Run()
 //  2. Mock server reports growing input tokens each iteration
-//  3. When tokens exceed 85% of context_window → compaction triggers
+//  3. When tokens exceed 90% of context_window → compaction triggers
 //  4. PersistLearnings fires (small tier) → writes to MEMORY.md
 //  5. GenerateSummary fires (small tier) → creates summary
 //  6. ShapeHistory reduces messages
 //
-// Uses context_window=2000 so 85% threshold = 1700 tokens.
+// Uses context_window=2000 so 90% threshold = 1800 tokens.
 // Needs ≥5 tool iterations so messages > MinShapeable (9).
 func TestAgentLoop_CompactionAndMemoryPersist(t *testing.T) {
 	memoryDir := t.TempDir()
@@ -127,7 +127,7 @@ func TestAgentLoop_CompactionAndMemoryPersist(t *testing.T) {
 	handler := &mockHandler{approveResult: true}
 
 	loop := NewAgentLoop(gw, reg, "medium", "", 20, 2000, 200, nil, nil, nil)
-	loop.SetContextWindow(2000) // 85% = 1700 triggers compaction
+	loop.SetContextWindow(2000) // 90% = 1800 triggers compaction
 	loop.SetMemoryDir(memoryDir)
 	loop.SetHandler(handler)
 
@@ -615,7 +615,7 @@ func TestAgentLoop_ReactiveCompaction(t *testing.T) {
 
 		if msgCount < 12 {
 			// Keep looping with tool calls, report LOW tokens so proactive
-			// compaction does NOT trigger (under 85% of 128000).
+			// compaction does NOT trigger (under 90% of 128000).
 			calls = append(calls, fmt.Sprintf("call %d: TOOL (msgs=%d)", callNum, msgCount))
 			mu.Unlock()
 			t.Logf("Call %d: [main] tool_use (msgs=%d)", callNum, msgCount)
@@ -1064,10 +1064,10 @@ func TestAgentLoop_CompactionTriggersOnWarmCache(t *testing.T) {
 	}
 
 	if !hasPersist {
-		t.Error("PersistLearnings must fire once warm-cache total prompt exceeds 85% — gate regressed to pre-fix behavior")
+		t.Error("PersistLearnings must fire once warm-cache total prompt exceeds 90% — gate regressed to pre-fix behavior")
 	}
 	if !hasSummary {
-		t.Error("GenerateSummary must fire once warm-cache total prompt exceeds 85% — gate regressed to pre-fix behavior")
+		t.Error("GenerateSummary must fire once warm-cache total prompt exceeds 90% — gate regressed to pre-fix behavior")
 	}
 }
 

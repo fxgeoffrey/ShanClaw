@@ -33,7 +33,7 @@ import (
 // preflightCompactThreshold is the fraction of the context window above
 // which a pre-flight compaction is forced before the next LLM call.
 // 0.95 leaves a 5% safety margin over EstimateTokens' chars/3.5 heuristic
-// inaccuracy. Below this, ShouldCompact's 0.85 trigger handles it.
+// inaccuracy. Below this, ShouldCompact's 0.90 trigger handles it.
 const preflightCompactThreshold = 0.95
 
 // shouldPreflightCompact returns true when the messages-about-to-be-sent
@@ -1978,7 +1978,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			}
 		}
 		// Context window compaction: when actual tokens from previous LLM call
-		// exceed 85% of context window, generate a summary and shape history.
+		// exceed 90% of context window, generate a summary and shape history.
 		// Only attempt when there are enough messages to meaningfully shape
 		// (system + first user + minKeepLast pairs = 9 messages minimum).
 		// On first iteration (daemon resume with large history), uses heuristic
@@ -2169,7 +2169,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 		// just wastes an LLM call without reducing prompt size. The system
 		// prompt itself can exceed thresholds in artificially-small context
 		// windows (test fixtures or pinned configs); fire-without-shape would
-		// repeatedly burn calls until lastPromptTokens drops back under 85%.
+		// repeatedly burn calls until lastPromptTokens drops back under 90%.
 		if shouldPreflightCompact(messages, a.contextWindow) && !compactionApplied && !reactiveCompacted && len(messages) > ctxwin.MinShapeable() {
 			a.tracker.Enter(PhaseCompacting)
 			if rs, ok := a.handler.(RunStatusHandler); ok {

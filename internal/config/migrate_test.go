@@ -291,5 +291,76 @@ func TestReplaceIndentedIntLine_MultipleIndentStyles(t *testing.T) {
 // Markers file written under a non-existent dir should not panic and
 // should not crash RunPendingMigrations — the load is best-effort.
 func TestRunPendingMigrations_EmptyDirNoOp(t *testing.T) {
+	// Use a clean temp dir to assert no migration artifacts leak into
+	// the current working directory or any other surprising location.
+	cleanDir := t.TempDir()
+	preEntries, _ := os.ReadDir(cleanDir)
+
 	RunPendingMigrations("") // must not panic
+
+	postEntries, _ := os.ReadDir(cleanDir)
+	if len(postEntries) != len(preEntries) {
+		t.Fatalf("RunPendingMigrations(\"\") leaked files into cleanDir: pre=%d post=%d", len(preEntries), len(postEntries))
+	}
+}
+
+// File mode of an existing user config must survive the migration —
+// users with explicit chmod / umask setups expect 0644 not to silently
+// become 0600. Catches PR #126 review #3.
+func TestMigrate_PreservesFileMode(t *testing.T) {
+	dir := t.TempDir()
+	const input = `agent:
+    context_window: 128000
+`
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(input), 0644); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	RunPendingMigrations(dir)
+
+	info, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatalf("stat post-migration config: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0644 {
+		t.Fatalf("post-migration mode = %o, want 0644 (original mode must be preserved)", got)
+	}
+
+	// Backup file should also inherit the original mode.
+	backup := findBackup(t, dir)
+	if backup == "" {
+		t.Fatal("expected backup file")
+	}
+	bInfo, err := os.Stat(backup)
+	if err != nil {
+		t.Fatalf("stat backup: %v", err)
+	}
+	if got := bInfo.Mode().Perm(); got != 0644 {
+		t.Fatalf("backup mode = %o, want 0644", got)
+	}
+}
+
+// Pins the documented "replace all matching indented lines" semantics
+// of replaceIndentedIntLine. If we ever switch to "first only", this
+// test will fail loudly so the doc/code reconciliation from PR #126
+// review #1 doesn't drift back into mismatch.
+func TestReplaceIndentedIntLine_RewritesAllOccurrences(t *testing.T) {
+	in := []byte(`agent:
+  context_window: 128000
+custom:
+  context_window: 128000  # second nested occurrence
+`)
+	want := `agent:
+  context_window: 200000
+custom:
+  context_window: 200000  # second nested occurrence
+`
+	out, ok := replaceIndentedIntLine(in, "context_window", 128000, 200000)
+	if !ok {
+		t.Fatal("expected at least one replacement")
+	}
+	if string(out) != want {
+		t.Fatalf("multi-occurrence mismatch\nwant:\n%s\ngot:\n%s", want, string(out))
+	}
 }

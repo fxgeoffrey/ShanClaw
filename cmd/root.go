@@ -204,7 +204,11 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 	loop := agent.NewAgentLoop(llmClient, reg, runCfg.ModelTier, shannonDir, runCfg.Agent.MaxIterations, runCfg.Tools.ResultTruncation, runCfg.Tools.ArgsTruncation, &runCfg.Permissions, auditor, hookRunner)
 	loop.SetMaxTokens(runCfg.Agent.MaxTokens)
 	loop.SetTemperature(runCfg.Agent.Temperature)
-	loop.SetContextWindow(runCfg.Agent.ContextWindow)
+	if runCfg.Sources["agent.context_window"].Level != "default" {
+		loop.SetContextWindowExplicit(runCfg.Agent.ContextWindow)
+	} else {
+		loop.SetContextWindow(runCfg.Agent.ContextWindow)
+	}
 	// One-shot CLI invocation — no resume across runs. Short TTL is correct.
 	loop.SetCacheSource("oneshot_cli")
 	loop.SetSkillDiscovery(runCfg.Agent.SkillDiscoveryEnabled())
@@ -242,7 +246,7 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 			loop.SetMaxTokens(*ac.MaxTokens)
 		}
 		if ac.ContextWindow != nil {
-			loop.SetContextWindow(*ac.ContextWindow)
+			loop.SetContextWindowExplicit(*ac.ContextWindow)
 		}
 	}
 	cliHandler := &cliEventHandler{autoApprove: autoApprove}

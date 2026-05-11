@@ -498,6 +498,7 @@ func (u *TurnUsage) Add(r client.Usage) {
 }
 
 func (a *AgentLoop) reportLLMUsage(u client.Usage, model string) {
+	a.maybeAutoAdjustContextWindow(model)
 	if a.handler == nil {
 		return
 	}
@@ -508,6 +509,24 @@ func (a *AgentLoop) reportLLMUsage(u client.Usage, model string) {
 		return
 	}
 	a.handler.OnUsage(delta)
+}
+
+// maybeAutoAdjustContextWindow updates contextWindow based on the model that
+// served the latest response. No-op when:
+//   - User explicitly configured agent.context_window (locked).
+//   - Model field is empty (provider didn't surface it).
+//   - Model is unknown to LookupModelContextWindow (graceful degradation —
+//     leaves existing value untouched).
+//   - Looked-up value matches current contextWindow (no churn).
+func (a *AgentLoop) maybeAutoAdjustContextWindow(model string) {
+	if a.contextWindowExplicit || model == "" {
+		return
+	}
+	cw, ok := LookupModelContextWindow(model)
+	if !ok || cw == a.contextWindow {
+		return
+	}
+	a.contextWindow = cw
 }
 
 type EventHandler interface {
@@ -577,7 +596,8 @@ type AgentLoop struct {
 	specificModel     string
 	agentBasePrompt   string
 	agentSkills       []*skills.Skill
-	contextWindow     int
+	contextWindow         int
+	contextWindowExplicit bool // true when set via user config; locks against auto-detect from observed model
 	memoryDir         string      // directory containing MEMORY.md; re-read each Run(), write-before-compact target
 	stickyContext     string      // session-scoped facts injected verbatim into system prompt; never truncated
 	outputFormat      string      // "markdown" (default) or "plain" — controls formatting guidance in volatile context
@@ -831,8 +851,22 @@ func (a *AgentLoop) SetSpecificModel(model string) {
 	a.specificModel = model
 }
 
+// SetContextWindow seeds the context window without locking it. Auto-detect
+// from the observed model in cloud responses can still update the value
+// later. Used at construction time when the user did not explicitly set
+// agent.context_window in config (i.e. value comes from viper default).
 func (a *AgentLoop) SetContextWindow(tokens int) {
 	a.contextWindow = tokens
+}
+
+// SetContextWindowExplicit sets the context window AND locks it against
+// auto-detection. Used when the user explicitly configured
+// agent.context_window in config.yaml (project/local/global) or set a
+// per-agent context_window override. The lock ensures auto-detect from
+// observed model never overrides the user's intent.
+func (a *AgentLoop) SetContextWindowExplicit(tokens int) {
+	a.contextWindow = tokens
+	a.contextWindowExplicit = true
 }
 
 // SetMaxIterations overrides the maximum number of agent loop iterations.

@@ -104,8 +104,41 @@ func (a *AgentLoop) shortSessionTruncate(messages []client.Message, sourceTag st
 				fmt.Sprintf("%s: truncated user message by %d chars (short session, %d msgs, est %d tokens)",
 					sourceTag, dropped, len(messages), ctxwin.EstimateTokens(messages)))
 		}
+		a.recordCompactionSuccess("short_session_truncate",
+			fmt.Sprintf("source=%s msgs=%d chars_dropped=%d", sourceTag, len(messages), dropped))
 	}
 	return messages
+}
+
+// recordCompactionSuccess emits a compaction_success audit row whenever
+// ShapeHistory (or a single-message truncate fallback) successfully drops
+// or shrinks content from the prompt. Mirrors recordCompactionFailure so
+// every compaction outcome is observable in audit.log — without this,
+// failure paths were the only events with audit rows and ops could not
+// tell whether a compaction-prone session ever recovered.
+//
+// Phase tag identifies the source: proactive / preflight / reactive /
+// force_stop_preflight / short_session_truncate. Detail is a free-form
+// metric string (e.g. "msgs=10→4" for ShapeHistory or "chars=800000→570000"
+// for single-message truncation) so the schema works for both message-count
+// reductions and content-byte reductions.
+//
+// Caller is responsible for emitting the corresponding OnRunStatus (the
+// run-status events already exist at each site).
+//
+// The audit schema convention matches recordCompactionFailure: phase +
+// detail go into OutputSummary, ToolName is empty.
+func (a *AgentLoop) recordCompactionSuccess(phase, detail string) {
+	if a.auditor == nil {
+		return
+	}
+	a.auditor.Log(audit.AuditEntry{
+		Timestamp:     time.Now(),
+		SessionID:     a.sessionID,
+		Event:         "compaction_success",
+		OutputSummary: fmt.Sprintf("phase=%s %s", phase, detail),
+		Approved:      false,
+	})
 }
 
 // recordCompactionFailure emits a compaction-failed run-status event and an
@@ -1232,6 +1265,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 			Event:               "cache_summary",
 			Source:              a.cacheSource,
 			Calls:               s.Calls,
+			InputTokens:         int(s.InputTotal),
 			CacheCreationTokens: int(s.CCTotal),
 			CacheReadTokens:     int(s.CRTotal),
 			CER:                 s.CER,
@@ -1701,6 +1735,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 					fmt.Sprintf("force-stop turn estimate %d tokens >= %.0f%% of %d cap",
 						ctxwin.EstimateTokens(messages), preflightCompactThreshold*100, a.contextWindow))
 			}
+			fsBefore := len(messages)
 			emergencyMessages := cloneMessages(messages)
 			compressOldToolResults(ctx, emergencyMessages, 1, 100, nil)
 			restoreLLM := a.tracker.EnterTransient(PhaseAwaitingLLM)
@@ -1711,6 +1746,10 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				messages = ctxwin.ShapeHistory(emergencyMessages, strings.TrimSpace(summary), a.contextWindow)
 			} else {
 				messages = ctxwin.ShapeHistory(emergencyMessages, "", a.contextWindow)
+			}
+			if len(messages) < fsBefore {
+				a.recordCompactionSuccess("force_stop_preflight",
+					fmt.Sprintf("msgs=%d→%d dropped=%d", fsBefore, len(messages), fsBefore-len(messages)))
 			}
 		}
 
@@ -2088,7 +2127,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 					messages = ctxwin.ShapeHistory(messages, compactionSummary, a.contextWindow)
 					if len(messages) < before {
 						dropped := before - len(messages)
-						fmt.Fprintf(os.Stderr, "[context] compacted: %d → %d messages\n", before, len(messages))
+						a.recordCompactionSuccess("proactive", fmt.Sprintf("msgs=%d→%d dropped=%d", before, len(messages), dropped))
 						// Adjust newMsgOffset: compaction drops middle messages
 						// but keeps the recent tail. Shift by the number dropped.
 						// Clamp to 1 (skip system prompt at index 0) so that
@@ -2241,7 +2280,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				messages = ctxwin.ShapeHistory(emergencyMessages, "", a.contextWindow)
 			}
 			if dropped := before - len(messages); dropped > 0 {
-				fmt.Fprintf(os.Stderr, "[context] preflight compacted: %d → %d messages\n", before, len(messages))
+				a.recordCompactionSuccess("preflight", fmt.Sprintf("msgs=%d→%d dropped=%d", before, len(messages), dropped))
 				newMsgOffset -= dropped
 				if newMsgOffset < 1 {
 					newMsgOffset = 1
@@ -2430,7 +2469,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 				// Rebase run-local indices — same bookkeeping as proactive compaction.
 				if len(messages) < before {
 					dropped := before - len(messages)
-					fmt.Fprintf(os.Stderr, "[context] reactive compacted: %d → %d messages\n", before, len(messages))
+					a.recordCompactionSuccess("reactive", fmt.Sprintf("msgs=%d→%d dropped=%d", before, len(messages), dropped))
 					newMsgOffset -= dropped
 					if newMsgOffset < 1 {
 						newMsgOffset = 1

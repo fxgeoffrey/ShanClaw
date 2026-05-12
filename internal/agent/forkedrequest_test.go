@@ -182,3 +182,117 @@ func TestForkedRequest_DebugTagging(t *testing.T) {
 		t.Errorf("ForkedKind = %q, want speculation", spec.ForkedKind)
 	}
 }
+
+// TestBuildForkedRequest_ThinkingDeepCopied catches the pointer-aliasing
+// footgun: Thinking is a *ThinkingConfig pointer. A naïve `out := main`
+// would share the same underlying struct, so a caller mutating
+// out.Thinking.BudgetTokens would corrupt main.Thinking too — taking down
+// the parent turn's cache prefix in the process (thinking config is part
+// of the Anthropic cache key).
+func TestBuildForkedRequest_ThinkingDeepCopied(t *testing.T) {
+	main := client.CompletionRequest{
+		Messages: []client.Message{{Role: "user", Content: client.NewTextContent("hi")}},
+		Thinking: &client.ThinkingConfig{Type: "enabled", BudgetTokens: 4096},
+	}
+	forked, err := BuildForkedRequest(main, ForkOptions{
+		AppendMessages: []client.Message{{Role: "user", Content: client.NewTextContent("x")}},
+		SkipCacheWrite: true,
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if forked.Thinking == nil {
+		t.Fatal("forked.Thinking lost during copy")
+	}
+	if forked.Thinking == main.Thinking {
+		t.Error("forked.Thinking is the SAME pointer as main.Thinking — caller mutation would corrupt main")
+	}
+	if forked.Thinking.BudgetTokens != 4096 {
+		t.Errorf("forked.Thinking.BudgetTokens = %d, want 4096", forked.Thinking.BudgetTokens)
+	}
+	// Mutate forked's Thinking — main must stay at 4096.
+	forked.Thinking.BudgetTokens = 100
+	if main.Thinking.BudgetTokens != 4096 {
+		t.Errorf("after mutating forked, main.Thinking.BudgetTokens = %d, want 4096 (aliasing not fixed)", main.Thinking.BudgetTokens)
+	}
+}
+
+// TestBuildForkedRequest_CallerMutationBreaksByteEquality is a regression
+// test that DOCUMENTS the failure mode for caller misuse — if a caller
+// modifies forked.MaxTokens / Temperature / Model / etc. after this
+// function returns, the byte-equality contract with `main` is broken and
+// the Anthropic prompt cache will miss on the forked call.
+//
+// This test does not "prevent" the misuse (Go's type system can't); it
+// pins what byte-equality looks like and catches regressions where future
+// edits to BuildForkedRequest accidentally introduce divergence.
+func TestBuildForkedRequest_CallerMutationBreaksByteEquality(t *testing.T) {
+	main := client.CompletionRequest{
+		Messages:        []client.Message{{Role: "user", Content: client.NewTextContent("hi")}},
+		ModelTier:       "medium",
+		SpecificModel:   "claude-sonnet-4-6",
+		Temperature:     1.0,
+		MaxTokens:       8192,
+		ReasoningEffort: "high",
+		Thinking:        &client.ThinkingConfig{Type: "enabled", BudgetTokens: 4096},
+		CacheSource:     "channel",
+	}
+	forked, err := BuildForkedRequest(main, ForkOptions{
+		AppendMessages: []client.Message{{Role: "user", Content: client.NewTextContent("x")}},
+		SkipCacheWrite: true,
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+
+	// Snapshot the cache-key-affecting bytes BEFORE caller mutation.
+	type cacheKeyFields struct {
+		ModelTier       string
+		SpecificModel   string
+		Temperature     float64
+		MaxTokens       int
+		ReasoningEffort string
+		Thinking        client.ThinkingConfig
+		CacheSource     string
+	}
+	snap := func(r client.CompletionRequest) cacheKeyFields {
+		var th client.ThinkingConfig
+		if r.Thinking != nil {
+			th = *r.Thinking
+		}
+		return cacheKeyFields{
+			ModelTier:       r.ModelTier,
+			SpecificModel:   r.SpecificModel,
+			Temperature:     r.Temperature,
+			MaxTokens:       r.MaxTokens,
+			ReasoningEffort: r.ReasoningEffort,
+			Thinking:        th,
+			CacheSource:     r.CacheSource,
+		}
+	}
+	mainSnap := snap(main)
+	forkedSnap := snap(forked)
+	if mainSnap != forkedSnap {
+		t.Fatalf("immediately after BuildForkedRequest, cache-key fields already differ:\n  main:   %+v\n  forked: %+v", mainSnap, forkedSnap)
+	}
+
+	// Simulate caller misuse — every line below is what the docstring tells
+	// callers NOT to do. We mutate forked, then re-snapshot, and assert it
+	// HAS diverged. This anchors the documented failure mode in a runnable
+	// test so future contributors can grep for it.
+	forked.MaxTokens = 100
+	forked.Temperature = 0.0
+	forked.ReasoningEffort = "low"
+	if forked.Thinking != nil {
+		forked.Thinking.BudgetTokens = 100
+	}
+	mutatedSnap := snap(forked)
+	if mutatedSnap == mainSnap {
+		t.Error("caller mutation should have produced divergence — this test's purpose is to document that path")
+	}
+	// And main MUST still be its original self — caller mutating forked
+	// must NOT touch main. (Thinking-aliasing regression check.)
+	if snap(main) != mainSnap {
+		t.Error("caller mutation to forked changed main — pointer aliasing not contained")
+	}
+}

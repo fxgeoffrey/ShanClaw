@@ -157,6 +157,19 @@ func IsDownloadable(name string) bool {
 // these are always available without user action.
 var builtinSkills = []string{"kocoro", "kocoro-generative-ui"}
 
+// IsBuiltinSkill reports whether slug is one of the auto-installed builtins
+// that EnsureBuiltinSkills syncs into the global skills dir on every startup.
+// Uploads / overrides targeting these slugs are rejected because the next
+// daemon restart would wipe the user's version back to embed.FS contents.
+func IsBuiltinSkill(slug string) bool {
+	for _, name := range builtinSkills {
+		if name == slug {
+			return true
+		}
+	}
+	return false
+}
+
 // EnsureBuiltinSkills syncs every builtin skill in the global skills directory
 // against the binary's embed.FS. For each builtin: hash the embed.FS tree and
 // the on-disk tree; if they differ (including disk dir missing), wipe and

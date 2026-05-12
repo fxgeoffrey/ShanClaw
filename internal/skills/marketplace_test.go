@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1062,5 +1063,309 @@ func TestMarketplaceEntryIsMalicious(t *testing.T) {
 				t.Errorf("IsMalicious = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// --- InstallFromZipData tests ---
+
+func makeSkillZip(t *testing.T, name, description, prompt string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	f, err := zw.Create("SKILL.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprintf(f, "---\nname: %s\ndescription: %s\n---\n\n%s\n", name, description, prompt)
+	zw.Close()
+	return buf.Bytes()
+}
+
+func TestInstallFromZipData_Success(t *testing.T) {
+	dir := t.TempDir()
+	locks := NewSlugLocks()
+	zipBytes := makeSkillZip(t, "my-skill", "does things", "Do the thing.")
+
+	skill, err := InstallFromZipData(dir, bytes.NewReader(zipBytes), false, locks)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if skill.Name != "my-skill" {
+		t.Errorf("Name = %q, want my-skill", skill.Name)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "skills", "my-skill", "SKILL.md")); statErr != nil {
+		t.Errorf("SKILL.md not installed: %v", statErr)
+	}
+}
+
+func TestInstallFromZipData_ConflictWithoutForce(t *testing.T) {
+	dir := t.TempDir()
+	locks := NewSlugLocks()
+	zipBytes := makeSkillZip(t, "my-skill", "does things", "Do the thing.")
+
+	if _, err := InstallFromZipData(dir, bytes.NewReader(zipBytes), false, locks); err != nil {
+		t.Fatal(err)
+	}
+	_, err := InstallFromZipData(dir, bytes.NewReader(zipBytes), false, locks)
+	var conflict *SkillConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("want SkillConflictError, got %v", err)
+	}
+	if conflict.ExistingName != "my-skill" {
+		t.Errorf("ExistingName = %q", conflict.ExistingName)
+	}
+}
+
+func TestInstallFromZipData_ForceOverwrites(t *testing.T) {
+	dir := t.TempDir()
+	locks := NewSlugLocks()
+	zip1 := makeSkillZip(t, "my-skill", "v1 desc", "v1 prompt")
+	zip2 := makeSkillZip(t, "my-skill", "v2 desc", "v2 prompt")
+
+	if _, err := InstallFromZipData(dir, bytes.NewReader(zip1), false, locks); err != nil {
+		t.Fatal(err)
+	}
+	skill, err := InstallFromZipData(dir, bytes.NewReader(zip2), true, locks)
+	if err != nil {
+		t.Fatalf("force install failed: %v", err)
+	}
+	if skill.Description != "v2 desc" {
+		t.Errorf("Description = %q, want v2 desc", skill.Description)
+	}
+}
+
+func TestInstallFromZipData_BuiltinBlocked(t *testing.T) {
+	dir := t.TempDir()
+	locks := NewSlugLocks()
+
+	// Builtins live in skills/<slug>/ (synced by EnsureBuiltinSkills on every
+	// daemon startup). Create one there to mirror the real on-disk state.
+	globalSkillDir := filepath.Join(dir, "skills", "kocoro")
+	if err := os.MkdirAll(globalSkillDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(globalSkillDir, "SKILL.md"),
+		[]byte("---\nname: kocoro\ndescription: builtin\n---\n\nBuiltin.\n"), 0600)
+
+	zipBytes := makeSkillZip(t, "kocoro", "replacement", "Replace the builtin.")
+	// Without force — must be rejected as builtin, not 409 conflict.
+	_, err := InstallFromZipData(dir, bytes.NewReader(zipBytes), false, locks)
+	if !errors.Is(err, ErrSkillIsBuiltin) {
+		t.Fatalf("want ErrSkillIsBuiltin, got %v", err)
+	}
+	// Even with force=true the builtin guard must hold: EnsureBuiltinSkills
+	// would wipe the override on the next restart, so allowing it would be
+	// a silent revert.
+	_, err = InstallFromZipData(dir, bytes.NewReader(zipBytes), true, locks)
+	if !errors.Is(err, ErrSkillIsBuiltin) {
+		t.Fatalf("force=true: want ErrSkillIsBuiltin, got %v", err)
+	}
+}
+
+// TestInstallFromZipData_BundledNotBuiltin_Allowed locks in that a bundled
+// skill that is NOT in the builtinSkills list (e.g. kocoro-login) can be
+// overridden via upload. The previous directory-stat check rejected these
+// as "builtin" whenever the bundled-skills/ cache had been populated.
+func TestInstallFromZipData_BundledNotBuiltin_Allowed(t *testing.T) {
+	dir := t.TempDir()
+	locks := NewSlugLocks()
+
+	// Simulate a stale bundled-skills cache populated by a prior agent run.
+	bundledDir := filepath.Join(dir, "bundled-skills", "kocoro-login")
+	if err := os.MkdirAll(bundledDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(bundledDir, "SKILL.md"),
+		[]byte("---\nname: kocoro-login\ndescription: bundled\n---\n\nBundled.\n"), 0600)
+
+	zipBytes := makeSkillZip(t, "kocoro-login", "user override", "Override.")
+	skill, err := InstallFromZipData(dir, bytes.NewReader(zipBytes), false, locks)
+	if err != nil {
+		t.Fatalf("expected upload to succeed, got %v", err)
+	}
+	if skill.Name != "kocoro-login" {
+		t.Errorf("Name = %q", skill.Name)
+	}
+}
+
+func TestInstallFromZipData_InvalidZip_NoSKILLMD(t *testing.T) {
+	dir := t.TempDir()
+	locks := NewSlugLocks()
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	f, _ := zw.Create("README.md")
+	f.Write([]byte("no skill here"))
+	zw.Close()
+
+	_, err := InstallFromZipData(dir, bytes.NewReader(buf.Bytes()), false, locks)
+	if !errors.Is(err, ErrInvalidSkillPayload) {
+		t.Fatalf("want ErrInvalidSkillPayload, got %v", err)
+	}
+}
+
+func TestInstallFromZipData_SingleSubdirUnwrap(t *testing.T) {
+	dir := t.TempDir()
+	locks := NewSlugLocks()
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	f, _ := zw.Create("my-skill-main/SKILL.md")
+	fmt.Fprintf(f, "---\nname: my-skill\ndescription: github zip\n---\n\nPrompt.\n")
+	zw.Close()
+
+	skill, err := InstallFromZipData(dir, bytes.NewReader(buf.Bytes()), false, locks)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if skill.Name != "my-skill" {
+		t.Errorf("Name = %q, want my-skill", skill.Name)
+	}
+}
+
+func TestInstallFromZipData_MacOSFinderZip(t *testing.T) {
+	dir := t.TempDir()
+	locks := NewSlugLocks()
+
+	// Simulate a macOS Finder-compressed ZIP: real skill dir + __MACOSX metadata dir
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	f, _ := zw.Create("my-skill/SKILL.md")
+	fmt.Fprintf(f, "---\nname: my-skill\ndescription: finder zip\n---\n\nPrompt.\n")
+	// macOS metadata file
+	zw.Create("__MACOSX/my-skill/.DS_Store")
+	zw.Close()
+
+	skill, err := InstallFromZipData(dir, bytes.NewReader(buf.Bytes()), false, locks)
+	if err != nil {
+		t.Fatalf("unexpected error with __MACOSX dir: %v", err)
+	}
+	if skill.Name != "my-skill" {
+		t.Errorf("Name = %q, want my-skill", skill.Name)
+	}
+}
+
+// TestInstallFromZipData_PrefersFrontmatterSlug locks in that a skill with a
+// display-only `name` (e.g. CJK) plus an ASCII `slug` installs at the slug
+// path and isn't rejected by ValidateSkillName on the display name.
+func TestInstallFromZipData_PrefersFrontmatterSlug(t *testing.T) {
+	dir := t.TempDir()
+	locks := NewSlugLocks()
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	f, _ := zw.Create("SKILL.md")
+	fmt.Fprintf(f, "---\nname: 小红书\nslug: xiaohongshu\ndescription: cjk display name\n---\n\nPrompt.\n")
+	zw.Close()
+
+	skill, err := InstallFromZipData(dir, bytes.NewReader(buf.Bytes()), false, locks)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if skill.Slug != "xiaohongshu" {
+		t.Errorf("Slug = %q, want xiaohongshu", skill.Slug)
+	}
+	if skill.Name != "小红书" {
+		t.Errorf("Name = %q, want 小红书", skill.Name)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "skills", "xiaohongshu", "SKILL.md")); statErr != nil {
+		t.Errorf("SKILL.md not installed at slug path: %v", statErr)
+	}
+}
+
+// TestInstallFromZipData_ForceOverwriteNoBackupLingers locks in that the
+// crash-safe overwrite pattern (rename old → bak, rename new → dest, cleanup
+// bak) leaves no .bak.* directories behind on the happy path.
+func TestInstallFromZipData_ForceOverwriteNoBackupLingers(t *testing.T) {
+	dir := t.TempDir()
+	locks := NewSlugLocks()
+	zip1 := makeSkillZip(t, "my-skill", "v1 desc", "v1 prompt")
+	zip2 := makeSkillZip(t, "my-skill", "v2 desc", "v2 prompt")
+
+	if _, err := InstallFromZipData(dir, bytes.NewReader(zip1), false, locks); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InstallFromZipData(dir, bytes.NewReader(zip2), true, locks); err != nil {
+		t.Fatal(err)
+	}
+
+	skillsDir := filepath.Join(dir, "skills")
+	entries, err := os.ReadDir(skillsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".bak.") {
+			t.Errorf("leftover backup directory after force overwrite: %s", e.Name())
+		}
+	}
+
+	// New content must actually be on disk (replaced, not merged).
+	data, err := os.ReadFile(filepath.Join(skillsDir, "my-skill", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "v2 desc") {
+		t.Errorf("SKILL.md still contains v1 content after force overwrite: %q", data)
+	}
+	if strings.Contains(string(data), "v1 prompt") {
+		t.Errorf("SKILL.md still contains v1 prompt after force overwrite")
+	}
+}
+
+// TestInstallFromZipData_MalformedFrontmatter_ReportsParseError surfaces YAML
+// parse failures instead of masking them as "missing name field".
+func TestInstallFromZipData_MalformedFrontmatter_ReportsParseError(t *testing.T) {
+	dir := t.TempDir()
+	locks := NewSlugLocks()
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	f, _ := zw.Create("SKILL.md")
+	// Malformed YAML: unclosed quoted string in name.
+	f.Write([]byte("---\nname: \"unterminated\ndescription: bad\n---\n\nPrompt.\n"))
+	zw.Close()
+
+	_, err := InstallFromZipData(dir, bytes.NewReader(buf.Bytes()), false, locks)
+	if !errors.Is(err, ErrInvalidSkillPayload) {
+		t.Fatalf("want ErrInvalidSkillPayload, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "frontmatter") && !strings.Contains(err.Error(), "yaml") {
+		t.Errorf("error %q should mention frontmatter/yaml parse failure", err.Error())
+	}
+	if strings.Contains(err.Error(), "missing name field") {
+		t.Errorf("error should not be misleading 'missing name field' for YAML parse failure: %q", err.Error())
+	}
+}
+
+// TestInstallFromZipData_ConflictPromptTruncation caps the prompt fields in
+// the 409 conflict response so a near-50 MB skill can't produce a huge JSON
+// response body.
+func TestInstallFromZipData_ConflictPromptTruncation(t *testing.T) {
+	dir := t.TempDir()
+	locks := NewSlugLocks()
+
+	// 100 KB prompt, well above the 8 KB preview cap.
+	bigPrompt := strings.Repeat("a", 100*1024)
+	zip1 := makeSkillZip(t, "my-skill", "v1 desc", bigPrompt)
+	zip2 := makeSkillZip(t, "my-skill", "v2 desc", bigPrompt)
+
+	if _, err := InstallFromZipData(dir, bytes.NewReader(zip1), false, locks); err != nil {
+		t.Fatal(err)
+	}
+	_, err := InstallFromZipData(dir, bytes.NewReader(zip2), false, locks)
+	var conflict *SkillConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("want SkillConflictError, got %v", err)
+	}
+	if len(conflict.ExistingPrompt) > conflictPromptPreviewBytes {
+		t.Errorf("ExistingPrompt len = %d, want <= %d", len(conflict.ExistingPrompt), conflictPromptPreviewBytes)
+	}
+	if len(conflict.NewPrompt) > conflictPromptPreviewBytes {
+		t.Errorf("NewPrompt len = %d, want <= %d", len(conflict.NewPrompt), conflictPromptPreviewBytes)
+	}
+	// Truncated prompts must still convey content (not be empty).
+	if conflict.ExistingPrompt == "" || conflict.NewPrompt == "" {
+		t.Errorf("truncated prompts should not be empty")
 	}
 }

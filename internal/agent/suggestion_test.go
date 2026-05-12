@@ -1,6 +1,101 @@
 package agent
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/Kocoro-lab/ShanClaw/internal/client"
+)
+
+// fakeLLM is a test double implementing client.LLMClient. It records the
+// CompletionRequest it most recently received (so tests can assert on
+// SkipCacheWrite, CacheSource, etc.) and returns a canned response or error.
+type fakeLLM struct {
+	resp        string
+	gotReq      client.CompletionRequest
+	completeErr error
+}
+
+func (f *fakeLLM) Complete(ctx context.Context, req client.CompletionRequest) (*client.CompletionResponse, error) {
+	f.gotReq = req
+	if f.completeErr != nil {
+		return nil, f.completeErr
+	}
+	return &client.CompletionResponse{
+		Provider:   "anthropic",
+		Model:      "claude-sonnet-4-6",
+		OutputText: f.resp,
+		Usage:      client.Usage{InputTokens: 100, CacheReadTokens: 95},
+	}, nil
+}
+
+func (f *fakeLLM) CompleteStream(ctx context.Context, req client.CompletionRequest, _ func(client.StreamDelta)) (*client.CompletionResponse, error) {
+	return f.Complete(ctx, req)
+}
+
+func TestGenerateSuggestion_HappyPath(t *testing.T) {
+	main := client.CompletionRequest{
+		Messages:    []client.Message{{Role: "user", Content: client.NewTextContent("hi")}},
+		ModelTier:   "medium",
+		CacheSource: "channel",
+	}
+	llm := &fakeLLM{resp: "rerun the failing test"}
+
+	got, err := GenerateSuggestion(context.Background(), llm, main)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got != "rerun the failing test" {
+		t.Errorf("got %q, want %q", got, "rerun the failing test")
+	}
+
+	// Verify cache-safety contract on the request sent
+	if !llm.gotReq.SkipCacheWrite {
+		t.Error("request sent without SkipCacheWrite=true")
+	}
+	if llm.gotReq.CacheSource != "channel" {
+		t.Errorf("CacheSource = %q, want channel (must match main)", llm.gotReq.CacheSource)
+	}
+	if len(llm.gotReq.Messages) != 2 {
+		t.Errorf("messages len = %d, want 2 (main + SUGGESTION)", len(llm.gotReq.Messages))
+	}
+	if llm.gotReq.ForkedKind != "suggestion" {
+		t.Errorf("ForkedKind = %q, want %q", llm.gotReq.ForkedKind, "suggestion")
+	}
+}
+
+func TestGenerateSuggestion_FilterRejection(t *testing.T) {
+	main := client.CompletionRequest{
+		Messages:  []client.Message{{Role: "user", Content: client.NewTextContent("hi")}},
+		ModelTier: "medium",
+	}
+	llm := &fakeLLM{resp: "skip"} // FilterSuggestion rejects the literal meta-marker "skip"
+
+	got, err := GenerateSuggestion(context.Background(), llm, main)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got != "" {
+		t.Errorf("expected empty string from filtered response, got %q", got)
+	}
+}
+
+func TestGenerateSuggestion_GatewayError(t *testing.T) {
+	main := client.CompletionRequest{
+		Messages:  []client.Message{{Role: "user", Content: client.NewTextContent("hi")}},
+		ModelTier: "medium",
+	}
+	llm := &fakeLLM{completeErr: errors.New("rate limited")}
+
+	got, err := GenerateSuggestion(context.Background(), llm, main)
+	if err == nil {
+		t.Error("expected error from gateway failure")
+	}
+	if got != "" {
+		t.Errorf("expected empty string on error, got %q", got)
+	}
+}
 
 func TestFilterSuggestion(t *testing.T) {
 	cases := []struct {

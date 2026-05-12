@@ -1,9 +1,13 @@
 package agent
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/Kocoro-lab/ShanClaw/internal/client"
 )
 
 // SuggestionPrompt is the synthetic user message appended to the main
@@ -181,4 +185,48 @@ func FilterSuggestion(raw string) (string, bool) {
 	}
 
 	return s, true
+}
+
+// BuildForkedSuggestionRequest is a thin wrapper over BuildForkedRequest
+// specialized for prompt suggestion: appends a single user message containing
+// SuggestionPrompt and sets SkipCacheWrite + DebugKind.
+//
+// CACHE SAFETY: inherits the BuildForkedRequest invariant — byte-equal to
+// main except for the one appended message and SkipCacheWrite. Do not add
+// any further customization here; if a future use case needs to also restrict
+// tools or override params, route it through ForkOptions on the primitive
+// (and add an audit row — see forkedrequest.go).
+func BuildForkedSuggestionRequest(main client.CompletionRequest) client.CompletionRequest {
+	out, _ := BuildForkedRequest(main, ForkOptions{
+		AppendMessages: []client.Message{{Role: "user", Content: client.NewTextContent(SuggestionPrompt)}},
+		SkipCacheWrite: true,
+		DebugKind:      "suggestion",
+	})
+	return out
+}
+
+// GenerateSuggestion runs a single forked LLM call to elicit a next-prompt
+// suggestion. Returns the filtered suggestion text (≤12 words) or empty string
+// if the model returned no usable suggestion. Returns a non-nil error only on
+// transport failure; filter rejection is signaled by empty string + nil error
+// (caller treats both as "no suggestion to display").
+//
+// Cost: 1 LLM call. With a warm prompt cache, input cost ≈ cache_read for the
+// prefix + full price for ~150 tokens (SuggestionPrompt + small overhead).
+// Output is capped by the filter to ≤100 chars (~30 tokens). Skipped by the
+// caller (suggestion_handler) when the cache is cold per
+// agent.prompt_suggestion.cache_cold_threshold_tokens.
+func GenerateSuggestion(ctx context.Context, llm client.LLMClient, main client.CompletionRequest) (string, error) {
+	req := BuildForkedSuggestionRequest(main)
+
+	resp, err := llm.Complete(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("suggestion gateway call: %w", err)
+	}
+	if resp == nil || resp.OutputText == "" {
+		return "", nil
+	}
+
+	filtered, _ := FilterSuggestion(resp.OutputText)
+	return filtered, nil
 }

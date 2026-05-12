@@ -302,8 +302,8 @@ Scalars override, lists merge+dedup, structs field-level merge. MCP server env v
 
 ### Prompt Cache
 See `docs/cache-strategy.md` for the authoritative design (4-breakpoint allocation, source→TTL routing, byte stability, session_id propagation, env-var overrides). When investigating CER drops, see `docs/cache-debug.md` for the diagnostic instrumentation layer (env flags, log fields, drift patterns). One-line invariants:
-- `cache_source` tags every LLM call; `_ttl_block(request)` routes 1h for channel/TUI, 5m for one-shot/subagent (fail cheap).
-- `SHANNON_FORCE_TTL=off|5m|1h` overrides for operator debug / A-B.
+- `cache_source` tags every LLM call. **Current production behavior** (cloud `anthropic_provider.py:188`, since 2026-04-15): `_LONG_CACHE_SOURCES` is the empty set, so `_ttl_block(request)` routes EVERY source to 5m by default — 1.25x write premium vs 2x for 1h (fail cheap when read/write reuse is uncertain). The earlier "1h for channel/TUI" routing was disabled after a bench regression; see `docs/cache-strategy.md`. Cache_source is still meaningful — it drives the analytics taxonomy + future re-enable — so callers must tag accurately even though all routes converge today.
+- `SHANNON_FORCE_TTL=off|5m|1h` overrides for operator debug / A-B (the only way to get 1h currently).
 - `SHANNON_CACHE_DEBUG=1` → JSON-lines log with hash ladders + per-tool / per-message / per-block hashes + compaction events; `SHANNON_CACHE_DEBUG_RAW=1` adds full request bytes per call (LRU 100 dirs, override `SHANNON_CACHE_DEBUG_RAW_MAX`).
 - `normalizeToolInput` in `gateway.go` canonicalizes nested JSON key ordering so cross-turn `system_h` / tool_use-input stays byte-stable.
 - **Skill allowed-tools** uses execution-time denial (not schema filtering) to keep `toolSchemas` byte-stable. Previous `applySkillFilter` shrank the tools array after `use_skill`, causing ~$0.10 cache rebuild per activation; now tools stay full ($0.02).

@@ -207,6 +207,13 @@ func logCacheDebug(req CompletionRequest, tag string) string {
 	if v := os.Getenv("SHANNON_FORCE_TTL"); v != "" {
 		entry["force_ttl"] = v
 	}
+	// forked_kind tags off-path completions (suggestion / speculation). Main
+	// turn calls leave req.ForkedKind == "" and the field is omitted, so
+	// operators can grep by the same prefix_hash to correlate a main turn
+	// with its forked siblings.
+	if req.ForkedKind != "" {
+		entry["forked_kind"] = req.ForkedKind
+	}
 	appendCacheDebug(entry)
 
 	if os.Getenv("SHANNON_CACHE_DEBUG_RAW") == "1" {

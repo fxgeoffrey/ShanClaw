@@ -222,6 +222,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("GET /skills/downloadable", s.handleListDownloadableSkills)
 	mux.HandleFunc("POST /skills/install/{name}", s.handleInstallSkill)
 	mux.HandleFunc("POST /skills/marketplace/install/{slug}", s.handleMarketplaceInstall)
+	mux.HandleFunc("POST /skills/upload", s.handleUploadSkill)
 	mux.HandleFunc("GET /skills/marketplace", s.handleMarketplaceList)
 	mux.HandleFunc("GET /skills/marketplace/entry/{slug}", s.handleMarketplaceDetail)
 	mux.HandleFunc("GET /skills", s.handleListSkills)
@@ -2536,6 +2537,67 @@ func (s *Server) handleMarketplaceInstall(w http.ResponseWriter, r *http.Request
 	default:
 		// Local disk/staging failures → 500, per spec error matrix.
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("install failed: %v", err))
+	}
+}
+
+// uploadSkillMaxBodyBytes caps the entire multipart request body. The actual
+// 50 MB ZIP limit lives in skills.maxZipCompressedBytes; the extra ~2 MB here
+// is headroom for multipart boundaries / form-field overhead so a 50 MB ZIP
+// isn't rejected at the HTTP layer before reaching skills.InstallFromZipData
+// (which performs the authoritative size check and returns ErrZipTooLarge).
+const uploadSkillMaxBodyBytes int64 = 52 * 1024 * 1024
+
+// uploadSkillInMemoryBytes is the multipart in-memory threshold; anything over
+// this spills to a tempfile via mime/multipart. Keeps peak RAM bounded under
+// concurrent uploads since the body is streamed directly into InstallFromZipData.
+const uploadSkillInMemoryBytes int64 = 1 << 20 // 1 MB
+
+func (s *Server) handleUploadSkill(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDeps(w) {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, uploadSkillMaxBodyBytes)
+	if err := r.ParseMultipartForm(uploadSkillInMemoryBytes); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "zip too large (maximum 50 MB)")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid multipart form: "+err.Error())
+		return
+	}
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "missing 'file' field in multipart form")
+		return
+	}
+	defer file.Close()
+
+	force := r.URL.Query().Get("force") == "true"
+	skill, err := skills.InstallFromZipData(s.deps.ShannonDir, file, force, s.slugLocks)
+
+	var conflict *skills.SkillConflictError
+	switch {
+	case err == nil:
+		s.auditHTTPOp("POST", "/skills/upload", "installed skill via zip: "+skill.Slug)
+		writeJSON(w, http.StatusCreated, skill.ToMeta())
+	case errors.As(err, &conflict):
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error":                "skill_already_exists",
+			"existing_name":        conflict.ExistingName,
+			"existing_description": conflict.ExistingDescription,
+			"existing_prompt":      conflict.ExistingPrompt,
+			"new_description":      conflict.NewDescription,
+			"new_prompt":           conflict.NewPrompt,
+		})
+	case errors.Is(err, skills.ErrSkillIsBuiltin):
+		writeError(w, http.StatusForbidden, "skill_is_builtin")
+	case errors.Is(err, skills.ErrZipTooLarge):
+		writeError(w, http.StatusRequestEntityTooLarge, "zip too large (maximum 50 MB)")
+	case errors.Is(err, skills.ErrInvalidSkillPayload):
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+	default:
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("upload failed: %v", err))
 	}
 }
 

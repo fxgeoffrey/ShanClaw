@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"archive/zip"
 	"bufio"
 	"bytes"
 	"context"
@@ -2063,5 +2064,169 @@ func TestServer_PatchConfigSetsDaemonAutoApprove(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "auto_approve: true") {
 		t.Fatalf("expected auto_approve: true in persisted config, got %s", data)
+	}
+}
+
+// --- Upload skill helpers ---
+
+func makeUploadZip(t *testing.T, name, description, prompt string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	f, _ := zw.Create("SKILL.md")
+	fmt.Fprintf(f, "---\nname: %s\ndescription: %s\n---\n\n%s\n", name, description, prompt)
+	zw.Close()
+	return buf.Bytes()
+}
+
+func buildUploadRequest(t *testing.T, url string, zipData []byte) *http.Request {
+	t.Helper()
+	boundary := "testboundary"
+	var body bytes.Buffer
+	body.WriteString("--" + boundary + "\r\n")
+	body.WriteString("Content-Disposition: form-data; name=\"file\"; filename=\"skill.zip\"\r\n")
+	body.WriteString("Content-Type: application/zip\r\n\r\n")
+	body.Write(zipData)
+	body.WriteString("\r\n--" + boundary + "--\r\n")
+	req, err := http.NewRequest(http.MethodPost, url, &body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	return req
+}
+
+func TestServer_UploadSkill_Success(t *testing.T) {
+	shannonDir := t.TempDir()
+	deps := &ServerDeps{ShannonDir: shannonDir}
+	c := NewClient("ws://localhost:1/x", "", func(msg MessagePayload) string { return "" }, nil)
+	srv := NewServer(0, c, deps, "test")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go srv.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	zipBody := makeUploadZip(t, "upload-skill", "does uploads", "Upload things.")
+	req := buildUploadRequest(t, fmt.Sprintf("http://127.0.0.1:%d/skills/upload", srv.Port()), zipBody)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("want 201, got %d: %s", resp.StatusCode, body)
+	}
+	var meta struct {
+		Name string `json:"name"`
+	}
+	json.NewDecoder(resp.Body).Decode(&meta)
+	if meta.Name != "upload-skill" {
+		t.Errorf("name = %q", meta.Name)
+	}
+}
+
+func TestServer_UploadSkill_Conflict(t *testing.T) {
+	shannonDir := t.TempDir()
+	deps := &ServerDeps{ShannonDir: shannonDir}
+	c := NewClient("ws://localhost:1/x", "", func(msg MessagePayload) string { return "" }, nil)
+	srv := NewServer(0, c, deps, "test")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go srv.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	zipBody := makeUploadZip(t, "upload-skill", "does uploads", "Upload things.")
+	req := buildUploadRequest(t, fmt.Sprintf("http://127.0.0.1:%d/skills/upload", srv.Port()), zipBody)
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+
+	req2 := buildUploadRequest(t, fmt.Sprintf("http://127.0.0.1:%d/skills/upload", srv.Port()), zipBody)
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusConflict {
+		t.Fatalf("want 409, got %d", resp2.StatusCode)
+	}
+	var respBody map[string]string
+	json.NewDecoder(resp2.Body).Decode(&respBody)
+	if respBody["error"] != "skill_already_exists" {
+		t.Errorf("error = %q", respBody["error"])
+	}
+	if respBody["existing_name"] != "upload-skill" {
+		t.Errorf("existing_name = %q", respBody["existing_name"])
+	}
+}
+
+func TestServer_UploadSkill_ForceOverwrite(t *testing.T) {
+	shannonDir := t.TempDir()
+	deps := &ServerDeps{ShannonDir: shannonDir}
+	c := NewClient("ws://localhost:1/x", "", func(msg MessagePayload) string { return "" }, nil)
+	srv := NewServer(0, c, deps, "test")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go srv.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	zip1 := makeUploadZip(t, "upload-skill", "v1 desc", "v1.")
+	req := buildUploadRequest(t, fmt.Sprintf("http://127.0.0.1:%d/skills/upload", srv.Port()), zip1)
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+
+	zip2 := makeUploadZip(t, "upload-skill", "v2 desc", "v2.")
+	forceURL := fmt.Sprintf("http://127.0.0.1:%d/skills/upload?force=true", srv.Port())
+	req2 := buildUploadRequest(t, forceURL, zip2)
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp2.Body)
+		t.Fatalf("want 201, got %d: %s", resp2.StatusCode, body)
+	}
+}
+
+func TestServer_UploadSkill_Builtin(t *testing.T) {
+	shannonDir := t.TempDir()
+	// Mirror the real on-disk layout: EnsureBuiltinSkills syncs builtins into
+	// skills/<slug>/. The handler must still reject the upload regardless.
+	globalDir := filepath.Join(shannonDir, "skills", "kocoro")
+	os.MkdirAll(globalDir, 0700)
+	os.WriteFile(filepath.Join(globalDir, "SKILL.md"),
+		[]byte("---\nname: kocoro\ndescription: builtin\n---\n\nBuiltin.\n"), 0600)
+
+	deps := &ServerDeps{ShannonDir: shannonDir}
+	c := NewClient("ws://localhost:1/x", "", func(msg MessagePayload) string { return "" }, nil)
+	srv := NewServer(0, c, deps, "test")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go srv.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	zipBody := makeUploadZip(t, "kocoro", "replacement", "Replace.")
+	// Without force.
+	req := buildUploadRequest(t, fmt.Sprintf("http://127.0.0.1:%d/skills/upload", srv.Port()), zipBody)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("want 403, got %d", resp.StatusCode)
+	}
+
+	// With force=true the guard must still hold.
+	forceURL := fmt.Sprintf("http://127.0.0.1:%d/skills/upload?force=true", srv.Port())
+	req2 := buildUploadRequest(t, forceURL, zipBody)
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusForbidden {
+		t.Fatalf("force=true: want 403, got %d", resp2.StatusCode)
 	}
 }

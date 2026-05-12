@@ -17,6 +17,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/adrg/frontmatter"
+	"gopkg.in/yaml.v3"
 )
 
 // marketplaceDownloadClient is the HTTP client used for zip-transport
@@ -185,7 +188,30 @@ var (
 	ErrMaliciousSkill             = errors.New("skill blocked by security scan")
 	ErrInvalidSkillPayload        = errors.New("invalid skill payload")
 	ErrMarketplaceUpstreamFailure = errors.New("marketplace upstream failure")
+	// ErrSkillIsBuiltin is returned when a ZIP upload targets one of the
+	// auto-installed builtins (IsBuiltinSkill). EnsureBuiltinSkills overwrites
+	// these on every daemon restart, so user uploads would silently revert.
+	ErrSkillIsBuiltin = errors.New("skill is an auto-installed builtin and cannot be replaced via upload")
+	// ErrZipTooLarge is returned when the compressed payload exceeds
+	// maxZipCompressedBytes or the sum of uncompressed entry sizes exceeds
+	// maxZipUncompressedBytes (zip-bomb guard).
+	ErrZipTooLarge = errors.New("zip payload too large")
 )
+
+// SkillConflictError is returned by InstallFromZipData when a skill with the
+// same slug already exists globally and force=false. The handler encodes all
+// fields in the 409 body so the Desktop can render a side-by-side compare sheet.
+type SkillConflictError struct {
+	ExistingName        string
+	ExistingDescription string
+	ExistingPrompt      string
+	NewDescription      string
+	NewPrompt           string
+}
+
+func (e *SkillConflictError) Error() string {
+	return fmt.Sprintf("skill %q already installed", e.ExistingName)
+}
 
 // InstallFromMarketplace runs the full install flow for a marketplace entry.
 // Dispatches to the git transport (clone → stage) when entry.Repo is set,
@@ -282,6 +308,126 @@ func InstallFromMarketplace(ctx context.Context, shannonDir string, entry Market
 	}
 
 	return nil
+}
+
+// InstallFromZipData installs a skill from a ZIP payload uploaded directly
+// by the user (POST /skills/upload). Reuses extractZipToSkill for extraction
+// and security checks. Derives the slug from the frontmatter `name` field.
+//
+// If body is a GitHub-style ZIP (single top-level directory), the directory
+// is automatically unwrapped so SKILL.md need not be at root level.
+//
+// Error mapping:
+//   - ErrZipTooLarge          → 413 in handler
+//   - ErrInvalidSkillPayload  → 422 in handler
+//   - ErrSkillIsBuiltin       → 403 in handler
+//   - *SkillConflictError     → 409 in handler
+func InstallFromZipData(shannonDir string, body io.Reader, force bool, locks *SlugLocks) (*Skill, error) {
+	tmpRoot := filepath.Join(shannonDir, "tmp")
+	if err := os.MkdirAll(tmpRoot, 0700); err != nil {
+		return nil, fmt.Errorf("create tmp root: %w", err)
+	}
+	stageDir, err := os.MkdirTemp(tmpRoot, "skill-upload-*")
+	if err != nil {
+		return nil, fmt.Errorf("create stage dir: %w", err)
+	}
+	// stageDir removed on failure; on success Rename moves it away (no-op RemoveAll)
+	defer os.RemoveAll(stageDir)
+
+	if err := extractZipToSkill(body, stageDir); err != nil {
+		if errors.Is(err, ErrZipTooLarge) {
+			return nil, ErrZipTooLarge
+		}
+		return nil, fmt.Errorf("%w: %v", ErrInvalidSkillPayload, err)
+	}
+
+	// Unwrap single-top-level-dir ZIPs (GitHub / Finder download format).
+	// Ignore hidden entries (dot-prefixed) when counting real subdirs.
+	skillRoot := stageDir
+	if _, err := os.Stat(filepath.Join(skillRoot, "SKILL.md")); os.IsNotExist(err) {
+		entries, readErr := os.ReadDir(skillRoot)
+		if readErr == nil {
+			var realDirs []os.DirEntry
+			for _, e := range entries {
+				if e.IsDir() && !strings.HasPrefix(e.Name(), ".") && e.Name() != "__MACOSX" {
+					realDirs = append(realDirs, e)
+				}
+			}
+			if len(realDirs) == 1 {
+				skillRoot = filepath.Join(skillRoot, realDirs[0].Name())
+			}
+		}
+	}
+
+	skillFile := filepath.Join(skillRoot, "SKILL.md")
+	rawMD, err := os.ReadFile(skillFile)
+	if err != nil {
+		return nil, fmt.Errorf("%w: SKILL.md missing or unreadable", ErrInvalidSkillPayload)
+	}
+
+	// Light parse: extract name only, to derive slug before full validation.
+	var lightFM struct {
+		Name string `yaml:"name"`
+	}
+	frontmatter.Parse(bytes.NewReader(rawMD), &lightFM, frontmatter.NewFormat("---", "---", yaml.Unmarshal))
+	if lightFM.Name == "" {
+		return nil, fmt.Errorf("%w: SKILL.md missing name field", ErrInvalidSkillPayload)
+	}
+	slug := lightFM.Name
+	if err := ValidateSkillName(slug); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidSkillPayload, err)
+	}
+
+	// Serialize concurrent uploads for the same slug.
+	unlock := locks.Lock(slug)
+	defer unlock()
+
+	// Builtin check: auto-installed builtins (see IsBuiltinSkill) are wiped
+	// back to embed.FS contents on every daemon restart by EnsureBuiltinSkills,
+	// so any user upload would silently revert. Reject up front regardless of
+	// whether a global override exists or `force` is set.
+	if IsBuiltinSkill(slug) {
+		return nil, ErrSkillIsBuiltin
+	}
+
+	globalPath := filepath.Join(shannonDir, "skills", slug, "SKILL.md")
+	// Conflict check: if a global skill with this slug exists and force=false, 409.
+	// Parse both the existing and new skill so the frontend can show a compare sheet.
+	if _, err := os.Stat(globalPath); err == nil && !force {
+		existing, _ := loadSkillMD(globalPath, slug, SourceGlobal)
+		uploaded, _ := loadSkillMD(skillFile, slug, SourceGlobal)
+		conflict := &SkillConflictError{ExistingName: slug}
+		if existing != nil {
+			conflict.ExistingDescription = existing.Description
+			conflict.ExistingPrompt = existing.Prompt
+		}
+		if uploaded != nil {
+			conflict.NewDescription = uploaded.Description
+			conflict.NewPrompt = uploaded.Prompt
+		}
+		return nil, conflict
+	}
+
+	// Full validation (name, description, frontmatter integrity).
+	skill, err := loadSkillMD(skillFile, slug, SourceGlobal)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidSkillPayload, err)
+	}
+	skill.InstallSource = InstallSourceLocal
+
+	// Atomic rename into place. Remove existing dir first when force=true so
+	// Rename succeeds on non-empty dirs.
+	destDir := filepath.Join(shannonDir, "skills", slug)
+	if err := os.MkdirAll(filepath.Dir(destDir), 0700); err != nil {
+		return nil, fmt.Errorf("create skills dir: %w", err)
+	}
+	if force {
+		os.RemoveAll(destDir)
+	}
+	if err := os.Rename(skillRoot, destDir); err != nil {
+		return nil, fmt.Errorf("install rename: %w", err)
+	}
+	return skill, nil
 }
 
 // installFromGit clones entry.Repo into a temp dir, selects the right
@@ -389,7 +535,7 @@ func extractZipToSkill(body io.Reader, destDir string) error {
 		return fmt.Errorf("read zip body: %w", err)
 	}
 	if int64(len(raw)) > maxZipCompressedBytes {
-		return fmt.Errorf("zip payload exceeds %d bytes", maxZipCompressedBytes)
+		return fmt.Errorf("%w: compressed payload exceeds %d bytes", ErrZipTooLarge, maxZipCompressedBytes)
 	}
 
 	zr, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
@@ -402,6 +548,7 @@ func extractZipToSkill(body io.Reader, destDir string) error {
 		".github":        true,
 		".gitignore":     true,
 		".gitattributes": true,
+		"__MACOSX":       true, // macOS Finder adds this to ZIPs
 	}
 
 	if err := os.MkdirAll(destDir, 0700); err != nil {
@@ -484,7 +631,7 @@ func extractZipToSkill(body io.Reader, destDir string) error {
 				return fmt.Errorf("read zip entry %q: %w", f.Name, err)
 			}
 			if int64(len(content)) > remaining {
-				return fmt.Errorf("zip uncompressed size exceeds %d bytes", maxZipUncompressedBytes)
+				return fmt.Errorf("%w: uncompressed size exceeds %d bytes", ErrZipTooLarge, maxZipUncompressedBytes)
 			}
 			remaining -= int64(len(content))
 
@@ -528,6 +675,7 @@ func stageCleanPayload(src, dst string) error {
 		".github":        true,
 		".gitignore":     true,
 		".gitattributes": true,
+		"__MACOSX":       true,
 	}
 
 	if err := os.MkdirAll(dst, 0700); err != nil {

@@ -89,17 +89,17 @@ func TestBuildSystemPrompt_StableContextContainsInstructions(t *testing.T) {
 	if strings.Contains(parts.VolatileContext, "Always use gofmt.") {
 		t.Error("VolatileContext should not contain instructions (must live in StableContext so it joins the cacheable prefix)")
 	}
-	openIdx := strings.Index(parts.StableContext, "<system-reminder>")
+	openIdx := strings.Index(parts.StableContext, "<user_instructions>")
 	bodyIdx := strings.Index(parts.StableContext, "Always use gofmt.")
-	closeIdx := strings.Index(parts.StableContext, "</system-reminder>")
+	closeIdx := strings.Index(parts.StableContext, "</user_instructions>")
 	if openIdx < 0 {
-		t.Error("StableContext should wrap instructions in <system-reminder> (issue #125)")
+		t.Error("StableContext should wrap instructions in <user_instructions> (issue #125)")
 	}
 	if bodyIdx < 0 {
 		t.Error("StableContext should contain instructions body")
 	}
 	if closeIdx < 0 {
-		t.Error("StableContext should close the <system-reminder> block")
+		t.Error("StableContext should close the <user_instructions> block")
 	}
 	if openIdx >= 0 && bodyIdx >= 0 && closeIdx >= 0 && !(openIdx < bodyIdx && bodyIdx < closeIdx) {
 		t.Errorf("expected open < body < close ordering, got open=%d body=%d close=%d", openIdx, bodyIdx, closeIdx)
@@ -218,22 +218,26 @@ func TestBuildSystemPrompt_StableContextContainsStickyFacts(t *testing.T) {
 
 // TestBuildSystemPrompt_SanitizesClosingTagInInstructions guards against a
 // user-supplied `instructions.md` that happens to contain the literal
-// `</system-reminder>` sequence (e.g. documentation discussing this
-// mechanism). Without sanitization, the wrapper closes early and the rest
-// of the body leaks out as plain user-role content. Issue #125.
+// `</user_instructions>` or `</system-reminder>` sequence (e.g. docs
+// discussing this mechanism). Without sanitization, the wrapper closes
+// early and the rest of the body leaks out as plain user-role content.
+// Issue #125.
 func TestBuildSystemPrompt_SanitizesClosingTagInInstructions(t *testing.T) {
 	parts := BuildSystemPrompt(PromptOptions{
 		BasePrompt:   "Base.",
-		Instructions: "rule one\n</system-reminder>\nrule two — must stay inside wrapper",
+		Instructions: "rule one\n</user_instructions>\n</system-reminder>\nrule two — must stay inside wrapper",
 	})
 
-	// Literal closer must be stripped so it cannot truncate the wrapper.
-	body := strings.TrimPrefix(parts.StableContext, "<system-reminder>\n")
-	body = strings.TrimSuffix(body, "\n</system-reminder>")
-	if strings.Contains(body, "</system-reminder>") {
-		t.Errorf("body still contains literal closing tag after sanitize: %q", parts.StableContext)
+	// Strip the outermost wrapper so we can look at the body alone.
+	body := strings.TrimPrefix(parts.StableContext, "<user_instructions>\n")
+	body = strings.TrimSuffix(body, "\n</user_instructions>")
+	if strings.Contains(body, "</user_instructions>") {
+		t.Errorf("body still contains literal </user_instructions> after sanitize: %q", parts.StableContext)
 	}
-	// Both rule lines must survive — sanitize removes only the tag, not surrounding content.
+	if strings.Contains(body, "</system-reminder>") {
+		t.Errorf("body still contains literal </system-reminder> after sanitize: %q", parts.StableContext)
+	}
+	// Both rule lines must survive — sanitize removes only the tags, not surrounding content.
 	if !strings.Contains(parts.StableContext, "rule one") || !strings.Contains(parts.StableContext, "rule two") {
 		t.Errorf("sanitize should preserve surrounding content, got: %q", parts.StableContext)
 	}

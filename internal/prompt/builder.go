@@ -237,18 +237,23 @@ func buildStableContext(opts PromptOptions) string {
 	var sb strings.Builder
 
 	if inst := strings.TrimSpace(opts.Instructions); inst != "" {
-		// Wrap in <system-reminder> rather than emitting a `## Instructions`
+		// Wrap in <user_instructions> rather than a bare `## Instructions`
 		// markdown header. The user-role placement (chosen for BP #3 cache
 		// economics — see commit 7c897b6) means Claude treats the block
 		// through its prompt-injection lens; a directive markdown header in
-		// user content is a textbook injection signature and triggers
-		// false-positive refusals ("ignored prompt injection block, tried to
-		// modify my name"). `<system-reminder>` is the tag Anthropic trains
-		// Claude to read as framework-internal trusted content — same role
-		// and same cache position, just a trust-channel wrapper. Issue #125.
-		sb.WriteString("<system-reminder>\n")
-		sb.WriteString(sanitizeForReminder(truncate(inst, maxInstructionsChars)))
-		sb.WriteString("\n</system-reminder>")
+		// user content is a textbook injection signature.
+		//
+		// We do NOT use <system-reminder> here — that tag is Anthropic's
+		// internal vocabulary for trusted system signals, and Claude 4.X
+		// is trained to flag user-supplied content wearing that tag as a
+		// forged-system-signal injection (the opposite of what we want).
+		// <user_instructions> is a neutral user-domain tag with no such
+		// training collision; it gives the model a clear semantic boundary
+		// ("this block is the user's persistent rules, not an injection")
+		// while staying inside the cacheable user-message prefix. Issue #125.
+		sb.WriteString("<user_instructions>\n")
+		sb.WriteString(sanitizeUserBlock(truncate(inst, maxInstructionsChars)))
+		sb.WriteString("\n</user_instructions>")
 	}
 
 	if sticky := strings.TrimSpace(opts.StickyContext); sticky != "" {
@@ -261,7 +266,7 @@ func buildStableContext(opts PromptOptions) string {
 		// trust-channel wrapper across every framework-injected block keeps
 		// the user-role surface uniform. Issue #125.
 		sb.WriteString("<system-reminder>\n## Session Facts\n")
-		sb.WriteString(sanitizeForReminder(sticky))
+		sb.WriteString(sanitizeUserBlock(sticky))
 		sb.WriteString("\n</system-reminder>")
 	}
 
@@ -366,24 +371,24 @@ func truncate(s string, maxChars int) string {
 	return string(r[:maxChars]) + "\n[truncated]"
 }
 
-// sanitizeForReminder strips literal `</system-reminder>` closers from
-// user-supplied content so the wrapper around it cannot be terminated early.
-// Without this, an instructions.md or sticky-facts payload that happens to
-// contain the closing tag (e.g. documentation discussing this mechanism)
-// would silently truncate the trust channel and leak the rest of the body
-// out as plain user-role content.
+// sanitizeUserBlock strips wrapper closing tags from user-supplied content
+// so the envelope around it cannot be terminated early. We strip BOTH
+// `</user_instructions>` (used to wrap instructions.md) and
+// `</system-reminder>` (used to wrap sticky facts) — defense in depth, since
+// the same body could in principle be wrapped under either tag depending on
+// the call site and we don't want either to leak out as plain user content.
 //
 // The asymmetry — strip closers but not openers — is deliberate. An opener
-// leaking through produces a nested but still well-formed trust channel
-// (`<system-reminder>` inside another `<system-reminder>`); Anthropic's
-// parser handles nesting permissively and the content stays inside the
-// outer trust envelope. A closer leaking through produces the opposite —
-// the rest of the body escapes the channel and gets re-classified as plain
-// user content, which is the failure mode this PR exists to prevent.
-// Stripping only closers fixes the dangerous case without burning cycles
-// on a harmless one. Issue #125.
-func sanitizeForReminder(s string) string {
-	return strings.ReplaceAll(s, "</system-reminder>", "")
+// leaking through produces a nested but still well-formed wrapper (the body
+// stays inside the outer envelope). A closer leaking through truncates the
+// wrapper and the rest of the body escapes into plain user content, which
+// is the exact failure mode this PR exists to prevent. Stripping only
+// closers fixes the dangerous case without spending cycles on the safe one.
+// Issue #125.
+func sanitizeUserBlock(s string) string {
+	s = strings.ReplaceAll(s, "</user_instructions>", "")
+	s = strings.ReplaceAll(s, "</system-reminder>", "")
+	return s
 }
 
 // macOSAutomationGuidance returns workflow guidance for macOS automation tools,

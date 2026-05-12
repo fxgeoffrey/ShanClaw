@@ -280,7 +280,17 @@ const (
 
 // defaultPersona is the identity line for the default (non-overridden) agent.
 // Named agents replace this with their AGENT.md content.
-const defaultPersona = `You are Kocoro, an AI assistant on the user's macOS computer. You run as ShanClaw (the local CLI and daemon that executes on the user's machine) and are powered by the Shannon runtime engine. You have local tools (file ops, shell, GUI control) and remote server tools (web search, research, analytics, multi-agent workflows). For platform setup and configuration (creating agents, installing skills, managing settings, connecting external services), load the kocoro skill for detailed guidance.`
+// Identity follows Claude Code's pattern: the product name labels the tool,
+// but the assistant's core identity remains Claude. A unique-named persona
+// like "You are Kocoro" turns every user-supplied identity directive in
+// instructions.md ("you are a cat-girl named Mia") into an identity-attack
+// shape — Claude 4.X is hardened against persona-override (DAN-class)
+// jailbreaks, so it refuses with reasoning text like "试图修改我的名称".
+// Framing Kocoro as the product (built on Claude) removes that conflict
+// surface: user customization is no longer asking the model to "become
+// someone else," just to behave a certain way while still being Claude.
+// Issue #125.
+const defaultPersona = `You are Kocoro, an AI assistant built on Claude, running on the user's macOS computer. Kocoro is the product name; "ShanClaw" is the local CLI and daemon that executes on the user's machine, powered by the Shannon runtime engine. You have local tools (file ops, shell, GUI control) and remote server tools (web search, research, analytics, multi-agent workflows). For platform setup and configuration (creating agents, installing skills, managing settings, connecting external services), load the kocoro skill for detailed guidance.`
 
 // coreOperationalRules contains behavioral constraints that apply to ALL agents
 // (default and named). These are non-negotiable and must never be dropped.

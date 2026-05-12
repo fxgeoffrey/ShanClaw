@@ -845,6 +845,12 @@ func TestCompletionRequest_SkipCacheWrite_Marshaling(t *testing.T) {
 	if strings.Contains(string(b2), "skip_cache_write") {
 		t.Errorf("expected skip_cache_write to be omitted when false, got: %s", string(b2))
 	}
+	// Pin the byte-stable zero-value baseline: neither new field name may
+	// appear in JSON when both are at their zero value. Guards against a
+	// future regression where someone removes omitempty / renames a tag.
+	if strings.Contains(string(b2), "forked_kind") || strings.Contains(string(b2), "ForkedKind") {
+		t.Errorf("zero-value baseline leaked ForkedKind into JSON: %s", string(b2))
+	}
 }
 
 func TestCompletionRequest_ForkedKind_NotInWire(t *testing.T) {

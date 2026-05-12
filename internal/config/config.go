@@ -85,11 +85,11 @@ type AgentConfig struct {
 	TimeBasedCompact TimeBasedCompactConfig `mapstructure:"time_based_compact" yaml:"time_based_compact" json:"time_based_compact"`
 
 	// PromptSuggestion controls the ghost-text "next prompt" suggestion that
-	// appears in Desktop's 继续对话 input after each assistant turn. Disabled
-	// by default. When enabled, after each turn the daemon runs a forked
-	// completion call to generate a single 2-12 word suggestion. With
-	// SpeculationEnabled, a second forked AgentLoop pre-runs the response
-	// to that suggestion so acceptance is instant.
+	// appears in the Desktop follow-up input after each assistant turn.
+	// Disabled by default. When enabled, after each turn the daemon runs a
+	// forked completion call to generate a single 2-12 word suggestion. With
+	// SpeculationEnabled, a second forked AgentLoop pre-runs the response to
+	// that suggestion so acceptance is instant.
 	PromptSuggestion PromptSuggestionConfig `mapstructure:"prompt_suggestion" yaml:"prompt_suggestion" json:"prompt_suggestion"`
 }
 
@@ -103,7 +103,9 @@ type TimeBasedCompactConfig struct {
 }
 
 // PromptSuggestionConfig controls the post-turn next-prompt suggestion feature.
-// See docs/superpowers/plans/2026-05-12-prompt-suggestion.md for design.
+// The forked completion call is a thin specialization on top of
+// internal/agent.BuildForkedRequest — see that package for the cache-safety
+// invariant (byte-equal request prefix to the main turn).
 type PromptSuggestionConfig struct {
 	// Enabled is the master switch. When false the entire feature is dormant —
 	// no forked calls, no SSE events, no Desktop ghost text. Default: false.

@@ -864,3 +864,69 @@ func messageText(m client.Message) string {
 	b, _ := json.Marshal(m.Content)
 	return string(b)
 }
+
+// TestFireSuggestionAfterRun_StaleGoroutineDoesNotResurrect simulates the
+// detached-goroutine race the GPT review flagged as P0/P1: a new turn
+// starts (Clear) while the previous turn's suggestion goroutine is still
+// blocked on the gateway. The late Set must be dropped, not resurrected.
+func TestFireSuggestionAfterRun_StaleGoroutineDoesNotResurrect(t *testing.T) {
+	// Gate the fake gateway on a channel so we can interleave Clear()
+	// in the middle of the gateway call.
+	startResp := make(chan struct{})
+	gw := &fakeGatewayBackend{} // reply set just before unblocking
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req client.CompletionRequest
+		_ = json.Unmarshal(body, &req)
+		gw.mu.Lock()
+		gw.captured = append(gw.captured, req)
+		gw.mu.Unlock()
+
+		<-startResp // wait for test to clear state and unblock us
+
+		resp := client.CompletionResponse{
+			Provider:   "anthropic",
+			Model:      "test",
+			OutputText: "stale suggestion text",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer ts.Close()
+
+	deps := &ServerDeps{
+		GW:          client.NewGatewayClient(ts.URL, "test"),
+		Suggestions: agent.NewSuggestionState(),
+	}
+	main := client.CompletionRequest{
+		Messages:  []client.Message{{Role: "user", Content: client.NewTextContent("hi")}},
+		ModelTier: "medium",
+	}
+
+	// Fire the suggestion goroutine. It will block in the fake gateway
+	// handler until we send on startResp.
+	done := make(chan struct{})
+	go func() {
+		fireSuggestionAfterRun(context.Background(), deps,
+			"test-agent", "sess1",
+			main, config.PromptSuggestionConfig{},
+			"I just replied to you")
+		close(done)
+	}()
+
+	// Wait briefly to ensure the goroutine has captured CurrentGen
+	// (it does so before the gateway call returns).
+	time.Sleep(20 * time.Millisecond)
+
+	// Simulate the new-turn lifecycle: Clear bumps the generation.
+	deps.Suggestions.Clear("sess1")
+
+	// Unblock the gateway handler. Goroutine now proceeds with its
+	// stale-gen SetIfFresh call.
+	close(startResp)
+	<-done
+
+	if _, ok := deps.Suggestions.Get("sess1"); ok {
+		t.Error("stale goroutine resurrected SuggestionState after Clear — race not prevented")
+	}
+}

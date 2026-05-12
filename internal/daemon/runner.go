@@ -1585,6 +1585,12 @@ func fireSuggestionAfterRun(ctx context.Context, deps *ServerDeps, agentName, se
 	})
 	main.Messages = augmented
 
+	// Capture the generation BEFORE the gateway call. If a Clear fires
+	// while this goroutine is in flight (new turn / session close), the
+	// SetIfFresh below will drop the write rather than resurrect a stale
+	// suggestion the user has already moved past.
+	observedGen := deps.Suggestions.CurrentGen(sessionID)
+
 	res, err := agent.GenerateSuggestionWithUsage(ctx, deps.GW, main)
 	if err != nil {
 		// Transport / gateway failure — silent. Audit a row for diagnosability
@@ -1619,7 +1625,14 @@ func fireSuggestionAfterRun(ctx context.Context, deps *ServerDeps, agentName, se
 		return
 	}
 
-	deps.Suggestions.Set(sessionID, res.Text, time.Now())
+	if !deps.Suggestions.SetIfFresh(sessionID, observedGen, res.Text, time.Now()) {
+		// A Clear fired during the gateway call (new turn started or
+		// session closed). Drop the suggestion silently — the user has
+		// already moved past it, and resurrecting it would confuse the UI.
+		// Audit row would be noise here; the Clear caller already knows
+		// about the lifecycle transition.
+		return
+	}
 
 	if deps.EventBus != nil {
 		payload, _ := json.Marshal(map[string]any{

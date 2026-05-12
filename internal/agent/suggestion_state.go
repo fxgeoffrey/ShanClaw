@@ -28,14 +28,25 @@ type Suggestion struct {
 // Concurrent-safe — all mutating methods take the write lock, all reads use the
 // read lock. Get returns a copy of the Suggestion struct so callers cannot
 // mutate internal state via the returned pointer.
+//
+// Generation tokens: Clear bumps a per-session counter. Callers that dispatch
+// async writes (the suggestion goroutine in daemon.RunAgent) capture the
+// generation BEFORE starting the gateway call, then pass it to SetIfFresh.
+// A Clear fired between capture and Set drops the write — without this,
+// a slow goroutine completing AFTER a new turn started would resurrect a
+// stale suggestion that the user no longer sees in their UI.
 type SuggestionState struct {
 	mu    sync.RWMutex
 	items map[string]*Suggestion // key: session id
+	gens  map[string]int         // session id → generation; bumped by Clear
 }
 
 // NewSuggestionState returns an empty state container.
 func NewSuggestionState() *SuggestionState {
-	return &SuggestionState{items: make(map[string]*Suggestion)}
+	return &SuggestionState{
+		items: make(map[string]*Suggestion),
+		gens:  make(map[string]int),
+	}
 }
 
 // Set stores a new suggestion for sessionID, overwriting any prior entry.
@@ -63,12 +74,46 @@ func (s *SuggestionState) Get(sessionID string) (*Suggestion, bool) {
 	return &cp, true
 }
 
-// Clear removes any suggestion for sessionID. Called on new turn start
-// and on session close.
+// Clear removes any suggestion for sessionID and bumps the generation token.
+// Called on new turn start and on session close. The generation bump means
+// any in-flight goroutine that captured an earlier gen via CurrentGen will
+// have its SetIfFresh call dropped — preventing stale-suggestion resurrect.
 func (s *SuggestionState) Clear(sessionID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.items, sessionID)
+	s.gens[sessionID]++
+}
+
+// CurrentGen returns the current generation token for sessionID. Capture
+// this BEFORE starting an async write (e.g., before the forked suggestion
+// gateway call), then pass it to SetIfFresh — if a Clear fired in between,
+// SetIfFresh drops the write so a stale goroutine cannot revive a
+// suggestion the user has already moved past.
+func (s *SuggestionState) CurrentGen(sessionID string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.gens[sessionID]
+}
+
+// SetIfFresh stores a new suggestion only if the per-session generation
+// token matches observedGen. Returns true if stored, false if dropped as
+// stale (Clear fired since observedGen was captured).
+//
+// Used by daemon.fireSuggestionAfterRun so a slow goroutine completing
+// after a Clear (new turn / session close) cannot resurrect an entry
+// the user has already moved past.
+func (s *SuggestionState) SetIfFresh(sessionID string, observedGen int, text string, at time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.gens[sessionID] != observedGen {
+		return false
+	}
+	s.items[sessionID] = &Suggestion{
+		Text:        text,
+		SuggestedAt: at,
+	}
+	return true
 }
 
 // MarkAccepted records that the user accepted the current suggestion for

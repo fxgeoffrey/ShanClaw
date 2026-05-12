@@ -15,6 +15,15 @@ const (
 	maxInstructionsChars = 16000
 )
 
+// UserInstructionsTag is the opening XML tag this package wraps around
+// instructions.md / rules/*.md content in the user-message StableContext.
+// Exported so the agent persona (internal/agent/loop.go:defaultPersona) can
+// reference the exact same literal — renaming the wrapper there forces a
+// compile error in callers that haven't tracked the change. Issue #125
+// round 4: mechanically lock the semantic coupling between persona-note
+// text and emit site.
+const UserInstructionsTag = "<user_instructions>"
+
 // DeferredToolSummary is a lightweight name+description pair for deferred tool listings.
 // Mirrors agent.ToolSummary but avoids importing the agent package from prompt.
 type DeferredToolSummary struct {
@@ -251,7 +260,7 @@ func buildStableContext(opts PromptOptions) string {
 		// training collision; it gives the model a clear semantic boundary
 		// ("this block is the user's persistent rules, not an injection")
 		// while staying inside the cacheable user-message prefix. Issue #125.
-		sb.WriteString("<user_instructions>\n")
+		sb.WriteString(UserInstructionsTag + "\n")
 		sb.WriteString(sanitizeUserBlock(truncate(inst, maxInstructionsChars)))
 		sb.WriteString("\n</user_instructions>")
 	}

@@ -24,19 +24,25 @@ import (
 //     refuses to honor always_allow_tools entries for these — see
 //     internal/agent/loop.go.
 //
-//  2. bash + safe command + named agent: PR 5 behavior. Tool-level
-//     persistence to the agent's permissions.always_allow_tools. All future
-//     bash calls from this agent skip approval (except always-ask gated
-//     ones). broker.SetToolAutoApprove is also set for immediate effect.
+//  2. bash + safe command + named agent: tool-level persistence to the
+//     agent's permissions.always_allow_tools. All future bash calls from
+//     this agent skip approval (except always-ask gated ones).
+//     broker.SetToolAutoApprove is also set for immediate effect.
 //
-//  3. bash + safe command + default agent (agentName == ""): legacy path.
-//     Persists the exact command string to global allowed_commands. The user
-//     re-prompts on any variant — known limitation, deferred to a future PR
-//     for global tool-level allow.
+//  3. bash + safe command + default agent (agentName == ""): tool-level
+//     persistence to the GLOBAL permissions.always_allow_tools list (via
+//     persistGlobalToolAlwaysAllow). Applies to every agent including the
+//     default. Replaced the legacy command-string allowed_commands path so
+//     non-technical users get "click once, never asked again" semantics.
 //
-//  4. Non-bash: tool-level per-agent persistence (PR 3 behavior). High-risk
-//     tools (publish_to_web etc.) refuse persistence inside
-//     PersistAgentAlwaysAllow.
+//  4. Non-bash + named agent: tool-level per-agent persistence.
+//  5. Non-bash + default agent: tool-level GLOBAL persistence (same global
+//     list bash uses). Required because the SSE handler recreates the
+//     broker per request, so broker.SetToolAutoApprove alone evaporates.
+//     High-risk tools (DisallowsAutoApproval: publish_to_web,
+//     generate_image, edit_image) are refused at this entry plus at
+//     PersistAgentAlwaysAllow, broker, and the runtime gate in
+//     loop.go — four independent gates.
 func HandleAlwaysAllowDecision(deps *ServerDeps, broker *ApprovalBroker, agentName, tool, args string) {
 	if tool == "bash" {
 		handleBashAlwaysAllow(deps, broker, agentName, args)

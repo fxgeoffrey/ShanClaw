@@ -1829,7 +1829,16 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	ctx = context.WithValue(ctx, readTrackerKey{}, readTracker)
 
 	// Loop behavior constants
-	const maxRecentImages = 5  // keep only last N screenshot messages in context
+	//
+	// maxRecentImages: runaway defense — caps screenshot bytes in context if an
+	// agent gets stuck in a screenshot loop. claude.ai / Claude Code don't apply
+	// count-based image pruning at all (they rely on token-based context
+	// management); we keep this as a safety net but at a value that won't bind
+	// on legit "describe N screenshots" tasks. With Layer 1 compression each
+	// image is ≤ 5 MB base64 (~6-12 K tokens), so 50 images ≈ 300-600 K tokens —
+	// comfortably under our 1 M-token default context window. Was 5 (pre-#135,
+	// too conservative for batch-vision use cases).
+	const maxRecentImages = 50 // keep only last N screenshot messages in context
 	const compressAfter = 8    // compress tool results older than N from the end
 	const maxResultChars = 300 // compressed tool result max chars
 

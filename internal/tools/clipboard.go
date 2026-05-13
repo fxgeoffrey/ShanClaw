@@ -13,22 +13,25 @@ import (
 type ClipboardTool struct{}
 
 type clipboardArgs struct {
-	Action  string `json:"action"`
-	Content string `json:"content,omitempty"`
+	Action      string `json:"action"`
+	Description string `json:"description,omitempty"`
+	Content     string `json:"content,omitempty"`
 }
 
 func (t *ClipboardTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
-		Name:        "clipboard",
-		Description: "Read or write the system clipboard (macOS only). Use action 'read' to get clipboard contents, 'write' to set them.",
+		Name: "clipboard",
+		Description: "Read or write the system clipboard (macOS only). Use action 'read' to get clipboard contents, 'write' to set them." +
+			agent.DescriptionGuidance,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"action":  map[string]any{"type": "string", "description": "Action: 'read' or 'write'"},
-				"content": map[string]any{"type": "string", "description": "Content to write (required for write action)"},
+				"action":      map[string]any{"type": "string", "description": "Action: 'read' or 'write'"},
+				"description": agent.DescriptionFieldSpec,
+				"content":     map[string]any{"type": "string", "description": "Content to write (required for write action)"},
 			},
 		},
-		Required: []string{"action"},
+		Required: []string{"action", "description"},
 	}
 }
 

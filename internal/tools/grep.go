@@ -31,6 +31,7 @@ type GrepTool struct{}
 
 type grepArgs struct {
 	Pattern       string `json:"pattern"`
+	Description   string `json:"description,omitempty"`
 	Path          string `json:"path,omitempty"`
 	Glob          string `json:"glob,omitempty"`
 	OutputMode    string `json:"output_mode,omitempty"` // "files_with_matches" (default), "content", "count"
@@ -49,12 +50,14 @@ func (t *GrepTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
 		Name:               "grep",
 		MaxResultSizeChars: 20000,
-		Description:        "Search file CONTENTS using a regex pattern. By default returns matching FILE PATHS only (output_mode=files_with_matches) — keeps results small. Set output_mode=content to get matching lines as file:line:text, or output_mode=count for per-file match counts. Use glob to filter files by name pattern.",
+		Description: "Search file CONTENTS using a regex pattern. By default returns matching FILE PATHS only (output_mode=files_with_matches) — keeps results small. Set output_mode=content to get matching lines as file:line:text, or output_mode=count for per-file match counts. Use glob to filter files by name pattern." +
+			agent.DescriptionGuidance,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"pattern": map[string]any{"type": "string", "description": "Regex pattern to search"},
-				"path":    map[string]any{"type": "string", "description": "Directory or file to search. Required when no session working directory is set."},
+				"pattern":     map[string]any{"type": "string", "description": "Regex pattern to search"},
+				"description": agent.DescriptionFieldSpec,
+				"path":        map[string]any{"type": "string", "description": "Directory or file to search. Required when no session working directory is set."},
 				"glob":    map[string]any{"type": "string", "description": "File glob filter (e.g. '*.csv', '*.txt', '*.go'). Only honored with rg; ignored on grep fallback."},
 				"output_mode": map[string]any{
 					"type":        "string",
@@ -72,7 +75,7 @@ func (t *GrepTool) Info() agent.ToolInfo {
 				"multiline":      map[string]any{"type": "boolean", "description": "Allow multiline regex matching. Requires rg."},
 			},
 		},
-		Required: []string{"pattern"},
+		Required: []string{"pattern", "description"},
 	}
 }
 

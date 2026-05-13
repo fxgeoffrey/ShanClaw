@@ -1091,6 +1091,17 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		scopedMCPCtx := tools.ResolveMCPContext(runCfg, agentOverride)
 		agentDir := filepath.Join(deps.ShannonDir, "agents", agentName)
 		loop.SwitchAgent(agentOverride.Prompt, agentDir, nil, scopedMCPCtx, loadedSkills)
+		// SwitchAgent resets alwaysAllowTools to nil. Inject the union of
+		// global (~/.shannon/config.yaml permissions.always_allow_tools) and
+		// per-agent (agents/<name>/config.yaml permissions.always_allow_tools)
+		// — global lets the user authorize a tool once and have it apply to
+		// every agent; per-agent narrows trust to a single agent.
+		// SetAlwaysAllowTools dedups internally so simple append is fine.
+		merged := append([]string(nil), runCfg.Permissions.AlwaysAllowTools...)
+		if agentOverride.Config != nil && agentOverride.Config.Permissions != nil {
+			merged = append(merged, agentOverride.Config.Permissions.AlwaysAllowTools...)
+		}
+		loop.SetAlwaysAllowTools(merged)
 	} else {
 		loop.SetMemoryDir(filepath.Join(deps.ShannonDir, "memory"))
 		if loadedSkills != nil {
@@ -1100,6 +1111,10 @@ func RunAgent(ctx context.Context, deps *ServerDeps, req RunAgentRequest, handle
 		if scopedMCPCtx != "" {
 			loop.SetMCPContext(scopedMCPCtx)
 		}
+		// Default agent: only the global list applies (no per-agent config to
+		// merge from). Solves the "Default agent re-prompts every bash command"
+		// pain since global always_allow_tools persists across daemon restarts.
+		loop.SetAlwaysAllowTools(runCfg.Permissions.AlwaysAllowTools)
 	}
 	if runCfg.Agent.Model != "" {
 		loop.SetSpecificModel(runCfg.Agent.Model)

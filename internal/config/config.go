@@ -1018,6 +1018,151 @@ func AppendAllowedCommand(shannonDir, pattern string) error {
 	return os.Rename(tmpPath, cfgPath)
 }
 
+// AppendGlobalAlwaysAllowTool adds a tool name to the GLOBAL
+// permissions.always_allow_tools list in shannonDir/config.yaml. Mirrors
+// AppendAllowedCommand's flock + RMW + atomic-rename pattern; the same lock
+// file (config.yaml.lock) is reused so concurrent writers across both
+// allowlists serialize correctly. Idempotent (duplicate add is a no-op).
+//
+// Callers must reject high-risk tools (agent.DisallowsAutoApproval) BEFORE
+// invoking this — this helper trusts its input. The runtime gate enforces
+// the denylist independently as defense-in-depth.
+func AppendGlobalAlwaysAllowTool(shannonDir, tool string) error {
+	if tool == "" {
+		return fmt.Errorf("tool name is empty")
+	}
+	cfgPath := filepath.Join(shannonDir, "config.yaml")
+	lockPath := cfgPath + ".lock"
+
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return fmt.Errorf("open lock file: %w", err)
+	}
+	defer lockFile.Close()
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("flock: %w", err)
+	}
+	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+
+	data, err := os.ReadFile(cfgPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read config: %w", err)
+	}
+
+	var raw map[string]interface{}
+	if len(data) > 0 {
+		if err := yaml.Unmarshal(data, &raw); err != nil {
+			return fmt.Errorf("parse config: %w", err)
+		}
+	}
+	if raw == nil {
+		raw = make(map[string]interface{})
+	}
+
+	perms, _ := raw["permissions"].(map[string]interface{})
+	if perms == nil {
+		perms = make(map[string]interface{})
+		raw["permissions"] = perms
+	}
+
+	var existing []interface{}
+	if v, ok := perms["always_allow_tools"].([]interface{}); ok {
+		existing = v
+	}
+	for _, v := range existing {
+		if s, ok := v.(string); ok && s == tool {
+			return nil // already present
+		}
+	}
+
+	existing = append(existing, tool)
+	perms["always_allow_tools"] = existing
+
+	out, err := yaml.Marshal(raw)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+
+	tmpPath := cfgPath + ".tmp"
+	if err := os.WriteFile(tmpPath, out, 0600); err != nil {
+		return fmt.Errorf("write temp: %w", err)
+	}
+	return os.Rename(tmpPath, cfgPath)
+}
+
+// RemoveGlobalAlwaysAllowTool is the symmetric delete for
+// AppendGlobalAlwaysAllowTool. No-op if the tool is not present, the list is
+// empty, or config.yaml doesn't exist. Drops the always_allow_tools key when
+// the list becomes empty to keep the YAML clean.
+func RemoveGlobalAlwaysAllowTool(shannonDir, tool string) error {
+	if tool == "" {
+		return fmt.Errorf("tool name is empty")
+	}
+	cfgPath := filepath.Join(shannonDir, "config.yaml")
+	lockPath := cfgPath + ".lock"
+
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return fmt.Errorf("open lock file: %w", err)
+	}
+	defer lockFile.Close()
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("flock: %w", err)
+	}
+	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read config: %w", err)
+	}
+
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+	if raw == nil {
+		return nil
+	}
+	perms, _ := raw["permissions"].(map[string]interface{})
+	if perms == nil {
+		return nil
+	}
+	existing, _ := perms["always_allow_tools"].([]interface{})
+	if len(existing) == 0 {
+		return nil
+	}
+	filtered := make([]interface{}, 0, len(existing))
+	removed := false
+	for _, v := range existing {
+		if s, ok := v.(string); ok && s == tool {
+			removed = true
+			continue
+		}
+		filtered = append(filtered, v)
+	}
+	if !removed {
+		return nil
+	}
+	if len(filtered) == 0 {
+		delete(perms, "always_allow_tools")
+	} else {
+		perms["always_allow_tools"] = filtered
+	}
+
+	out, err := yaml.Marshal(raw)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	tmpPath := cfgPath + ".tmp"
+	if err := os.WriteFile(tmpPath, out, 0600); err != nil {
+		return fmt.Errorf("write temp: %w", err)
+	}
+	return os.Rename(tmpPath, cfgPath)
+}
+
 // dedup returns a slice with duplicate strings removed, preserving order.
 func dedup(items []string) []string {
 	seen := make(map[string]bool, len(items))

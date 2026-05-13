@@ -167,9 +167,10 @@ func (t *ArchiveInspectTool) IsReadOnlyCall(string) bool { return true }
 type ArchiveExtractTool struct{}
 
 type archiveExtractArgs struct {
-	Path      string `json:"path"`
-	Dest      string `json:"dest"`
-	Overwrite bool   `json:"overwrite,omitempty"`
+	Path        string `json:"path"`
+	Dest        string `json:"dest"`
+	Description string `json:"description,omitempty"`
+	Overwrite   bool   `json:"overwrite,omitempty"`
 }
 
 func (t *ArchiveExtractTool) Info() agent.ToolInfo {
@@ -179,7 +180,8 @@ func (t *ArchiveExtractTool) Info() agent.ToolInfo {
 			"dest must NOT exist unless overwrite=true (in which case dest is replaced atomically). " +
 			"Single-layer extraction only — nested archives stay as files. Symlinks, absolute-path entries, " +
 			"setuid/setgid bits, device files, and encrypted zips are rejected. Total uncompressed payload " +
-			"is capped at 200 MB; per-entry at 50 MB; entries at 500.",
+			"is capped at 200 MB; per-entry at 50 MB; entries at 500." +
+			agent.DescriptionGuidance,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -191,13 +193,14 @@ func (t *ArchiveExtractTool) Info() agent.ToolInfo {
 					"type":        "string",
 					"description": "Destination directory to create. Must not already exist unless overwrite=true.",
 				},
+				"description": agent.DescriptionFieldSpec,
 				"overwrite": map[string]any{
 					"type":        "boolean",
 					"description": "If true and dest already exists, dest is replaced atomically. Defaults to false.",
 				},
 			},
 		},
-		Required: []string{"path", "dest"},
+		Required: []string{"path", "dest", "description"},
 	}
 }
 

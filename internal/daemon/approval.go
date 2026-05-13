@@ -7,6 +7,8 @@ import (
 	"log"
 	"sync"
 	"time"
+
+	agentpkg "github.com/Kocoro-lab/ShanClaw/internal/agent"
 )
 
 // ApprovalTimeout is the maximum time to wait for an approval response.
@@ -96,6 +98,13 @@ func (b *ApprovalBroker) Request(ctx context.Context, messageID, channel, thread
 		Args:      args,
 		Agent:     agent,
 	}
+	// Policy hint for UI: paid / permanent-public tools cannot be persisted
+	// as always-allow at any layer (see HandleAlwaysAllowDecision + 4-layer
+	// defense). Telling the UI here lets it disable the "Always Allow"
+	// affordance so non-technical users don't click and see no effect.
+	if agentpkg.DisallowsAutoApproval(tool) {
+		req.Flags = append(req.Flags, ApprovalFlagAlwaysAllowDisabled)
+	}
 	if err := b.sendFn(req); err != nil {
 		return DecisionDeny
 	}
@@ -144,14 +153,29 @@ func (b *ApprovalBroker) CancelAll() {
 }
 
 // SetToolAutoApprove marks a non-bash tool as auto-approved (in-memory only).
+// High-risk tools (agentpkg.DisallowsAutoApproval) are silently refused — those
+// must prompt fresh for every call regardless of prior user clicks, so a single
+// "Always Allow" cannot self-elevate the rest of the session. Callers may
+// unconditionally invoke this after DecisionAlwaysAllow; the broker is the
+// authoritative gate.
 func (b *ApprovalBroker) SetToolAutoApprove(tool string) {
+	if agentpkg.DisallowsAutoApproval(tool) {
+		return
+	}
 	b.mu.Lock()
 	b.toolAutoApprove[tool] = true
 	b.mu.Unlock()
 }
 
 // IsToolAutoApproved checks if a tool has been auto-approved via "Always Allow".
+// Defense-in-depth: even if the map somehow contains a high-risk tool (e.g.
+// from a future regression or a callsite bypassing SetToolAutoApprove), this
+// gate refuses to honor it. The two checks together ensure no path leaks
+// auto-approval for tools that must prompt every call.
 func (b *ApprovalBroker) IsToolAutoApproved(tool string) bool {
+	if agentpkg.DisallowsAutoApproval(tool) {
+		return false
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.toolAutoApprove[tool]

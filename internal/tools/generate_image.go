@@ -42,11 +42,12 @@ func NewGenerateImageTool(client imageGen) *GenerateImageTool {
 }
 
 type generateImageArgs struct {
-	Prompt     string `json:"prompt"`
-	Size       string `json:"size,omitempty"`
-	Quality    string `json:"quality,omitempty"`
-	N          int    `json:"n,omitempty"`
-	Background string `json:"background,omitempty"`
+	Prompt      string `json:"prompt"`
+	Description string `json:"description,omitempty"`
+	Size        string `json:"size,omitempty"`
+	Quality     string `json:"quality,omitempty"`
+	N           int    `json:"n,omitempty"`
+	Background  string `json:"background,omitempty"`
 }
 
 func (t *GenerateImageTool) Info() agent.ToolInfo {
@@ -68,7 +69,8 @@ func (t *GenerateImageTool) Info() agent.ToolInfo {
 			"  - quality=high     ~120–180s\n" +
 			"Pick the lowest quality that satisfies the request.\n\n" +
 			"Cost: each call consumes Shannon Cloud image-generation credits. Use n=1 unless " +
-			"the user explicitly asks for multiple variants.",
+			"the user explicitly asks for multiple variants." +
+			agent.DescriptionGuidance,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -78,6 +80,7 @@ func (t *GenerateImageTool) Info() agent.ToolInfo {
 					"maxLength":   imagePromptMaxLen,
 					"description": "Detailed description of the image. Be specific about subject, style, composition, lighting.",
 				},
+				"description": agent.DescriptionFieldSpec,
 				"size": map[string]any{
 					"type":        "string",
 					"enum":        []string{"1024x1024", "1024x1536", "1536x1024", "auto"},
@@ -101,7 +104,7 @@ func (t *GenerateImageTool) Info() agent.ToolInfo {
 				},
 			},
 		},
-		Required: []string{"prompt"},
+		Required: []string{"prompt", "description"},
 	}
 }
 

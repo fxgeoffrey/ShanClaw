@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -38,6 +39,150 @@ func TestBash_DescriptionDoesNotClaimShellStatePersists(t *testing.T) {
 	}
 	if !strings.Contains(desc, "Each command runs in a fresh shell") {
 		t.Fatalf("bash description should state the fresh-shell behavior, got: %s", desc)
+	}
+}
+
+// TestBash_Schema_DescriptionFieldIsRequired guards the contract with the
+// model: every bash call must include a human-readable `description` for the
+// approval card / tool status UI, since the end user is often non-technical
+// and cannot read shell syntax.
+func TestBash_Schema_DescriptionFieldIsRequired(t *testing.T) {
+	info := (&BashTool{}).Info()
+
+	props, ok := info.Parameters["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("Parameters.properties missing or wrong shape: %v", info.Parameters)
+	}
+	descProp, ok := props["description"].(map[string]any)
+	if !ok {
+		t.Fatalf("properties.description missing")
+	}
+	if descProp["type"] != "string" {
+		t.Errorf("description.type = %v; want string", descProp["type"])
+	}
+	// Soft anchors — we want the contract to be discoverable without locking
+	// the exact wording. If you reword these concepts, update the anchors but
+	// keep the spirit: the field must steer the model toward (a) writing for
+	// end users, (b) writing in the user's language.
+	descText := strings.ToLower(descProp["description"].(string))
+	if !strings.Contains(descText, "user") {
+		t.Errorf("description field doc should mention the user; got: %q", descText)
+	}
+	if !strings.Contains(descText, "language") {
+		t.Errorf("description field doc should mention language selection; got: %q", descText)
+	}
+
+	required := info.Required
+	hasCommand, hasDescription := false, false
+	for _, r := range required {
+		if r == "command" {
+			hasCommand = true
+		}
+		if r == "description" {
+			hasDescription = true
+		}
+	}
+	if !hasCommand {
+		t.Errorf("Required missing 'command': %v", required)
+	}
+	if !hasDescription {
+		t.Errorf("Required missing 'description': %v — UI cannot fall back to scary shell syntax for non-technical users", required)
+	}
+}
+
+// TestBash_Args_DescriptionParsed verifies the bash tool round-trips the
+// description field through Run() — necessary so audit log, approval card,
+// and tool status surfaces all see the same string the model wrote.
+func TestBash_Args_DescriptionParsed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bash tests not supported on Windows")
+	}
+	tool := &BashTool{}
+	// Description present alongside command — command should still execute.
+	argsJSON := `{"command":"echo ok","description":"打个招呼"}`
+	result, err := tool.Run(context.Background(), argsJSON)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error result: %s", result.Content)
+	}
+	if !strings.Contains(result.Content, "ok") {
+		t.Errorf("expected command output 'ok', got: %s", result.Content)
+	}
+}
+
+// TestBash_Args_DescriptionMissingStillExecutes confirms the soft-degradation
+// path: even though Required declares `description`, the daemon does not
+// block execution when it's missing — that decision belongs to the model's
+// own tool-call validation. Older sessions and edge cases must still run.
+func TestBash_Args_DescriptionMissingStillExecutes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bash tests not supported on Windows")
+	}
+	tool := &BashTool{}
+	result, err := tool.Run(context.Background(), `{"command":"echo no_desc"}`)
+	if err != nil {
+		t.Fatalf("Run without description should not return Go error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("Run without description should not be marked error: %s", result.Content)
+	}
+	if !strings.Contains(result.Content, "no_desc") {
+		t.Errorf("expected 'no_desc' in output, got: %s", result.Content)
+	}
+}
+
+// TestBash_Args_DescriptionEmptyStringSafe covers the case where the model
+// satisfies the Required schema by producing an empty string. The daemon
+// transmits it as-is so audit log reflects truth; UI clients are responsible
+// for falling back to the raw command for display when description is
+// empty — daemon must not rewrite args to invent a placeholder, since the
+// args JSON is also what audit log records.
+func TestBash_Args_DescriptionEmptyStringSafe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bash tests not supported on Windows")
+	}
+	tool := &BashTool{}
+	result, err := tool.Run(context.Background(), `{"command":"echo empty_desc","description":""}`)
+	if err != nil {
+		t.Fatalf("Run with empty description should not return Go error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("Run with empty description should not be marked error: %s", result.Content)
+	}
+	if !strings.Contains(result.Content, "empty_desc") {
+		t.Errorf("expected 'empty_desc' in output, got: %s", result.Content)
+	}
+}
+
+// TestBash_Args_DescriptionWithSpecialChars verifies that descriptions
+// containing JSON-special characters (quotes, newlines, backslashes,
+// non-ASCII) round-trip through encoding/json correctly. The model can and
+// will produce descriptions containing punctuation and multilingual text.
+func TestBash_Args_DescriptionWithSpecialChars(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bash tests not supported on Windows")
+	}
+	tool := &BashTool{}
+	// Use Go's json.Marshal to build the args so we don't hand-escape and
+	// inadvertently test a different shape than the gateway produces.
+	args, err := json.Marshal(map[string]string{
+		"command":     "echo special",
+		"description": "Run \"git status\"\nand check for unstaged 中文 \\\\ changes",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := tool.Run(context.Background(), string(args))
+	if err != nil {
+		t.Fatalf("Run with special chars: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content)
+	}
+	if !strings.Contains(result.Content, "special") {
+		t.Errorf("expected 'special' in output, got: %s", result.Content)
 	}
 }
 

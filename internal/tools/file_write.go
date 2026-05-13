@@ -15,22 +15,25 @@ import (
 type FileWriteTool struct{}
 
 type fileWriteArgs struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
+	Path        string `json:"path"`
+	Content     string `json:"content"`
+	Description string `json:"description,omitempty"`
 }
 
 func (t *FileWriteTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
-		Name:        "file_write",
-		Description: "Write complete content to a file (overwrites entirely). Use for creating new files or as fallback when file_edit fails due to non-unique text. Always file_read first if the file already exists.",
+		Name: "file_write",
+		Description: "Write complete content to a file (overwrites entirely). Use for creating new files or as fallback when file_edit fails due to non-unique text. Always file_read first if the file already exists." +
+			agent.DescriptionGuidance,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"path":    map[string]any{"type": "string", "description": "File path to write"},
-				"content": map[string]any{"type": "string", "description": "Content to write"},
+				"path":        map[string]any{"type": "string", "description": "File path to write"},
+				"content":     map[string]any{"type": "string", "description": "Content to write"},
+				"description": agent.DescriptionFieldSpec,
 			},
 		},
-		Required: []string{"path", "content"},
+		Required: []string{"path", "content", "description"},
 	}
 }
 

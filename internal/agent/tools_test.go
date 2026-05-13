@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Kocoro-lab/ShanClaw/internal/agents"
 	"github.com/Kocoro-lab/ShanClaw/internal/client"
 )
 
@@ -64,6 +65,53 @@ func TestDisallowsAutoApproval(t *testing.T) {
 	for _, name := range []string{"bash", "file_write", "cloud_delegate", "think"} {
 		if DisallowsAutoApproval(name) {
 			t.Fatalf("%s should not be in the per-call approval denylist", name)
+		}
+	}
+}
+
+// TestHighRiskListConsistency guards against drift between
+// agent.autoApprovalDenyList (runtime approval gate) and the agents package's
+// highRiskTools (persistence gate). The two lists encode the same security
+// policy from different sides; if they drift, a user could persist a tool
+// into always-allow that the runtime still prompts on, or vice versa.
+//
+// This test does set equality, not a hardcoded probe — adding a new entry to
+// one list without the mirror will fail this test immediately.
+func TestHighRiskListConsistency(t *testing.T) {
+	runtime := AutoApprovalDenyList()
+	persistence := agents.HighRiskTools()
+
+	if len(runtime) != len(persistence) {
+		t.Fatalf("size mismatch: agent.AutoApprovalDenyList=%d agents.HighRiskTools=%d (runtime=%v persistence=%v)",
+			len(runtime), len(persistence), runtime, persistence)
+	}
+
+	rtSet := make(map[string]struct{}, len(runtime))
+	for _, t := range runtime {
+		rtSet[t] = struct{}{}
+	}
+	for _, name := range persistence {
+		if _, ok := rtSet[name]; !ok {
+			t.Errorf("agents.HighRiskTools contains %q but agent.AutoApprovalDenyList does not", name)
+		}
+		if agents.IsToolAlwaysAllowable(name) {
+			t.Errorf("agents.IsToolAlwaysAllowable(%q) = true; want false", name)
+		}
+		if !DisallowsAutoApproval(name) {
+			t.Errorf("DisallowsAutoApproval(%q) = false; want true", name)
+		}
+	}
+
+	// Spot-check a few obvious safe tools — both gates must agree they're allowed.
+	for _, name := range []string{"file_write", "http", "bash", "file_read", "browser_navigate", "think"} {
+		if _, denied := rtSet[name]; denied {
+			t.Errorf("autoApprovalDenyList accidentally contains safe tool %q", name)
+		}
+		if DisallowsAutoApproval(name) {
+			t.Errorf("DisallowsAutoApproval(%q) = true; want false", name)
+		}
+		if !agents.IsToolAlwaysAllowable(name) {
+			t.Errorf("agents.IsToolAlwaysAllowable(%q) = false; want true", name)
 		}
 	}
 }

@@ -185,16 +185,31 @@ func IsSkillExempt(t Tool) bool {
 	return false
 }
 
+// autoApprovalDenyList is the canonical set of tools that require a fresh
+// human decision for every call. AutoApprovalDenyList returns a copy for
+// cross-package consistency tests; DisallowsAutoApproval is the runtime check.
+var autoApprovalDenyList = []string{"publish_to_web", "generate_image", "edit_image"}
+
+// AutoApprovalDenyList returns a copy of the tools that disallow any form of
+// auto-approval (session always-allow, agent always-allow, global auto-approve,
+// unattended/scheduled runs). Exposed for consistency tests that verify the
+// agents package's persistence gate stays aligned with the runtime gate.
+func AutoApprovalDenyList() []string {
+	out := make([]string, len(autoApprovalDenyList))
+	copy(out, autoApprovalDenyList)
+	return out
+}
+
 // DisallowsAutoApproval reports tools that require a fresh human decision for
 // every call. These tools may still be approved once, but global auto-approve,
 // unattended runs, and session-level "always allow" must not cover them.
 func DisallowsAutoApproval(toolName string) bool {
-	switch toolName {
-	case "publish_to_web", "generate_image", "edit_image":
-		return true
-	default:
-		return false
+	for _, denied := range autoApprovalDenyList {
+		if toolName == denied {
+			return true
+		}
 	}
+	return false
 }
 
 // ToolSummary is a lightweight name+description pair for deferred tool listings.

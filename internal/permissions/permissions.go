@@ -16,6 +16,14 @@ type PermissionsConfig struct {
 	DeniedCommands    []string `yaml:"denied_commands"     json:"denied_commands"`
 	SensitivePatterns []string `yaml:"sensitive_patterns"  json:"sensitive_patterns"`
 	NetworkAllowlist  []string `yaml:"network_allowlist"   json:"network_allowlist"`
+	// AlwaysAllowTools is the GLOBAL tool-level approval bypass — applies to
+	// every agent (including the default agent that has no per-agent
+	// config.yaml). Mirrors agents.AgentPermissionsConfig.AlwaysAllowTools
+	// (the per-agent variant); at runtime the two sets are unioned by the
+	// runner/TUI/CLI before being injected into AgentLoop. High-risk tools
+	// (agent.DisallowsAutoApproval) and always-ask bash commands are still
+	// blocked by independent gates regardless of what's in this list.
+	AlwaysAllowTools []string `yaml:"always_allow_tools,omitempty" json:"always_allow_tools,omitempty"`
 }
 
 // prefixDepthTable maps known executables to the number of leading non-flag

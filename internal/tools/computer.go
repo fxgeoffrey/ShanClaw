@@ -104,6 +104,12 @@ func normalizeArgs(args *computerArgs) {
 func (t *ComputerTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
 		Name:        "computer",
+		// computer is registered as an Anthropic native tool
+		// (NativeToolDef below). agent.buildToolSchema sends only the
+		// native fields on the wire and DROPS Parameters/Description — so a
+		// `description` field here would never reach the model. UI clients
+		// must synthesize a label from action/x/y instead; the daemon could
+		// (future PR) compose one in the approval payload.
 		Description: "OS-level mouse and keyboard control for macOS. Use for coordinate-based clicks, typing text (CJK/emoji safe), and keyboard shortcuts. For clicking UI elements, prefer accessibility tool (ref-based) over coordinate clicks. Actions: click, type, hotkey, move, screenshot.",
 		Parameters: map[string]any{
 			"type": "object",

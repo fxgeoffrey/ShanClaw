@@ -14,20 +14,23 @@ import (
 type AppleScriptTool struct{}
 
 type appleScriptArgs struct {
-	Script string `json:"script"`
+	Script      string `json:"script"`
+	Description string `json:"description,omitempty"`
 }
 
 func (t *AppleScriptTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
-		Name:        "applescript",
-		Description: "Execute an AppleScript script via osascript. Use for opening/activating apps, window management, calendar events, and macOS-specific operations. NOT for web page interaction — use browser tool for web content.",
+		Name: "applescript",
+		Description: "Execute an AppleScript script via osascript. Use for opening/activating apps, window management, calendar events, and macOS-specific operations. NOT for web page interaction — use browser tool for web content." +
+			agent.DescriptionGuidance,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"script": map[string]any{"type": "string", "description": "AppleScript code to execute"},
+				"script":      map[string]any{"type": "string", "description": "AppleScript code to execute"},
+				"description": agent.DescriptionFieldSpec,
 			},
 		},
-		Required: []string{"script"},
+		Required: []string{"script", "description"},
 	}
 }
 

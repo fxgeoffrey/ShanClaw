@@ -40,7 +40,34 @@ Agents are specialized AI assistants that you configure for specific tasks or pe
 - Path: /agents/{name}/config
 - Body: `{"cwd": "/path/to/project", "agent": {"model": "claude-opus-4-5"}, "tools": {"allow": ["bash:git *"], "deny": ["bash:rm *"]}}`
 - Response: `{"status": "updated"}`
-- Notes: Supports `cwd`, `agent.model`, `agent.temperature`, `tools.allow`, `tools.deny`, `mcp_servers`.
+- Notes: Supports `cwd`, `agent.model`, `agent.temperature`, `tools.allow`, `tools.deny`, `mcp_servers`, `permissions.always_allow_tools`.
+
+### Add tool to agent's always-allow list
+- Method: POST
+- Path: /agents/{name}/permissions/always-allow
+- Body: `{"tool": "file_write"}`
+- Response: `{"status": "added"}` on success; `400` if the tool is high-risk and cannot be persisted (`publish_to_web`, `generate_image`, `edit_image`).
+- Notes: Appends the tool name to `permissions.always_allow_tools` in the agent's `config.yaml`. Next time this agent calls the named tool, the approval prompt is skipped. Idempotent (duplicate add is a no-op). Distinct from `tools.allow` — that's a schema filter (controls what the LLM can see); this is an approval bypass (controls whether the user is prompted at run time). Also written automatically when the user clicks "Always Allow" on an approval prompt (both bash and non-bash tools, as long as the message routed to a named agent) — Desktop/Cloud do not need to call this endpoint directly in that flow. **Safety gates that remain even with `bash` in this list**: (a) high-risk bash commands (`pip install`, `rm -rf`, `python -c`, `git push --force`, etc.) still prompt every call — see the always-ask gate in `permissions.md`; (b) paid / permanent-public tools (`publish_to_web`, `generate_image`, `edit_image`) cannot be persisted at all.
+
+### Remove tool from agent's always-allow list
+- Method: DELETE
+- Path: /agents/{name}/permissions/always-allow
+- Body: `{"tool": "file_write"}`
+- Response: `{"status": "removed"}`. No-op (200) if the tool is not in the list.
+- Notes: Future calls to this tool from this agent will prompt for approval again.
+
+### Add tool to GLOBAL always-allow list (all agents, incl. default)
+- Method: POST
+- Path: /permissions/always-allow
+- Body: `{"tool": "bash"}`
+- Response: `{"status": "added"}` on success; `400` if the tool is high-risk and cannot be persisted (`publish_to_web`, `generate_image`, `edit_image`).
+- Notes: Appends to `permissions.always_allow_tools` in `~/.shannon/config.yaml` (global scope). Applies to EVERY agent including the default agent that has no per-agent config. Use this for tools the user trusts broadly (e.g. `bash`, `file_write`) so non-technical users on the default agent don't get re-prompted on every command-string variant. Use the per-agent endpoint when trust should be limited to a single agent. Same safety gates apply: high-risk bash commands (`pip install`, `rm -rf`, etc.) still prompt every call regardless.
+
+### Remove tool from GLOBAL always-allow list
+- Method: DELETE
+- Path: /permissions/always-allow
+- Body: `{"tool": "bash"}`
+- Response: `{"status": "removed"}`. No-op (200) if absent.
 
 ### Attach skill to agent
 - Method: PUT
@@ -147,6 +174,21 @@ wrapper — `event:` is a header line, `data:` is the JSON body.
 ### "Add a slash command"
 1. PUT /agents/my-agent/commands/standup with `{"content": "Generate a standup report: what was done yesterday, what's planned today, any blockers. Check git log and open issues."}`
 2. Users can now say `/standup` to trigger this workflow.
+
+### "Stop asking me to approve file_write for this agent"
+1. POST /agents/{name}/permissions/always-allow with `{"tool": "file_write"}`
+2. The next time this agent invokes `file_write`, the approval prompt is skipped.
+3. To revert: DELETE /agents/{name}/permissions/always-allow with the same body.
+
+### "Let this agent run any bash command without asking"
+1. POST /agents/{name}/permissions/always-allow with `{"tool": "bash"}`
+2. From now on, every bash call from this agent skips approval — **except** commands matching the always-ask gate (`pip install`, `rm -rf`, `python -c`, `git push --force`, `npx`, `curl|sh`, etc.), which still prompt every call regardless. This is the tool-level alternative to authorizing individual command strings via `permissions.allowed_commands`.
+3. Pair with a clear explanation to the user: this grants broad shell access (subject to the always-ask gate). For finer control, leave `bash` out of the list and use `permissions.allowed_commands` with specific command patterns instead.
+
+### "Stop asking me on the default agent (for non-technical users)"
+1. POST /permissions/always-allow with `{"tool": "bash"}` (and `file_write`, `http`, etc. as needed).
+2. The global list applies to the default agent (and every other agent). Users without a named agent now also benefit from "click once, never asked again" — exactly mirroring the per-agent flow.
+3. Use this when the user is non-technical and isn't going to create or name agents. Per-agent scoping is still preferred when the user explicitly works with multiple named agents.
 
 ## Safety Notes
 

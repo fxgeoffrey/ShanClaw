@@ -72,7 +72,7 @@ func TestClient_SendEnvelope_WritesToConn(t *testing.T) {
 }
 
 // TestConnect_AdvertisesVersionAndUserAgent confirms every WS upgrade sends
-// X-ShanClaw-Daemon-Version and a User-Agent containing the version, OS, and
+// X-Kocoro-Daemon-Version and a User-Agent containing the version, OS, and
 // arch. Cloud reads these headers for telemetry and version-bug fallback
 // signals; without them, Cloud cannot tell which daemon build is connected.
 func TestConnect_AdvertisesVersionAndUserAgent(t *testing.T) {

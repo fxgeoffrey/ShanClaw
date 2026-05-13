@@ -20,13 +20,13 @@ const MaxConcurrentAgents = 5
 
 // Version is the daemon's semver string. Set from cmd.Version at startup
 // (see cmd/root.go); defaults to "dev" for un-injected builds. Sent to
-// Cloud as the X-ShanClaw-Daemon-Version header on WS upgrade for
+// Cloud as the X-Kocoro-Daemon-Version header on WS upgrade for
 // telemetry and coarse-grained version-bug fallback signals. Capability
 // gating uses the Capabilities slice, not this field.
 var Version = "dev"
 
 // Capabilities lists protocol features this daemon supports. Sent to
-// Cloud as the comma-separated X-ShanClaw-Capabilities header on WS
+// Cloud as the comma-separated X-Kocoro-Capabilities header on WS
 // upgrade. Cloud parses it to gate optional protocol features so older
 // daemons aren't subjected to flows they cannot honor (e.g. per-message
 // delivery_ack tracking).

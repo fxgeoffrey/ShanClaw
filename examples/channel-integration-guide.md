@@ -74,7 +74,7 @@ curl -X POST http://127.0.0.1:7533/message \
 }
 ```
 
-Only `text` is required. If `source` is omitted, it defaults to `"shanclaw"`.
+Only `text` is required. If `source` is omitted, it defaults to `"kocoro"`.
 
 ### Response (JSON mode)
 

@@ -34,7 +34,7 @@ func TestCacheSourceFromDaemonSource(t *testing.T) {
 		{"telegram", "telegram"},
 		{"tui", "tui"},
 		{"shanclaw", "shanclaw"},
-		// Empty source is defaulted to "shanclaw" in server.go before reaching
+		// Empty source is defaulted to "kocoro" in server.go before reaching
 		// this function; the dedicated empty-string case was removed. Falls
 		// through to "unknown" (5m) defensively in case the default is ever
 		// bypassed — matches the fail-cheap policy documented in

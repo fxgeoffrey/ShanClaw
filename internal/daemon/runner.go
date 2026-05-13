@@ -181,7 +181,15 @@ func resolveContentBlocks(blocks []RequestContentBlock) []client.ContentBlock {
 		case "text":
 			out = append(out, client.ContentBlock{Type: "text", Text: b.Text})
 		case "image":
-			out = append(out, client.ContentBlock{Type: "image", Source: b.Source})
+			// Layer 1 also covers direct inline image blocks pushed by cloud or
+			// Desktop (bypassing resolveFileRef). Without this, an oversize image
+			// would be saved to session pre-loop at runner.go's pre-save user
+			// message path, after which captureTurnBaseline locks it into baseline
+			// forever.
+			out = append(out, client.ContentBlock{
+				Type:   "image",
+				Source: tools.CompressInlineImageSource(b.Source),
+			})
 		case "document":
 			out = append(out, client.ContentBlock{Type: "document", Source: b.Source})
 		case "file_ref":

@@ -3,6 +3,7 @@ package tools
 import (
 	"encoding/base64"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"regexp"
@@ -10,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/Kocoro-lab/ShanClaw/internal/agent"
+	"github.com/Kocoro-lab/ShanClaw/internal/client"
 )
 
 const (
@@ -77,6 +79,54 @@ func EncodeImageBytes(data []byte, mediaType string) (agent.ImageBlock, error) {
 		MediaType: outMediaType,
 		Data:      base64.StdEncoding.EncodeToString(compressed),
 	}, nil
+}
+
+// MaxInlineBase64InputBytes guards CompressInlineImageSource against very
+// large base64 inputs from cloud/Desktop. Without this, a 50 MB base64 string
+// would allocate ~37 MB just to decode before we discover the image is
+// undecodable. The wire-time sanitizer (Layer 2) will replace anything over
+// the inline cap with a placeholder anyway, so failing fast here is safe.
+const MaxInlineBase64InputBytes = 30 * 1024 * 1024
+
+// CompressInlineImageSource takes an already-base64-encoded image block source
+// and returns either the same source (if under the inline cap) or a recompressed
+// one. Used by `daemon.resolveContentBlocks` so cloud/Desktop pushing inline
+// image content blocks doesn't bypass Layer 1.
+//
+// If decoding fails (corrupt base64 or undecodable image), or if the input
+// exceeds MaxInlineBase64InputBytes, the original source is returned unchanged
+// — the wire-time sanitizer (Layer 2) will replace it with a text placeholder
+// if it's still oversize. Failures log a warning so silent oversize-image
+// drops are diagnosable.
+func CompressInlineImageSource(src *client.ImageSource) *client.ImageSource {
+	if src == nil {
+		return src
+	}
+	// Fast path: under the inline cap, nothing to do.
+	if len(src.Data) <= client.MaxInlineImageBase64Bytes {
+		return src
+	}
+	// Pre-decode size guard: refuse to allocate ~37 MB for an obvious garbage
+	// payload. Log once so the abuse / bug is visible in audit-time triage.
+	if len(src.Data) > MaxInlineBase64InputBytes {
+		log.Printf("WARNING: CompressInlineImageSource: input base64 too large (%d bytes), skipping compression", len(src.Data))
+		return src
+	}
+	raw, err := base64.StdEncoding.DecodeString(src.Data)
+	if err != nil {
+		log.Printf("WARNING: CompressInlineImageSource: base64 decode failed: %v", err)
+		return src
+	}
+	compressed, mt, err := compressImage(raw, src.MediaType)
+	if err != nil {
+		log.Printf("WARNING: CompressInlineImageSource: compressImage failed: %v", err)
+		return src
+	}
+	return &client.ImageSource{
+		Type:      src.Type,
+		MediaType: mt,
+		Data:      base64.StdEncoding.EncodeToString(compressed),
+	}
 }
 
 // ResizeImage resizes an image so its longest edge is at most maxDim pixels.

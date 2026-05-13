@@ -132,3 +132,31 @@ func TestCompressImage_IsDeterministic(t *testing.T) {
 		t.Fatalf("non-deterministic output: len1=%d len2=%d", len(d1), len(d2))
 	}
 }
+
+func TestCompressInlineImageSource_OversizePassesThroughCompression(t *testing.T) {
+	raw := makeNoisePNG(t, 1800, 1800)
+	encoded := base64.StdEncoding.EncodeToString(raw)
+	if len(encoded) <= client.MaxInlineImageBase64Bytes {
+		t.Fatalf("test fixture must exceed inline limit; encoded len=%d", len(encoded))
+	}
+	src := &client.ImageSource{Type: "base64", MediaType: "image/png", Data: encoded}
+	out := CompressInlineImageSource(src)
+	if out == src {
+		t.Fatal("expected new source after compression")
+	}
+	if len(out.Data) > client.MaxInlineImageBase64Bytes {
+		t.Fatalf("compressed inline source still over limit: %d", len(out.Data))
+	}
+	if out.MediaType != "image/jpeg" {
+		t.Fatalf("expected media type image/jpeg after compression, got %q", out.MediaType)
+	}
+}
+
+func TestCompressInlineImageSource_SmallPassesThroughUntouched(t *testing.T) {
+	encoded := base64.StdEncoding.EncodeToString([]byte("tiny"))
+	src := &client.ImageSource{Type: "base64", MediaType: "image/png", Data: encoded}
+	out := CompressInlineImageSource(src)
+	if out != src {
+		t.Fatal("small source should be returned unchanged (same pointer)")
+	}
+}

@@ -75,13 +75,52 @@ func (h *HeartbeatConfig) IsIsolatedSession() bool {
 
 // AgentConfig is the per-agent config overlay loaded from config.yaml.
 type AgentConfig struct {
-	CWD         string            `yaml:"cwd"`
-	MCPServers  *AgentMCPConfig   `yaml:"-"` // parsed manually for _inherit
-	Tools       *AgentToolsFilter `yaml:"tools"`
-	Agent       *AgentModelConfig `yaml:"agent"`
-	AutoApprove *bool             `yaml:"auto_approve"`
-	Watch       []WatchEntry      `yaml:"watch,omitempty"`
-	Heartbeat   *HeartbeatConfig  `yaml:"heartbeat,omitempty"`
+	CWD         string                  `yaml:"cwd"`
+	MCPServers  *AgentMCPConfig         `yaml:"-"` // parsed manually for _inherit
+	Tools       *AgentToolsFilter       `yaml:"tools"`
+	Agent       *AgentModelConfig       `yaml:"agent"`
+	AutoApprove *bool                   `yaml:"auto_approve"`
+	Permissions *AgentPermissionsConfig `yaml:"permissions,omitempty"`
+	Watch       []WatchEntry            `yaml:"watch,omitempty"`
+	Heartbeat   *HeartbeatConfig        `yaml:"heartbeat,omitempty"`
+}
+
+// AgentPermissionsConfig carries per-agent permission overrides. Distinct from
+// tools.allow (which is a schema filter — controls what the LLM can see):
+// these entries are approval bypasses applied at execution time.
+type AgentPermissionsConfig struct {
+	// AlwaysAllowTools lists tool names whose approval prompts the user has
+	// chosen to skip permanently for this agent. High-risk tools (see
+	// agent.DisallowsAutoApproval) are never honored here even if present —
+	// the runtime check enforces defense-in-depth.
+	AlwaysAllowTools []string `yaml:"always_allow_tools,omitempty" json:"always_allow_tools,omitempty"`
+}
+
+// IsEmpty reports whether the struct carries no effective configuration.
+// WriteAgentConfig uses this to decide whether to emit the permissions: block
+// at all, avoiding "permissions: {}" noise in YAML. Update this whenever a
+// new field is added to AgentPermissionsConfig.
+func (p *AgentPermissionsConfig) IsEmpty() bool {
+	if p == nil {
+		return true
+	}
+	return len(p.AlwaysAllowTools) == 0
+}
+
+// Clone returns a deep copy. ToAPI uses this so the API response cannot share
+// slice backing arrays with the in-memory Agent — an HTTP handler that mutates
+// the returned slice would otherwise leak into the next call's response.
+// Returns nil if p is nil.
+func (p *AgentPermissionsConfig) Clone() *AgentPermissionsConfig {
+	if p == nil {
+		return nil
+	}
+	out := &AgentPermissionsConfig{}
+	if len(p.AlwaysAllowTools) > 0 {
+		out.AlwaysAllowTools = make([]string, len(p.AlwaysAllowTools))
+		copy(out.AlwaysAllowTools, p.AlwaysAllowTools)
+	}
+	return out
 }
 
 // AgentModelConfig holds per-agent model/iteration overrides.

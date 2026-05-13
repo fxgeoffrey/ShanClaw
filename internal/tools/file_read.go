@@ -46,25 +46,28 @@ const fileReadNoLimitMaxBytes = 256 * 1024
 type FileReadTool struct{}
 
 type fileReadArgs struct {
-	Path   string `json:"path"`
-	Offset int    `json:"offset,omitempty"`
-	Limit  int    `json:"limit,omitempty"`
+	Path        string `json:"path"`
+	Description string `json:"description,omitempty"`
+	Offset      int    `json:"offset,omitempty"`
+	Limit       int    `json:"limit,omitempty"`
 }
 
 func (t *FileReadTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
 		Name:               "file_read",
 		MaxResultSizeChars: agent.UnlimitedToolResultSizeChars,
-		Description:        "Read a file's contents with line numbers. Use offset and limit for large files. Repeat reads of the same (path, offset, limit) within one session return a short \"unchanged since last read\" stub when the file has not been modified — to force a fresh read, modify the file or pass a different offset/limit range. For image files (png/jpg/gif/webp), returns the image for vision analysis. For PDF files, renders pages as images for vision analysis (use offset for start page, limit for max pages).",
+		Description: "Read a file's contents with line numbers. Use offset and limit for large files. Repeat reads of the same (path, offset, limit) within one session return a short \"unchanged since last read\" stub when the file has not been modified — to force a fresh read, modify the file or pass a different offset/limit range. For image files (png/jpg/gif/webp), returns the image for vision analysis. For PDF files, renders pages as images for vision analysis (use offset for start page, limit for max pages)." +
+			agent.DescriptionGuidance,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"path":   map[string]any{"type": "string", "description": "Absolute or relative file path"},
-				"offset": map[string]any{"type": "integer", "description": "Start line (0-based, default 0). For PDF: start page (0-based)."},
-				"limit":  map[string]any{"type": "integer", "description": "Max lines to read (default: all). For PDF: max pages to render (default: 2)."},
+				"path":        map[string]any{"type": "string", "description": "Absolute or relative file path"},
+				"description": agent.DescriptionFieldSpec,
+				"offset":      map[string]any{"type": "integer", "description": "Start line (0-based, default 0). For PDF: start page (0-based)."},
+				"limit":       map[string]any{"type": "integer", "description": "Max lines to read (default: all). For PDF: max pages to render (default: 2)."},
 			},
 		},
-		Required: []string{"path"},
+		Required: []string{"path", "description"},
 	}
 }
 

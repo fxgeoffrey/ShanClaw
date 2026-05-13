@@ -469,8 +469,9 @@ func TestPublishToolInfoSchema(t *testing.T) {
 	if info.Name != "publish_to_web" {
 		t.Errorf("name = %q, want publish_to_web", info.Name)
 	}
-	required := info.Required
-	if len(required) != 2 || required[0] != "path" || required[1] != "purpose" {
-		t.Errorf("required = %v, want [path purpose]", required)
+	for _, want := range []string{"path", "purpose", "description"} {
+		if !containsString(info.Required, want) {
+			t.Errorf("expected Required to contain %q, got %v", want, info.Required)
+		}
 	}
 }

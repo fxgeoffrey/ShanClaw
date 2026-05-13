@@ -11,8 +11,11 @@ func TestComputer_Info(t *testing.T) {
 	if info.Name != "computer" {
 		t.Errorf("expected name 'computer', got %q", info.Name)
 	}
-	if len(info.Required) != 1 || info.Required[0] != "action" {
-		t.Errorf("expected required [action], got %v", info.Required)
+	// computer is a native Anthropic tool (NativeToolDef) — its
+	// Parameters/Description are dropped on the wire by buildToolSchema, so
+	// no `description` field is added (see description_field_test.go exemption).
+	if !containsString(info.Required, "action") {
+		t.Errorf("expected Required to contain 'action', got %v", info.Required)
 	}
 	props, ok := info.Parameters["properties"].(map[string]any)
 	if !ok {

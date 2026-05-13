@@ -22,9 +22,9 @@ Both paths funnel through `multiHandler` on the daemon side: the per-request HTT
 | `agent_reply` | Agent finished a turn (WS / schedule / Ptfrog sources). | Bus |
 | `agent_error` | Agent run failed. | Bus |
 | `notification` | Agent-authored notify tool call. | Bus |
-| `approval_request` | Tool needs user approval; payload `{request_id, tool, args}`. | Bus |
+| `approval_request` | Tool needs user approval; payload `{request_id, tool, args, agent, flags?}`. Optional `flags` array carries policy hints (currently `"always_allow_disabled"` for paid / permanent-public tools so UI clients disable the "Always Allow" button). | Bus |
 | `approval_resolved` | User answered an approval; payload `{request_id, decision}` where decision ∈ allow / deny / always_allow. | Bus |
-| `approval_notice` | Post-decision feedback (e.g. high-risk pattern not persisted); payload `{severity, message}` where severity ∈ info / warn. | Bus |
+| `approval_notice` | Post-decision feedback (e.g. high-risk pattern not persisted). Structured i18n-friendly payload: `{severity, code, tool, message}`. `severity` ∈ info / warn. `code` is the stable i18n key (`high_risk_not_persistable` / `bash_always_ask_not_persisted` / `persist_failed`); `tool` is the offending tool name (for interpolation into localized templates); `message` is the English fallback for clients that don't recognize `code` yet. Older clients reading only `severity` + `message` continue to work — `code` and `tool` are additive. | Bus |
 | `delta` | Streaming text tokens for the agent reply. | Per-request only |
 | `done` | Final reply payload with accumulated `usage`. | Per-request only |
 

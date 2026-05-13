@@ -23,6 +23,7 @@ type CloudDelegateTool struct {
 
 type cloudDelegateArgs struct {
 	Task         string `json:"task"`
+	Description  string `json:"description,omitempty"`
 	Context      string `json:"context,omitempty"`
 	WorkflowType string `json:"workflow_type,omitempty"`
 	Terminal     *bool  `json:"terminal,omitempty"`
@@ -74,7 +75,8 @@ func (t *CloudDelegateTool) Info() agent.ToolInfo {
 			"  - List/enumerate/find on any single platform   → x_search\n" +
 			"  - Iterative research on one topic              → x_search + web_fetch\n" +
 			"  - Fetch a specific URL                         → web_fetch or http\n" +
-			"  - Save output                                  → file_write",
+			"  - Save output                                  → file_write" +
+			agent.DescriptionGuidance,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -82,6 +84,7 @@ func (t *CloudDelegateTool) Info() agent.ToolInfo {
 					"type":        "string",
 					"description": "The task to delegate. Be specific and detailed about what you need.",
 				},
+				"description": agent.DescriptionFieldSpec,
 				"context": map[string]any{
 					"type":        "string",
 					"description": "Optional context to include with the task (max 8000 chars). Can include relevant code snippets, data, or background information.",
@@ -100,7 +103,7 @@ func (t *CloudDelegateTool) Info() agent.ToolInfo {
 				},
 			},
 		},
-		Required: []string{"task"},
+		Required: []string{"task", "description"},
 	}
 }
 

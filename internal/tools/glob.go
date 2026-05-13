@@ -24,24 +24,27 @@ const defaultGlobMaxResults = 200
 type GlobTool struct{}
 
 type globArgs struct {
-	Pattern    string `json:"pattern"`
-	Path       string `json:"path,omitempty"`
-	MaxResults int    `json:"max_results,omitempty"`
+	Pattern     string `json:"pattern"`
+	Description string `json:"description,omitempty"`
+	Path        string `json:"path,omitempty"`
+	MaxResults  int    `json:"max_results,omitempty"`
 }
 
 func (t *GlobTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
-		Name:        "glob",
-		Description: "Find files by path pattern (e.g. '**/*.csv', 'reports/*.pdf', 'src/**/*.go'). Matches file NAMES/paths — not file contents. Use grep to search inside files.",
+		Name: "glob",
+		Description: "Find files by path pattern (e.g. '**/*.csv', 'reports/*.pdf', 'src/**/*.go'). Matches file NAMES/paths — not file contents. Use grep to search inside files." +
+			agent.DescriptionGuidance,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"pattern":     map[string]any{"type": "string", "description": "Glob pattern"},
+				"description": agent.DescriptionFieldSpec,
 				"path":        map[string]any{"type": "string", "description": "Base directory (default: current dir). Required when no session working directory is set."},
 				"max_results": map[string]any{"type": "integer", "description": fmt.Sprintf("Max number of results (default: %d)", defaultGlobMaxResults)},
 			},
 		},
-		Required: []string{"pattern"},
+		Required: []string{"pattern", "description"},
 	}
 }
 

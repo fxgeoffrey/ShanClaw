@@ -24,7 +24,6 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/heartbeat"
 	"github.com/Kocoro-lab/ShanClaw/internal/hooks"
 	"github.com/Kocoro-lab/ShanClaw/internal/mcp"
-	"github.com/Kocoro-lab/ShanClaw/internal/permissions"
 	"github.com/Kocoro-lab/ShanClaw/internal/schedule"
 	"github.com/Kocoro-lab/ShanClaw/internal/skills"
 	"github.com/Kocoro-lab/ShanClaw/internal/tools"
@@ -688,60 +687,13 @@ func (h *daemonEventHandler) OnApprovalNeeded(tool string, args string) bool {
 	}
 	decision := h.broker.Request(h.ctx, h.messageID, h.channel, h.threadID, h.agent, tool, args)
 	if decision == daemon.DecisionAlwaysAllow {
-		if tool == "bash" {
-			cmd := permissions.ExtractField(args, "command")
-			if cmd != "" {
-				// High-risk prefixes (python -c, pip install, agent-browser
-				// eval, ...) are never persisted: a single approval shouldn't
-				// allow arbitrary future invocations of an arbitrary-code-
-				// execution gateway. The user gets a one-time allow plus a
-				// visible notice explaining why nothing was saved.
-				if permissions.IsAlwaysAskPrefix(cmd) {
-					emitApprovalNotice(h.deps, "warn",
-						"Allowed for this turn. Not saved to config (high-risk command pattern).")
-					log.Printf("daemon: always-allow rejected for high-risk prefix: %s", cmd)
-				} else if err := config.AppendAllowedCommand(h.shannonDir, cmd); err != nil {
-					log.Printf("daemon: failed to persist always-allow: %v", err)
-				} else {
-					// Update in-memory config under write lock.
-					// Access deps.Config directly (not a captured pointer) so
-					// we always mutate the current config, even after reloads.
-					h.deps.WriteLock()
-					perms := &h.deps.Config.Permissions
-					if !containsString(perms.AllowedCommands, cmd) {
-						perms.AllowedCommands = append(perms.AllowedCommands, cmd)
-					}
-					h.deps.WriteUnlock()
-					log.Printf("daemon: always-allow persisted: %s", cmd)
-				}
-			}
-		} else if agent.DisallowsAutoApproval(tool) {
-			emitApprovalNotice(h.deps, "warn",
-				"Allowed for this call only. This tool cannot be saved as always-allow.")
-			log.Printf("daemon: always-allow treated as one-time allow for %s", tool)
-		} else {
-			h.broker.SetToolAutoApprove(tool)
-			log.Printf("daemon: always-allow (session): %s", tool)
-		}
+		// PR 5: single entry point shared with the SSE path so SSE/WS
+		// behavior cannot drift. Handles bash (tool-level for named agents,
+		// command-level for default agent), non-bash (tool-level), and
+		// always-ask high-risk gates.
+		daemon.HandleAlwaysAllowDecision(h.deps, h.broker, h.agent, tool, args)
 	}
 	return decision == daemon.DecisionAllow || decision == daemon.DecisionAlwaysAllow
-}
-
-// emitApprovalNotice publishes an EventApprovalNotice on the daemon event bus
-// for SSE/Desktop subscribers to render. Best-effort — silently no-ops if the
-// bus is unavailable (e.g. cli/oneshot path).
-func emitApprovalNotice(deps *daemon.ServerDeps, severity, message string) {
-	if deps == nil || deps.EventBus == nil {
-		return
-	}
-	payload, err := json.Marshal(map[string]string{
-		"severity": severity,
-		"message":  message,
-	})
-	if err != nil {
-		return
-	}
-	deps.EventBus.Emit(daemon.Event{Type: daemon.EventApprovalNotice, Payload: payload})
 }
 
 // autoApproveHandler is a minimal EventHandler for internal triggers (watcher, heartbeat).
@@ -765,15 +717,6 @@ func (h *autoApproveHandler) OnCloudProgress(completed, total int)              
 func (h *autoApproveHandler) OnCloudPlan(planType, content string, needsReview bool) {}
 func (h *autoApproveHandler) OnApprovalNeeded(tool string, args string) bool {
 	return !agent.DisallowsAutoApproval(tool)
-}
-
-func containsString(slice []string, s string) bool {
-	for _, v := range slice {
-		if v == s {
-			return true
-		}
-	}
-	return false
 }
 
 func stopExistingDaemon(pidPath string) {

@@ -12,8 +12,8 @@ func TestProcess_Info(t *testing.T) {
 	if info.Name != "process" {
 		t.Errorf("expected name 'process', got %q", info.Name)
 	}
-	if len(info.Required) != 1 || info.Required[0] != "action" {
-		t.Errorf("expected required [action], got %v", info.Required)
+	if !containsString(info.Required, "action") || !containsString(info.Required, "description") {
+		t.Errorf("expected Required to contain 'action' and 'description', got %v", info.Required)
 	}
 }
 

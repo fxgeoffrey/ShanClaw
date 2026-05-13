@@ -15,20 +15,23 @@ import (
 type DirectoryListTool struct{}
 
 type dirListArgs struct {
-	Path string `json:"path"`
+	Path        string `json:"path"`
+	Description string `json:"description,omitempty"`
 }
 
 func (t *DirectoryListTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
-		Name:        "directory_list",
-		Description: "List files and directories at a specific path. Use for exploring one directory. Use glob to find files by pattern across subdirectories.",
+		Name: "directory_list",
+		Description: "List files and directories at a specific path. Use for exploring one directory. Use glob to find files by pattern across subdirectories." +
+			agent.DescriptionGuidance,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"path": map[string]any{"type": "string", "description": "Directory path (default: current dir)"},
+				"path":        map[string]any{"type": "string", "description": "Directory path (default: current dir)"},
+				"description": agent.DescriptionFieldSpec,
 			},
 		},
-		Required: nil,
+		Required: []string{"description"},
 	}
 }
 

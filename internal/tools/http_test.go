@@ -16,8 +16,11 @@ func TestHTTP_Info(t *testing.T) {
 	if info.Name != "http" {
 		t.Errorf("expected name 'http', got %q", info.Name)
 	}
-	if len(info.Required) != 1 || info.Required[0] != "url" {
-		t.Errorf("expected required [url], got %v", info.Required)
+	if !containsString(info.Required, "url") {
+		t.Errorf("expected Required to contain 'url', got %v", info.Required)
+	}
+	if !containsString(info.Required, "description") {
+		t.Errorf("expected Required to contain 'description' (PR 7), got %v", info.Required)
 	}
 }
 

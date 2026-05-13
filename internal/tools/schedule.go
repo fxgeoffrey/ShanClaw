@@ -32,17 +32,19 @@ func (t *ScheduleTool) Info() agent.ToolInfo {
 	switch t.action {
 	case "create":
 		return agent.ToolInfo{
-			Name:        "schedule_create",
-			Description: "Create a scheduled task that runs a shan agent on a cron schedule. Supports full cron syntax (ranges, steps, lists). Each run saves its result as a session (searchable via session_search).",
+			Name: "schedule_create",
+			Description: "Create a scheduled task that runs a shan agent on a cron schedule. Supports full cron syntax (ranges, steps, lists). Each run saves its result as a session (searchable via session_search)." +
+				agent.DescriptionGuidance,
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"agent":  map[string]any{"type": "string", "description": "Agent name (from ~/.shannon/agents/). Empty for default agent."},
-					"cron":   map[string]any{"type": "string", "description": "5-field cron expression (minute hour day month weekday). Supports */5, 1-5, 1,3,5."},
-					"prompt": map[string]any{"type": "string", "description": "The prompt to send to the agent on each run."},
+					"agent":       map[string]any{"type": "string", "description": "Agent name (from ~/.shannon/agents/). Empty for default agent."},
+					"cron":        map[string]any{"type": "string", "description": "5-field cron expression (minute hour day month weekday). Supports */5, 1-5, 1,3,5."},
+					"prompt":      map[string]any{"type": "string", "description": "The prompt to send to the agent on each run."},
+					"description": agent.DescriptionFieldSpec,
 				},
 			},
-			Required: []string{"cron", "prompt"},
+			Required: []string{"cron", "prompt", "description"},
 		}
 	case "list":
 		return agent.ToolInfo{
@@ -52,30 +54,34 @@ func (t *ScheduleTool) Info() agent.ToolInfo {
 		}
 	case "update":
 		return agent.ToolInfo{
-			Name:        "schedule_update",
-			Description: "Update an existing scheduled task.",
+			Name: "schedule_update",
+			Description: "Update an existing scheduled task." +
+				agent.DescriptionGuidance,
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"id":      map[string]any{"type": "string", "description": "Schedule ID"},
-					"cron":    map[string]any{"type": "string", "description": "New cron expression"},
-					"prompt":  map[string]any{"type": "string", "description": "New prompt"},
-					"enabled": map[string]any{"type": "boolean", "description": "Enable or disable"},
+					"id":          map[string]any{"type": "string", "description": "Schedule ID"},
+					"cron":        map[string]any{"type": "string", "description": "New cron expression"},
+					"prompt":      map[string]any{"type": "string", "description": "New prompt"},
+					"enabled":     map[string]any{"type": "boolean", "description": "Enable or disable"},
+					"description": agent.DescriptionFieldSpec,
 				},
 			},
-			Required: []string{"id"},
+			Required: []string{"id", "description"},
 		}
 	case "remove":
 		return agent.ToolInfo{
-			Name:        "schedule_remove",
-			Description: "Remove a scheduled task.",
+			Name: "schedule_remove",
+			Description: "Remove a scheduled task." +
+				agent.DescriptionGuidance,
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"id": map[string]any{"type": "string", "description": "Schedule ID to remove"},
+					"id":          map[string]any{"type": "string", "description": "Schedule ID to remove"},
+					"description": agent.DescriptionFieldSpec,
 				},
 			},
-			Required: []string{"id"},
+			Required: []string{"id", "description"},
 		}
 	}
 	return agent.ToolInfo{}

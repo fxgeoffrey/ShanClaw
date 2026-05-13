@@ -91,12 +91,13 @@ type GhosttyTool struct {
 }
 
 type ghosttyArgs struct {
-	Action    string `json:"action"`
-	Command   string `json:"command,omitempty"`
-	Title     string `json:"title,omitempty"`
-	Direction string `json:"direction,omitempty"`
-	Target    string `json:"target,omitempty"`
-	Text      string `json:"text,omitempty"`
+	Action      string `json:"action"`
+	Description string `json:"description,omitempty"`
+	Command     string `json:"command,omitempty"`
+	Title       string `json:"title,omitempty"`
+	Direction   string `json:"direction,omitempty"`
+	Target      string `json:"target,omitempty"`
+	Text        string `json:"text,omitempty"`
 }
 
 func (t *GhosttyTool) Info() agent.ToolInfo {
@@ -109,19 +110,21 @@ func (t *GhosttyTool) Info() agent.ToolInfo {
 			"Actions: new_tab (open a new terminal tab, optional command/title), " +
 			"new_split (open a split pane, direction: right|down, optional command/title), " +
 			"send_input (send keystrokes to a tracked tab by title), " +
-			"list_tabs (show all tracked tabs).",
+			"list_tabs (show all tracked tabs)." +
+			agent.DescriptionGuidance,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"action":    map[string]any{"type": "string", "description": "Action: new_tab, new_split, send_input, list_tabs"},
-				"command":   map[string]any{"type": "string", "description": "Shell command to run in the new tab/split"},
+				"action":      map[string]any{"type": "string", "description": "Action: new_tab, new_split, send_input, list_tabs"},
+				"description": agent.DescriptionFieldSpec,
+				"command":     map[string]any{"type": "string", "description": "Shell command to run in the new tab/split"},
 				"title":     map[string]any{"type": "string", "description": "Tab title (defaults to command basename)"},
 				"direction": map[string]any{"type": "string", "description": "Split direction: right or down (for new_split)"},
 				"target":    map[string]any{"type": "string", "description": "Tab title to send input to (for send_input)"},
 				"text":      map[string]any{"type": "string", "description": "Text/keystrokes to send (for send_input)"},
 			},
 		},
-		Required: []string{"action"},
+		Required: []string{"action", "description"},
 	}
 }
 

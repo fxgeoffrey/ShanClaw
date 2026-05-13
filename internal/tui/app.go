@@ -478,11 +478,20 @@ func New(cfg *config.Config, version string, agentOverride *agents.Agent) *Model
 	if agentOverride != nil {
 		agentDir := filepath.Join(shannonDir, "agents", agentOverride.Name)
 		loop.SwitchAgent(agentOverride.Prompt, agentDir, nil, "", loadedSkills)
+		// TUI honors the same persisted always-allow set Desktop writes to.
+		// Read-only — TUI has no "Always Allow" write path yet.
+		merged := append([]string(nil), runtimeCfg.Permissions.AlwaysAllowTools...)
+		if agentOverride.Config != nil && agentOverride.Config.Permissions != nil {
+			merged = append(merged, agentOverride.Config.Permissions.AlwaysAllowTools...)
+		}
+		loop.SetAlwaysAllowTools(merged)
 	} else {
 		loop.SetMemoryDir(filepath.Join(shannonDir, "memory"))
 		if loadedSkills != nil {
 			loop.SetSkills(loadedSkills)
 		}
+		// Default agent: only the global list applies.
+		loop.SetAlwaysAllowTools(runtimeCfg.Permissions.AlwaysAllowTools)
 	}
 	loop.SetEnableStreaming(true) // streaming enabled but deltas are suppressed — only final text rendered
 
@@ -632,6 +641,11 @@ func (m *Model) rebuildAgentLoop() {
 		scopedMCPCtx := tools.ResolveMCPContext(m.cfg, m.agentOverride)
 		agentDir := filepath.Join(m.shannonDir, "agents", m.agentOverride.Name)
 		loop.SwitchAgent(m.agentOverride.Prompt, agentDir, nil, scopedMCPCtx, m.loadedSkills)
+		merged := append([]string(nil), m.cfg.Permissions.AlwaysAllowTools...)
+		if m.agentOverride.Config != nil && m.agentOverride.Config.Permissions != nil {
+			merged = append(merged, m.agentOverride.Config.Permissions.AlwaysAllowTools...)
+		}
+		loop.SetAlwaysAllowTools(merged)
 	} else {
 		loop.SetMemoryDir(filepath.Join(m.shannonDir, "memory"))
 		if m.loadedSkills != nil {
@@ -641,6 +655,7 @@ func (m *Model) rebuildAgentLoop() {
 		if mcpCtx != "" {
 			loop.SetMCPContext(mcpCtx)
 		}
+		loop.SetAlwaysAllowTools(m.cfg.Permissions.AlwaysAllowTools)
 	}
 	m.agentLoop = loop
 }

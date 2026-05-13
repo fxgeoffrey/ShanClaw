@@ -11,8 +11,8 @@ func TestNotify_Info(t *testing.T) {
 	if info.Name != "notify" {
 		t.Errorf("expected name 'notify', got %q", info.Name)
 	}
-	if len(info.Required) != 1 || info.Required[0] != "title" {
-		t.Errorf("expected required [title], got %v", info.Required)
+	if !containsString(info.Required, "title") || !containsString(info.Required, "description") {
+		t.Errorf("expected Required to contain 'title' and 'description', got %v", info.Required)
 	}
 }
 

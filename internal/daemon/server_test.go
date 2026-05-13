@@ -21,6 +21,7 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/agents"
 	"github.com/Kocoro-lab/ShanClaw/internal/config"
 	"github.com/Kocoro-lab/ShanClaw/internal/mcp"
+	"github.com/Kocoro-lab/ShanClaw/internal/permissions"
 	"github.com/Kocoro-lab/ShanClaw/internal/skills"
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
@@ -2498,5 +2499,101 @@ func TestServer_UploadSkill_Builtin(t *testing.T) {
 	defer resp2.Body.Close()
 	if resp2.StatusCode != http.StatusForbidden {
 		t.Fatalf("force=true: want 403, got %d", resp2.StatusCode)
+	}
+}
+
+// TestHandleAddGlobalAlwaysAllow covers the PR 6 HTTP endpoint at the edge:
+// request validation, high-risk rejection (400), and in-memory mirror sync.
+// The disk-write path is exercised by config package tests independently.
+func TestHandleAddGlobalAlwaysAllow(t *testing.T) {
+	shannonDir := t.TempDir()
+	srv := NewServer(0, nil, &ServerDeps{
+		ShannonDir: shannonDir,
+		Config:     &config.Config{},
+	}, "test")
+
+	// (a) success: writes to disk, mirrors in-memory.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/permissions/always-allow",
+		strings.NewReader(`{"tool":"bash"}`))
+	req.Header.Set("Content-Type", "application/json")
+	srv.handleAddGlobalAlwaysAllow(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	found := false
+	for _, tool := range srv.deps.Config.Permissions.AlwaysAllowTools {
+		if tool == "bash" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("in-memory mirror not updated: %v", srv.deps.Config.Permissions.AlwaysAllowTools)
+	}
+	cfgData, _ := os.ReadFile(filepath.Join(shannonDir, "config.yaml"))
+	if !strings.Contains(string(cfgData), "bash") {
+		t.Errorf("disk config should contain 'bash', got: %s", cfgData)
+	}
+
+	// (b) high-risk: 400.
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/permissions/always-allow",
+		strings.NewReader(`{"tool":"publish_to_web"}`))
+	srv.handleAddGlobalAlwaysAllow(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("high-risk should return 400, got %d; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// (c) missing tool field: 400.
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/permissions/always-allow",
+		strings.NewReader(`{"foo":"bar"}`))
+	srv.handleAddGlobalAlwaysAllow(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("missing tool should return 400, got %d", rec.Code)
+	}
+}
+
+// TestHandleRemoveGlobalAlwaysAllow covers the symmetric remove endpoint.
+func TestHandleRemoveGlobalAlwaysAllow(t *testing.T) {
+	shannonDir := t.TempDir()
+	srv := NewServer(0, nil, &ServerDeps{
+		ShannonDir: shannonDir,
+		Config: &config.Config{
+			Permissions: permissions.PermissionsConfig{
+				AlwaysAllowTools: []string{"bash", "file_write"},
+			},
+		},
+	}, "test")
+	// Seed disk so Remove has something to find.
+	if err := config.AppendGlobalAlwaysAllowTool(shannonDir, "bash"); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.AppendGlobalAlwaysAllowTool(shannonDir, "file_write"); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/permissions/always-allow",
+		strings.NewReader(`{"tool":"bash"}`))
+	srv.handleRemoveGlobalAlwaysAllow(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	for _, tool := range srv.deps.Config.Permissions.AlwaysAllowTools {
+		if tool == "bash" {
+			t.Error("bash should be removed from in-memory mirror")
+		}
+	}
+	stillHas := false
+	for _, tool := range srv.deps.Config.Permissions.AlwaysAllowTools {
+		if tool == "file_write" {
+			stillHas = true
+			break
+		}
+	}
+	if !stillHas {
+		t.Error("file_write should still be in in-memory mirror")
 	}
 }

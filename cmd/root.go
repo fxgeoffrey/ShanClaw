@@ -280,6 +280,11 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 	if agentOverride != nil {
 		agentDir := filepath.Join(shannonDir, "agents", agentName)
 		loop.SwitchAgent(agentOverride.Prompt, agentDir, nil, scopedMCPCtx, loadedSkills)
+		merged := append([]string(nil), runCfg.Permissions.AlwaysAllowTools...)
+		if agentOverride.Config != nil && agentOverride.Config.Permissions != nil {
+			merged = append(merged, agentOverride.Config.Permissions.AlwaysAllowTools...)
+		}
+		loop.SetAlwaysAllowTools(merged)
 	} else {
 		// Default agent: memory lives in shannonDir/memory/
 		loop.SetMemoryDir(filepath.Join(shannonDir, "memory"))
@@ -289,6 +294,7 @@ func runOneShot(cfg *config.Config, query string, agentOverride *agents.Agent) e
 		if scopedMCPCtx != "" {
 			loop.SetMCPContext(scopedMCPCtx)
 		}
+		loop.SetAlwaysAllowTools(runCfg.Permissions.AlwaysAllowTools)
 	}
 	// Create session for persistence
 	var sessDir string

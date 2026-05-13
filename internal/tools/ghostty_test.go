@@ -75,8 +75,8 @@ func TestGhosttyTool_Info(t *testing.T) {
 	if info.Name != "ghostty" {
 		t.Errorf("expected name 'ghostty', got %s", info.Name)
 	}
-	if len(info.Required) != 1 || info.Required[0] != "action" {
-		t.Errorf("expected required=[action], got %v", info.Required)
+	if !containsString(info.Required, "action") || !containsString(info.Required, "description") {
+		t.Errorf("expected Required to contain 'action' and 'description', got %v", info.Required)
 	}
 }
 

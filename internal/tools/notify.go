@@ -38,26 +38,29 @@ func NotifyHandlerFrom(ctx context.Context) NotifyHandler {
 type NotifyTool struct{}
 
 type notifyArgs struct {
-	Title   string `json:"title"`
-	Body    string `json:"body,omitempty"`
-	Message string `json:"message,omitempty"` // alias for body
-	Sound   bool   `json:"sound,omitempty"`
+	Title       string `json:"title"`
+	Description string `json:"description,omitempty"`
+	Body        string `json:"body,omitempty"`
+	Message     string `json:"message,omitempty"` // alias for body
+	Sound       bool   `json:"sound,omitempty"`
 }
 
 func (t *NotifyTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
-		Name:        "notify",
-		Description: "Send a macOS desktop notification using osascript.",
+		Name: "notify",
+		Description: "Send a macOS desktop notification using osascript." +
+			agent.DescriptionGuidance,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"title": map[string]any{"type": "string", "description": "Notification title"},
-				"body":    map[string]any{"type": "string", "description": "Notification body text (alias: message)"},
-			"message": map[string]any{"type": "string", "description": "Alias for body"},
-				"sound": map[string]any{"type": "boolean", "description": "Play notification sound (default: false)"},
+				"title":       map[string]any{"type": "string", "description": "Notification title"},
+				"description": agent.DescriptionFieldSpec,
+				"body":        map[string]any{"type": "string", "description": "Notification body text (alias: message)"},
+				"message":     map[string]any{"type": "string", "description": "Alias for body"},
+				"sound":       map[string]any{"type": "boolean", "description": "Play notification sound (default: false)"},
 			},
 		},
-		Required: []string{"title"},
+		Required: []string{"title", "description"},
 	}
 }
 

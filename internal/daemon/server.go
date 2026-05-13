@@ -3024,8 +3024,9 @@ func (s *Server) handlePutGlobalSkill(w http.ResponseWriter, r *http.Request) {
 	// racing on the same slug can both observe "no file on disk", both
 	// skip the conflict gate, and one of them clobbers AllowedTools /
 	// Metadata with the empty zero-value that the PUT body doesn't carry.
-	// Also gives PUT vs POST /skills/upload mutual exclusion via the same
-	// SlugLocks instance.
+	// Also gives PUT vs POST /skills/upload vs DELETE /skills/{name}
+	// mutual exclusion via the same SlugLocks instance — see
+	// handleDeleteGlobalSkill for the DELETE-side acquisition.
 	unlock := s.slugLocks.Lock(name)
 	defer unlock()
 	// Load the existing skill so we can preserve fields the PUT body doesn't
@@ -3137,6 +3138,13 @@ func (s *Server) handleDeleteGlobalSkill(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "daemon deps not configured")
 		return
 	}
+	// Serialize against concurrent PUT /skills/{name} and POST /skills/upload
+	// on the same slug. Without this lock, a PUT can read the existing skill,
+	// DELETE can race in and remove the directory, then PUT proceeds and
+	// recreates it with state copied from the deleted version. Same lock
+	// instance as handlePutGlobalSkill / InstallFromZipData / InstallFromMarketplace.
+	unlock := s.slugLocks.Lock(name)
+	defer unlock()
 	globalDir := filepath.Join(s.deps.ShannonDir, "skills", name)
 	skillFile := filepath.Join(globalDir, "SKILL.md")
 	if _, err := os.Stat(skillFile); err != nil {

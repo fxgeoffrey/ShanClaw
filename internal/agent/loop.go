@@ -1094,6 +1094,12 @@ func (a *AgentLoop) messagesForLLM(messages []client.Message) []client.Message {
 	if changed && a.tracker != nil {
 		a.tracker.MarkDirty()
 	}
+	// Wire-time guard: drop any image whose base64 exceeds Anthropic's 5 MB
+	// inline limit. Covers all CompletionRequest paths (main loop, retry,
+	// force-stop synthesis) with one call. Without this, an oversize image
+	// surviving Layer 1 jams every retry with 400. Operates on `out` (the
+	// budget-adjusted copy) so we don't mutate the caller's slice.
+	filterOversizeImages(out)
 	return out
 }
 

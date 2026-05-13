@@ -98,6 +98,99 @@ func TestAppendAllowedCommand_NoDuplicates(t *testing.T) {
 	}
 }
 
+func TestAppendGlobalAlwaysAllowTool(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	os.WriteFile(cfgPath, []byte("endpoint: https://example.com\n"), 0644)
+
+	if err := AppendGlobalAlwaysAllowTool(dir, "bash"); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	data, _ := os.ReadFile(cfgPath)
+	if !strings.Contains(string(data), "always_allow_tools") {
+		t.Errorf("config should have always_allow_tools block, got:\n%s", data)
+	}
+	if !strings.Contains(string(data), "bash") {
+		t.Errorf("config should contain 'bash', got:\n%s", data)
+	}
+
+	// Idempotent
+	if err := AppendGlobalAlwaysAllowTool(dir, "bash"); err != nil {
+		t.Fatalf("re-append: %v", err)
+	}
+	data, _ = os.ReadFile(cfgPath)
+	if strings.Count(string(data), "- bash") > 1 {
+		t.Errorf("duplicate bash entry not deduped, got:\n%s", data)
+	}
+
+	// Append a second tool — both must survive
+	if err := AppendGlobalAlwaysAllowTool(dir, "file_write"); err != nil {
+		t.Fatalf("append file_write: %v", err)
+	}
+	data, _ = os.ReadFile(cfgPath)
+	if !strings.Contains(string(data), "bash") || !strings.Contains(string(data), "file_write") {
+		t.Errorf("expected both bash and file_write, got:\n%s", data)
+	}
+	// Pre-existing config keys must be preserved
+	if !strings.Contains(string(data), "endpoint") {
+		t.Errorf("endpoint key lost on append:\n%s", data)
+	}
+}
+
+func TestAppendGlobalAlwaysAllowTool_NoConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	// No config.yaml exists yet — Append should create one.
+	if err := AppendGlobalAlwaysAllowTool(dir, "bash"); err != nil {
+		t.Fatalf("append on missing config: %v", err)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "config.yaml"))
+	if !strings.Contains(string(data), "bash") {
+		t.Errorf("expected bash in config after first-create, got:\n%s", data)
+	}
+}
+
+func TestRemoveGlobalAlwaysAllowTool(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := AppendGlobalAlwaysAllowTool(dir, "bash"); err != nil {
+		t.Fatal(err)
+	}
+	if err := AppendGlobalAlwaysAllowTool(dir, "file_write"); err != nil {
+		t.Fatal(err)
+	}
+	// Remove one
+	if err := RemoveGlobalAlwaysAllowTool(dir, "bash"); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	data, _ := os.ReadFile(cfgPath)
+	if strings.Contains(string(data), "- bash") {
+		t.Errorf("bash should be removed, got:\n%s", data)
+	}
+	if !strings.Contains(string(data), "file_write") {
+		t.Errorf("file_write should remain, got:\n%s", data)
+	}
+
+	// Remove the last one — block should be cleaned up
+	if err := RemoveGlobalAlwaysAllowTool(dir, "file_write"); err != nil {
+		t.Fatalf("remove last: %v", err)
+	}
+	data, _ = os.ReadFile(cfgPath)
+	if strings.Contains(string(data), "always_allow_tools") {
+		t.Errorf("empty always_allow_tools key should be dropped, got:\n%s", data)
+	}
+
+	// Removing absent tool is a no-op
+	if err := RemoveGlobalAlwaysAllowTool(dir, "never_added"); err != nil {
+		t.Errorf("removing absent tool should not error: %v", err)
+	}
+
+	// Removing from non-existent config is a no-op
+	emptyDir := t.TempDir()
+	if err := RemoveGlobalAlwaysAllowTool(emptyDir, "bash"); err != nil {
+		t.Errorf("removing from non-existent config should be no-op: %v", err)
+	}
+}
+
 func TestLoad_DoesNotApplyProjectOverlayFromProcessCWD(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

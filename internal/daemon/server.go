@@ -30,7 +30,6 @@ import (
 	ctxwin "github.com/Kocoro-lab/ShanClaw/internal/context"
 	"github.com/Kocoro-lab/ShanClaw/internal/mcp"
 	"github.com/Kocoro-lab/ShanClaw/internal/memory"
-	"github.com/Kocoro-lab/ShanClaw/internal/permissions"
 	"github.com/Kocoro-lab/ShanClaw/internal/schedule"
 	"github.com/Kocoro-lab/ShanClaw/internal/session"
 	"github.com/Kocoro-lab/ShanClaw/internal/skills"
@@ -231,6 +230,10 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /agents/{name}", s.handleDeleteAgent)
 	mux.HandleFunc("PUT /agents/{name}/config", s.handlePutAgentConfig)
 	mux.HandleFunc("DELETE /agents/{name}/config", s.handleDeleteAgentConfig)
+	mux.HandleFunc("POST /agents/{name}/permissions/always-allow", s.handleAddAgentAlwaysAllow)
+	mux.HandleFunc("DELETE /agents/{name}/permissions/always-allow", s.handleRemoveAgentAlwaysAllow)
+	mux.HandleFunc("POST /permissions/always-allow", s.handleAddGlobalAlwaysAllow)
+	mux.HandleFunc("DELETE /permissions/always-allow", s.handleRemoveGlobalAlwaysAllow)
 	mux.HandleFunc("PUT /agents/{name}/commands/{cmd}", s.handlePutCommand)
 	mux.HandleFunc("DELETE /agents/{name}/commands/{cmd}", s.handleDeleteCommand)
 	mux.HandleFunc("PUT /agents/{name}/skills/{skill}", s.handlePutSkill)
@@ -1308,7 +1311,7 @@ func (s *Server) handleMessageSSE(w http.ResponseWriter, r *http.Request, req Ru
 		}
 	}
 
-	handler := &sseEventHandler{w: w, flusher: flusher, broker: reqBroker, ctx: r.Context(), autoApprove: autoApprove, deps: s.deps}
+	handler := &sseEventHandler{w: w, flusher: flusher, broker: reqBroker, ctx: r.Context(), autoApprove: autoApprove, deps: s.deps, agent: req.Agent}
 	result, err := RunAgent(r.Context(), s.deps, req, handler)
 	if err != nil {
 		fmt.Fprintf(w, "event: error\ndata: %s\n\n", mustJSON(map[string]string{"error": err.Error()}))
@@ -1434,7 +1437,11 @@ type sseEventHandler struct {
 	ctx         context.Context
 	autoApprove bool
 	deps        *ServerDeps
-	usage       agent.UsageAccumulator
+	// agent identifies the per-agent config.yaml to write always-allow tools to.
+	// Empty for default-agent / non-routed paths (e.g. /research, /swarm) — in
+	// that case persistAgentAlwaysAllow falls back to session-only.
+	agent string
+	usage agent.UsageAccumulator
 }
 
 // Usage returns the cumulative usage collected during this handler's lifetime.
@@ -1558,53 +1565,7 @@ func (h *sseEventHandler) OnApprovalNeeded(tool string, args string) bool {
 	// in-process via its own pending map, no WS envelope round-trips Cloud.
 	decision := h.broker.Request(h.ctx, "", "", "", "", tool, args)
 	if decision == DecisionAlwaysAllow {
-		if tool == "bash" {
-			cmd := permissions.ExtractField(args, "command")
-			if cmd != "" {
-				// Same high-risk-prefix gate as the daemon WS path: a single
-				// always-allow click cannot persist arbitrary-code-execution
-				// gateways (python -c, pip install, agent-browser eval, ...).
-				if permissions.IsAlwaysAskPrefix(cmd) {
-					if h.deps != nil && h.deps.EventBus != nil {
-						payload, _ := json.Marshal(map[string]string{
-							"severity": "warn",
-							"message":  "Allowed for this turn. Not saved to config (high-risk command pattern).",
-						})
-						h.deps.EventBus.Emit(Event{Type: EventApprovalNotice, Payload: payload})
-					}
-					log.Printf("sse: always-allow rejected for high-risk prefix: %s", cmd)
-				} else if err := config.AppendAllowedCommand(h.deps.ShannonDir, cmd); err != nil {
-					log.Printf("sse: failed to persist always-allow: %v", err)
-				} else {
-					h.deps.WriteLock()
-					perms := &h.deps.Config.Permissions
-					found := false
-					for _, c := range perms.AllowedCommands {
-						if c == cmd {
-							found = true
-							break
-						}
-					}
-					if !found {
-						perms.AllowedCommands = append(perms.AllowedCommands, cmd)
-					}
-					h.deps.WriteUnlock()
-					log.Printf("sse: always-allow persisted: %s", cmd)
-				}
-			}
-		} else if agent.DisallowsAutoApproval(tool) {
-			if h.deps != nil && h.deps.EventBus != nil {
-				payload, _ := json.Marshal(map[string]string{
-					"severity": "warn",
-					"message":  "Allowed for this call only. This tool cannot be saved as always-allow.",
-				})
-				h.deps.EventBus.Emit(Event{Type: EventApprovalNotice, Payload: payload})
-			}
-			log.Printf("sse: always-allow treated as one-time allow for %s", tool)
-		} else {
-			h.broker.SetToolAutoApprove(tool)
-			log.Printf("sse: always-allow (session): %s", tool)
-		}
+		HandleAlwaysAllowDecision(h.deps, h.broker, h.agent, tool, args)
 	}
 	return decision == DecisionAllow || decision == DecisionAlwaysAllow
 }
@@ -2338,6 +2299,146 @@ func (s *Server) handleDeleteAgentConfig(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// alwaysAllowToolRequest is the JSON body for add/remove always-allow endpoints.
+type alwaysAllowToolRequest struct {
+	Tool string `json:"tool"`
+}
+
+// handleAddAgentAlwaysAllow appends a tool to permissions.always_allow_tools
+// for an agent. High-risk tools (publish_to_web, generate_image, edit_image)
+// return 400 — those must always prompt the user fresh.
+func (s *Server) handleAddAgentAlwaysAllow(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := agents.ValidateAgentName(name); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !s.agentExists(w, name) {
+		return
+	}
+	var req alwaysAllowToolRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	if req.Tool == "" {
+		writeError(w, http.StatusBadRequest, "tool is required")
+		return
+	}
+	if !s.materializeIfBuiltin(w, name) {
+		return
+	}
+	if err := agents.AppendAlwaysAllowTool(s.deps.AgentsDir, name, req.Tool); err != nil {
+		if errors.Is(err, agents.ErrToolNotPersistable) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.auditHTTPOp("POST", "/agents/"+name+"/permissions/always-allow", "added "+req.Tool)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "added"})
+}
+
+// handleRemoveAgentAlwaysAllow removes a tool from
+// permissions.always_allow_tools. No-op (200) if the tool isn't present.
+func (s *Server) handleRemoveAgentAlwaysAllow(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := agents.ValidateAgentName(name); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !s.agentExists(w, name) {
+		return
+	}
+	var req alwaysAllowToolRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	if req.Tool == "" {
+		writeError(w, http.StatusBadRequest, "tool is required")
+		return
+	}
+	if err := agents.RemoveAlwaysAllowTool(s.deps.AgentsDir, name, req.Tool); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.auditHTTPOp("DELETE", "/agents/"+name+"/permissions/always-allow", "removed "+req.Tool)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
+}
+
+// handleAddGlobalAlwaysAllow appends a tool to the GLOBAL
+// permissions.always_allow_tools list in ~/.shannon/config.yaml. Applies to
+// every agent (including the default agent). High-risk tools and high-risk
+// bash command prefixes are still blocked at runtime regardless. Use the
+// per-agent endpoint (/agents/{name}/permissions/always-allow) when trust
+// should be limited to a specific agent.
+func (s *Server) handleAddGlobalAlwaysAllow(w http.ResponseWriter, r *http.Request) {
+	var req alwaysAllowToolRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	if req.Tool == "" {
+		writeError(w, http.StatusBadRequest, "tool is required")
+		return
+	}
+	if agent.DisallowsAutoApproval(req.Tool) {
+		writeError(w, http.StatusBadRequest,
+			"tool requires fresh approval each call and cannot be persisted as always-allow")
+		return
+	}
+	if err := config.AppendGlobalAlwaysAllowTool(s.deps.ShannonDir, req.Tool); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// Mirror into the in-memory config so subsequent requests in this
+	// daemon session see the new entry without a full reload.
+	s.deps.WriteLock()
+	perms := &s.deps.Config.Permissions
+	found := false
+	for _, t := range perms.AlwaysAllowTools {
+		if t == req.Tool {
+			found = true
+			break
+		}
+	}
+	if !found {
+		perms.AlwaysAllowTools = append(perms.AlwaysAllowTools, req.Tool)
+	}
+	s.deps.WriteUnlock()
+	s.auditHTTPOp("POST", "/permissions/always-allow", "added "+req.Tool)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "added"})
+}
+
+// handleRemoveGlobalAlwaysAllow removes a tool from the global
+// permissions.always_allow_tools list. No-op (200) if absent.
+func (s *Server) handleRemoveGlobalAlwaysAllow(w http.ResponseWriter, r *http.Request) {
+	var req alwaysAllowToolRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	if req.Tool == "" {
+		writeError(w, http.StatusBadRequest, "tool is required")
+		return
+	}
+	if err := config.RemoveGlobalAlwaysAllowTool(s.deps.ShannonDir, req.Tool); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// Mirror removal into the in-memory config.
+	s.deps.WriteLock()
+	perms := &s.deps.Config.Permissions
+	filtered := perms.AlwaysAllowTools[:0]
+	for _, t := range perms.AlwaysAllowTools {
+		if t != req.Tool {
+			filtered = append(filtered, t)
+		}
+	}
+	perms.AlwaysAllowTools = filtered
+	s.deps.WriteUnlock()
+	s.auditHTTPOp("DELETE", "/permissions/always-allow", "removed "+req.Tool)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
 }
 
 func (s *Server) handlePutCommand(w http.ResponseWriter, r *http.Request) {

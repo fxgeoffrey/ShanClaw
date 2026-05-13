@@ -15,26 +15,29 @@ import (
 type FileEditTool struct{}
 
 type fileEditArgs struct {
-	Path       string `json:"path"`
-	OldString  string `json:"old_string"`
-	NewString  string `json:"new_string"`
-	ReplaceAll bool   `json:"replace_all,omitempty"` // when true, replaces every occurrence; default false (must be unique)
+	Path        string `json:"path"`
+	OldString   string `json:"old_string"`
+	NewString   string `json:"new_string"`
+	Description string `json:"description,omitempty"`
+	ReplaceAll  bool   `json:"replace_all,omitempty"` // when true, replaces every occurrence; default false (must be unique)
 }
 
 func (t *FileEditTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
-		Name:        "file_edit",
-		Description: "Replace an exact string in a file. By default old_string must appear exactly once (use the smallest snippet that's clearly unique — usually 2-4 adjacent lines is sufficient; don't paste 10+ lines just to disambiguate). Pass replace_all=true to rename / refactor every occurrence in one call.",
+		Name: "file_edit",
+		Description: "Replace an exact string in a file. By default old_string must appear exactly once (use the smallest snippet that's clearly unique — usually 2-4 adjacent lines is sufficient; don't paste 10+ lines just to disambiguate). Pass replace_all=true to rename / refactor every occurrence in one call." +
+			agent.DescriptionGuidance,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"path":        map[string]any{"type": "string", "description": "File path to edit"},
 				"old_string":  map[string]any{"type": "string", "description": "Exact string to find. Must be unique unless replace_all=true."},
 				"new_string":  map[string]any{"type": "string", "description": "Replacement string"},
+				"description": agent.DescriptionFieldSpec,
 				"replace_all": map[string]any{"type": "boolean", "description": "When true, replace every occurrence of old_string. When false (default), old_string must appear exactly once. Use replace_all only when the target is unambiguous globally (variable rename, refactor)."},
 			},
 		},
-		Required: []string{"path", "old_string", "new_string"},
+		Required: []string{"path", "old_string", "new_string", "description"},
 	}
 }
 

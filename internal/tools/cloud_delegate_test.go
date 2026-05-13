@@ -13,8 +13,8 @@ func TestCloudDelegateInfo(t *testing.T) {
 	if info.Name != "cloud_delegate" {
 		t.Errorf("expected name cloud_delegate, got %s", info.Name)
 	}
-	if len(info.Required) != 1 || info.Required[0] != "task" {
-		t.Errorf("expected required=[task], got %v", info.Required)
+	if !containsString(info.Required, "task") || !containsString(info.Required, "description") {
+		t.Errorf("expected Required to contain 'task' and 'description', got %v", info.Required)
 	}
 	// Schema must expose the terminal parameter
 	props, ok := info.Parameters["properties"].(map[string]any)

@@ -12,8 +12,8 @@ func TestAppleScript_Info(t *testing.T) {
 	if info.Name != "applescript" {
 		t.Errorf("expected name 'applescript', got %q", info.Name)
 	}
-	if len(info.Required) != 1 || info.Required[0] != "script" {
-		t.Errorf("expected required [script], got %v", info.Required)
+	if !containsString(info.Required, "script") || !containsString(info.Required, "description") {
+		t.Errorf("expected Required to contain 'script' and 'description', got %v", info.Required)
 	}
 }
 

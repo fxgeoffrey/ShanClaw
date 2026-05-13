@@ -38,12 +38,13 @@ func NewEditImageTool(client imageEdit) *EditImageTool {
 }
 
 type editImageArgs struct {
-	Prompt     string   `json:"prompt"`
-	ImageURLs  []string `json:"image_urls"`
-	Size       string   `json:"size,omitempty"`
-	Quality    string   `json:"quality,omitempty"`
-	N          int      `json:"n,omitempty"`
-	Background string   `json:"background,omitempty"`
+	Prompt      string   `json:"prompt"`
+	ImageURLs   []string `json:"image_urls"`
+	Description string   `json:"description,omitempty"`
+	Size        string   `json:"size,omitempty"`
+	Quality     string   `json:"quality,omitempty"`
+	N           int      `json:"n,omitempty"`
+	Background  string   `json:"background,omitempty"`
 }
 
 func (t *EditImageTool) Info() agent.ToolInfo {
@@ -76,7 +77,8 @@ func (t *EditImageTool) Info() agent.ToolInfo {
 			"can take 200–350s. Pick the lowest quality that satisfies the request.\n\n" +
 			"Cost: each call consumes Shannon Cloud image-generation credits, and " +
 			"each source image charges ~85 image-tokens on top of the prompt. Use " +
-			"n=1 unless the user explicitly asks for multiple variants.",
+			"n=1 unless the user explicitly asks for multiple variants." +
+			agent.DescriptionGuidance,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -86,6 +88,7 @@ func (t *EditImageTool) Info() agent.ToolInfo {
 					"maxLength":   imagePromptMaxLen,
 					"description": "Natural-language modification instruction. Be specific about what to change and where (\"change the cat's color to orange\", \"add a moon in the upper-left corner\").",
 				},
+				"description": agent.DescriptionFieldSpec,
 				"image_urls": map[string]any{
 					"type":        "array",
 					"minItems":    editImageURLsMin,
@@ -116,7 +119,7 @@ func (t *EditImageTool) Info() agent.ToolInfo {
 				},
 			},
 		},
-		Required: []string{"prompt", "image_urls"},
+		Required: []string{"prompt", "image_urls", "description"},
 	}
 }
 

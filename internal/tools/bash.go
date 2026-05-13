@@ -15,6 +15,13 @@ import (
 	"github.com/Kocoro-lab/ShanClaw/internal/skills"
 )
 
+// Bash has a bespoke `description` schema (more detailed than the shared
+// agent.DescriptionFieldSpec used by other tools) because it landed first
+// (PR 4). The wider rollout to file_read / file_write / http / browser /
+// process / etc. completed in PR 7 via the shared helper; bash kept its
+// original wording to avoid invalidating the prompt cache. Future schema
+// cleanup can converge bash onto the shared spec if a cache-rebuild cost
+// is acceptable.
 type BashTool struct {
 	approvalFn        func(command string) bool
 	ExtraSafeCommands []string
@@ -32,7 +39,13 @@ type BashTool struct {
 }
 
 type bashArgs struct {
-	Command        string `json:"command"`
+	Command string `json:"command"`
+	// Description is a short natural-language summary of what the command does,
+	// written in the end-user's UI language. Surfaced in approval prompts, tool
+	// status cards, and session history. Required in the schema so non-technical
+	// users can read every bash invocation; the daemon does not block execution
+	// when it's missing (older sessions / safety net), only the UI degrades.
+	Description    string `json:"description,omitempty"`
 	Timeout        int    `json:"timeout,omitempty"`
 	MaxOutputChars int    `json:"max_output_chars,omitempty"`
 }
@@ -97,6 +110,7 @@ macOS Spotlight (` + "`" + `mdfind` + "`" + `): only fall back to it when glob/g
 While bash can do similar things, the dedicated tools have better permission handling, output truncation, and result shaping.
 
 Instructions:
+- ALWAYS write a clear, short, non-technical "description" (5-15 words) for every bash call. The end user — often non-technical — sees this description, not the command, on approval prompts and history cards. Write in the user's UI language (中文 for Chinese conversations, English for English, etc.). Describe the user-facing GOAL, not the shell syntax. Example: '查找最大的 10 个文件', not 'Run find piped to du and sort'.
 - Always quote file paths that contain spaces with double quotes (e.g., cd "path with spaces/file").
 - Prefer absolute paths over cd to keep the working directory stable.
 - For multi-line Python with embedded quotes or regex, write a script via file_write then run python3 /path/to/script.py — heredoc+quote nesting is a frequent source of shell syntax errors.
@@ -117,12 +131,20 @@ Instructions:
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"command":          map[string]any{"type": "string", "description": "Shell command to execute"},
+				"command": map[string]any{"type": "string", "description": "Shell command to execute"},
+				"description": map[string]any{
+					"type": "string",
+					"description": "REQUIRED. A short (5-15 word) natural-language summary of WHAT this command does, written for a non-technical end user. " +
+						"Use the user's UI language (中文 if the user wrote in Chinese, English if they wrote in English, etc.). " +
+						"Describe the user-facing INTENT, not the shell syntax. The user will see this — not the command — when approving the call. " +
+						"Examples: '查找最大的 10 个文件', 'Commit current changes', '检查 git 状态', 'Install npm dependencies'. " +
+						"Do NOT just rephrase the command (e.g. avoid 'Run find with du and sort'); describe the goal in plain language.",
+				},
 				"timeout":          map[string]any{"type": "integer", "description": "Timeout in seconds (default: 120)"},
 				"max_output_chars": map[string]any{"type": "integer", "description": "Maximum output characters to return. Use this for noisy commands."},
 			},
 		},
-		Required: []string{"command"},
+		Required: []string{"command", "description"},
 	}
 }
 

@@ -133,6 +133,7 @@ func NewPublishToWebTool(client uploader, extAllowlist map[string]bool) *Publish
 type publishArgs struct {
 	Path        string `json:"path"`
 	Purpose     string `json:"purpose"`
+	Description string `json:"description,omitempty"`
 	Filename    string `json:"filename,omitempty"`
 	ContentType string `json:"content_type,omitempty"`
 }
@@ -157,7 +158,8 @@ func (t *PublishToWebTool) Info() agent.ToolInfo {
 			"Constraints:\n" +
 			"  - 50 MiB hard limit per file\n" +
 			"  - Allowed extensions: html, md, txt, pdf, png, jpg, jpeg, gif, webp, svg, csv, json, mp4, mp3, wav, webm\n" +
-			"  - Each upload returns a fresh URL — no idempotent re-upload",
+			"  - Each upload returns a fresh URL — no idempotent re-upload" +
+			agent.DescriptionGuidance,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -171,6 +173,7 @@ func (t *PublishToWebTool) Info() agent.ToolInfo {
 					"maxLength":   500,
 					"description": "One sentence: why does this file need to be PUBLIC? Shown to the user during approval. Be specific. Vague answers ('share', 'send it', 'test') will be rejected.",
 				},
+				"description": agent.DescriptionFieldSpec,
 				"filename": map[string]any{
 					"type":        "string",
 					"description": "Optional. Override the filename embedded in the public URL. Defaults to basename(path).",
@@ -181,7 +184,7 @@ func (t *PublishToWebTool) Info() agent.ToolInfo {
 				},
 			},
 		},
-		Required: []string{"path", "purpose"},
+		Required: []string{"path", "purpose", "description"},
 	}
 }
 

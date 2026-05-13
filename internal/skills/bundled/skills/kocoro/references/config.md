@@ -49,6 +49,9 @@ Global settings control how Shannon behaves across all agents — which AI model
 | `agent.time_based_compact.keep_recent` | Most-recent compactable tool_results to retain verbatim; older ones are replaced with a placeholder marker (default: 5, floor: 1) | No |
 | `tools.bash_timeout` | Max seconds a bash command can run (default: 120) | No |
 | `daemon.auto_approve` | Skip approval prompts for all tool calls | No |
+| `permissions.allowed_commands` | Bash command-string allowlist (literal/glob + token-prefix family). See `permissions.md`. | No |
+| `permissions.denied_commands` | Bash blocklist | YES |
+| `permissions.always_allow_tools` | **Tool-level approval bypass** (global scope, applies to every agent). List of tool names whose approval prompt is skipped — e.g. `[bash, file_write, http]`. Companion per-agent field lives at `~/.shannon/agents/<name>/config.yaml permissions.always_allow_tools`; the runtime unions both. High-risk tools (`publish_to_web`, `generate_image`, `edit_image`) are refused; high-risk bash command prefixes (`pip install`, `rm -rf`, `python -c`, etc.) still prompt every call regardless. Endpoints: `POST/DELETE /permissions/always-allow` (global), `POST/DELETE /agents/{name}/permissions/always-allow` (per-agent). | No |
 | `cloud.publish_allowed_extensions` | Extra file extensions allowed for `publish_to_web` (e.g. `[".go", ".sql"]`). Additive on top of the built-in default; denylist is **not** user-configurable. | No |
 | `mcp_servers` | External service integrations (see mcp reference) | No |
 

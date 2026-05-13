@@ -26,12 +26,13 @@ type AgentAPI struct {
 
 // AgentConfigAPI is the JSON representation of agent config.
 type AgentConfigAPI struct {
-	CWD        string             `json:"cwd,omitempty"`
-	Tools      *AgentToolsFilter  `json:"tools,omitempty"`
-	MCPServers *AgentMCPConfigAPI `json:"mcp_servers,omitempty"`
-	Agent      *AgentModelConfig  `json:"agent,omitempty"`
-	Watch      []WatchEntry       `json:"watch,omitempty"`
-	Heartbeat  *HeartbeatConfig   `json:"heartbeat,omitempty"`
+	CWD         string                  `json:"cwd,omitempty"`
+	Tools       *AgentToolsFilter       `json:"tools,omitempty"`
+	MCPServers  *AgentMCPConfigAPI      `json:"mcp_servers,omitempty"`
+	Agent       *AgentModelConfig       `json:"agent,omitempty"`
+	Permissions *AgentPermissionsConfig `json:"permissions,omitempty"`
+	Watch       []WatchEntry            `json:"watch,omitempty"`
+	Heartbeat   *HeartbeatConfig        `json:"heartbeat,omitempty"`
 }
 
 // AgentMCPConfigAPI is the JSON-friendly MCP config.
@@ -62,6 +63,12 @@ func (a *Agent) ToAPI() *AgentAPI {
 				Servers: a.Config.MCPServers.Servers,
 			}
 		}
+		// Deep-copy Permissions so mutations on the returned API value (e.g. an
+		// HTTP handler appending to AlwaysAllowTools before re-serializing)
+		// cannot leak into the in-memory Agent. Watch/Heartbeat/Tools/MCPServers
+		// remain shared pointers — that is a pre-existing pattern across this
+		// file and addressing it belongs in a separate cleanup PR.
+		api.Config.Permissions = a.Config.Permissions.Clone()
 		api.Config.Watch = a.Config.Watch
 		api.Config.Heartbeat = a.Config.Heartbeat
 	}
@@ -97,12 +104,39 @@ func WriteAgentMemory(agentsDir, name, memory string) error {
 }
 
 // WriteAgentConfig writes config.yaml from the API shape.
+//
+// Serializes on <agentDir>/.config.lock to prevent lost-update races against
+// AppendAlwaysAllowTool / RemoveAlwaysAllowTool (which read-modify-write the
+// same file under the same lock).
 func WriteAgentConfig(agentsDir, name string, cfg *AgentConfigAPI) error {
 	dir := filepath.Join(agentsDir, name)
 	path := filepath.Join(dir, "config.yaml")
 	if cfg == nil {
-		return os.Remove(path)
+		// Mirror the original semantics: delete is unconditional. We still
+		// take the lock so a concurrent Append doesn't write back over the
+		// delete.
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return err
+		}
+		unlock, err := lockAgentConfig(dir)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
 	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	unlock, err := lockAgentConfig(dir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	m := make(map[string]interface{})
 	if cfg.CWD != "" {
 		m["cwd"] = cfg.CWD
@@ -121,6 +155,9 @@ func WriteAgentConfig(agentsDir, name string, cfg *AgentConfigAPI) error {
 		}
 		m["mcp_servers"] = servers
 	}
+	if cfg.Permissions != nil && !cfg.Permissions.IsEmpty() {
+		m["permissions"] = cfg.Permissions
+	}
 	if len(cfg.Watch) > 0 {
 		m["watch"] = cfg.Watch
 	}
@@ -130,9 +167,6 @@ func WriteAgentConfig(agentsDir, name string, cfg *AgentConfigAPI) error {
 	data, err := yaml.Marshal(m)
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
-	}
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return err
 	}
 	return AtomicWrite(path, data)
 }

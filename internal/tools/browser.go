@@ -41,6 +41,7 @@ type BrowserTool struct {
 
 type browserArgs struct {
 	Action       string `json:"action"`
+	Description  string `json:"description,omitempty"`
 	URL          string `json:"url,omitempty"`
 	Selector     string `json:"selector,omitempty"`
 	Ref          string `json:"ref,omitempty"`
@@ -68,12 +69,14 @@ func (t *BrowserTool) Info() agent.ToolInfo {
 			"Only skip this for pages requiring user login/authentication — use GUI tools for those. " +
 			"Actions: navigate, click, type, scroll, screenshot, read_page, execute_js, wait, close. " +
 			"Use 'read_page' (textMode 'raw' for full DOM) to inspect page structure, or 'execute_js' to query the DOM programmatically and return JSON. " +
-			"Note: snapshot/find (accessibility-tree actions) are not advertised — they only work with the legacy pinchtab backend; use Playwright MCP for equivalent functionality when available.",
+			"Note: snapshot/find (accessibility-tree actions) are not advertised — they only work with the legacy pinchtab backend; use Playwright MCP for equivalent functionality when available." +
+			agent.DescriptionGuidance,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"action":   map[string]any{"type": "string", "description": "Action: navigate, click, type, scroll, screenshot, read_page, execute_js, wait, close"},
-				"url":      map[string]any{"type": "string", "description": "URL to navigate to (for navigate action)"},
+				"action":      map[string]any{"type": "string", "description": "Action: navigate, click, type, scroll, screenshot, read_page, execute_js, wait, close"},
+				"description": agent.DescriptionFieldSpec,
+				"url":         map[string]any{"type": "string", "description": "URL to navigate to (for navigate action)"},
 				"selector": map[string]any{"type": "string", "description": "CSS selector (for click, type, read_page, scroll, wait)"},
 				"ref":      map[string]any{"type": "string", "description": "Element ref, e.g. 'e5' (for click, type, scroll — alternative to selector). Only meaningful when another tool has produced refs for the current page."},
 				"text":     map[string]any{"type": "string", "description": "Text to type (for type action)"},
@@ -90,7 +93,7 @@ func (t *BrowserTool) Info() agent.ToolInfo {
 				"timeout":      map[string]any{"type": "integer", "description": "Timeout in seconds (default: 30)"},
 			},
 		},
-		Required: []string{"action"},
+		Required: []string{"action", "description"},
 	}
 }
 

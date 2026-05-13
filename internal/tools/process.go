@@ -12,24 +12,27 @@ import (
 type ProcessTool struct{}
 
 type processArgs struct {
-	Action string `json:"action"`
-	PID    int    `json:"pid,omitempty"`
-	Port   int    `json:"port,omitempty"`
+	Action      string `json:"action"`
+	Description string `json:"description,omitempty"`
+	PID         int    `json:"pid,omitempty"`
+	Port        int    `json:"port,omitempty"`
 }
 
 func (t *ProcessTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
-		Name:        "process",
-		Description: "Manage processes and ports. Actions: 'list' (ps aux), 'ports' (listening ports), 'kill' (kill a PID).",
+		Name: "process",
+		Description: "Manage processes and ports. Actions: 'list' (ps aux), 'ports' (listening ports), 'kill' (kill a PID)." +
+			agent.DescriptionGuidance,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"action": map[string]any{"type": "string", "description": "Action: 'list', 'ports', or 'kill'"},
-				"pid":    map[string]any{"type": "integer", "description": "Process ID (required for kill)"},
-				"port":   map[string]any{"type": "integer", "description": "Filter by port number (optional for ports)"},
+				"action":      map[string]any{"type": "string", "description": "Action: 'list', 'ports', or 'kill'"},
+				"description": agent.DescriptionFieldSpec,
+				"pid":         map[string]any{"type": "integer", "description": "Process ID (required for kill)"},
+				"port":        map[string]any{"type": "integer", "description": "Filter by port number (optional for ports)"},
 			},
 		},
-		Required: []string{"action"},
+		Required: []string{"action", "description"},
 	}
 }
 

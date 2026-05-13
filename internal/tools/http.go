@@ -20,6 +20,7 @@ type HTTPTool struct{}
 
 type httpArgs struct {
 	URL          string            `json:"url"`
+	Description  string            `json:"description,omitempty"`
 	Method       string            `json:"method,omitempty"`
 	Headers      map[string]string `json:"headers,omitempty"`
 	Body         string            `json:"body,omitempty"`
@@ -29,12 +30,14 @@ type httpArgs struct {
 
 func (t *HTTPTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
-		Name:        "http",
-		Description: "Make an HTTP request. Returns status code, response headers, and body (truncated to 10KB). Use body_from_file to send a file's raw bytes as the request body without inlining/escaping (good for PUT/POST of large structured payloads).",
+		Name: "http",
+		Description: "Make an HTTP request. Returns status code, response headers, and body (truncated to 10KB). Use body_from_file to send a file's raw bytes as the request body without inlining/escaping (good for PUT/POST of large structured payloads)." +
+			agent.DescriptionGuidance,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"url":            map[string]any{"type": "string", "description": "Request URL"},
+				"description":    agent.DescriptionFieldSpec,
 				"method":         map[string]any{"type": "string", "description": "HTTP method (default: GET)"},
 				"headers":        map[string]any{"type": "object", "description": "Request headers as key-value pairs"},
 				"body":           map[string]any{"type": "string", "description": "Request body (mutually exclusive with body_from_file)"},
@@ -42,7 +45,7 @@ func (t *HTTPTool) Info() agent.ToolInfo {
 				"timeout":        map[string]any{"type": "integer", "description": "Timeout in seconds (default: 30)"},
 			},
 		},
-		Required: []string{"url"},
+		Required: []string{"url", "description"},
 	}
 }
 

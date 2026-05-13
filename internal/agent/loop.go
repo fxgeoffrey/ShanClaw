@@ -663,6 +663,13 @@ type AgentLoop struct {
 	stickyContext         string             // session-scoped facts injected verbatim into system prompt; never truncated
 	outputFormat          string             // "markdown" (default) or "plain" — controls formatting guidance in volatile context
 	userFilePaths         []UserAttachedPath // paths from user-attached file_ref blocks — auto-approved for tool access
+	// alwaysAllowTools is the per-agent persisted set loaded from the agent's
+	// permissions.always_allow_tools config. Sourced from
+	// internal/agents/loader.go AgentPermissionsConfig and injected by the
+	// runner / TUI / one-shot CLI when the loop is bound to a named agent.
+	// checkPermissionAndApproval honors it as an approval bypass — except for
+	// tools listed in DisallowsAutoApproval, which must always prompt.
+	alwaysAllowTools map[string]bool
 	workingSet            *WorkingSet        // session-scoped deferred schema cache injected by the caller
 	sessionID             string             // session ID for audit log correlation
 	sessionCWD            string             // session-scoped working directory; set by runner/TUI before Run()
@@ -1138,6 +1145,10 @@ func (a *AgentLoop) RunMessageTimestamps() []time.Time {
 // the agent's scoped MCP servers. If reg is nil, the existing registry is kept.
 // memoryDir is the directory containing MEMORY.md — re-read from disk each Run()
 // to pick up writes from the agent or write-before-compact.
+//
+// Per-agent fields that are agent-scoped (not loop-scoped) are reset here so a
+// reused loop never leaks state from the previous agent. Callers re-inject the
+// new agent's values via the corresponding setters (SetAlwaysAllowTools, etc.).
 func (a *AgentLoop) SwitchAgent(basePrompt string, memoryDir string, reg *ToolRegistry, mcpCtx string, agentSkills []*skills.Skill) {
 	a.agentBasePrompt = basePrompt
 	a.memoryDir = memoryDir
@@ -1146,6 +1157,11 @@ func (a *AgentLoop) SwitchAgent(basePrompt string, memoryDir string, reg *ToolRe
 	}
 	a.mcpContext = mcpCtx
 	a.agentSkills = agentSkills
+	// Defensive reset: agent-scoped approval bypasses must not survive an
+	// agent switch. The runner / TUI / CLI re-inject by reading the new
+	// agent's config; if a future caller forgets, we fail closed (prompt
+	// for every tool) rather than leaking the previous agent's bypass set.
+	a.alwaysAllowTools = nil
 }
 
 // SetSkills updates the agent's skill catalog without touching other fields.
@@ -1193,6 +1209,28 @@ type UserAttachedPath struct {
 // (exact match for files, subtree match for directories).
 func (a *AgentLoop) SetUserFilePaths(paths []UserAttachedPath) {
 	a.userFilePaths = paths
+}
+
+// SetAlwaysAllowTools registers the agent's persisted always-allow tool set.
+// Tool calls naming one of these tools skip the approval prompt entirely
+// (except for tools in DisallowsAutoApproval, which always prompt regardless).
+// Pass nil or empty to clear; empty strings in the list are dropped.
+func (a *AgentLoop) SetAlwaysAllowTools(tools []string) {
+	if len(tools) == 0 {
+		a.alwaysAllowTools = nil
+		return
+	}
+	m := make(map[string]bool, len(tools))
+	for _, t := range tools {
+		if t != "" {
+			m[t] = true
+		}
+	}
+	if len(m) == 0 {
+		a.alwaysAllowTools = nil
+		return
+	}
+	a.alwaysAllowTools = m
 }
 
 // SpillCleanupFunc returns a closure that removes disk-spilled tool result
@@ -3897,6 +3935,35 @@ func (a *AgentLoop) checkPermissionAndApproval(ctx context.Context, toolName, ar
 					return "allow", true
 				}
 			}
+		}
+	}
+
+	// Per-agent persisted always-allow. Sits between deny/userFilePaths
+	// (security checks that must take precedence) and the RequiresApproval
+	// branch. Defense-in-depth: DisallowsAutoApproval tools are never honored
+	// even if a hand-edited config.yaml manages to slip them in — the
+	// persistence helper (agents.AppendAlwaysAllowTool) rejects them too, but
+	// the runtime gate is the last line of defense.
+	if a.alwaysAllowTools[toolName] && !DisallowsAutoApproval(toolName) {
+		// Bash-specific defense: tool-level always-allow MUST NOT bypass the
+		// always-ask gate. Agent-author granted "trust this agent for bash
+		// generally", but `pip install`, `rm -rf`, `git push --force`,
+		// `python -c`, `npx`, etc. encode "the user must intentionally
+		// approve THIS invocation" — a single up-front trust click cannot
+		// silently authorize future arbitrary-code-execution gateways or
+		// destructive operations. CheckToolCall already returned "ask" for
+		// these cases (line 3871-3880 fall-through); we must not undo that
+		// decision here.
+		if toolName == "bash" {
+			cmd := permissions.ExtractField(argsStr, "command")
+			if permissions.IsAlwaysAskPrefix(cmd) {
+				// Fall through to RequiresApproval / handler — the user
+				// gets prompted per-call for high-risk bash commands.
+			} else {
+				return "allow", true
+			}
+		} else {
+			return "allow", true
 		}
 	}
 

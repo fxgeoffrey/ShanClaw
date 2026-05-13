@@ -32,6 +32,7 @@ internal/
     client.go          # WebSocket client with reconnect, bounded concurrency
     router.go          # SessionCache, route locking
     approval.go        # interactive tool approval over WS
+    alwaysallow.go     # single SSE+WS entry point for "Always Allow" decisions: bash (tool-level per-agent for named agents, tool-level global for default agent, never-persisted for always-ask gates) and non-bash (tool-level per-agent)
     types.go           # daemon request/response types, disconnect, approval messages
     events.go          # EventBus ring buffer for daemon/SSE subscribers
     bus_handler.go     # EventHandler -> EventBus bridge
@@ -342,7 +343,7 @@ E2E tests in `test/e2e/` split into offline (no API) and live (`SHANNON_E2E_LIVE
 - File ops: `file_read`, `file_write`, `file_edit`, `glob`, `grep`, `directory_list`
 - Archive: `archive_inspect` (read-only, no approval), `archive_extract` (requires approval) — supports `.zip / .tar / .tar.gz / .tgz`; atomic staging-dir + rename; rejects encrypted, symlink, absolute-path, setuid, device entries; caps 50 MB/entry, 200 MB total, 500 entries
 - Documents: `pdf_to_text`, `docx_to_text`, `xlsx_to_text`, `pptx_to_text` — read-only convenience extractors. Each prefers an external tool (poppler `pdftotext`, `pandoc`, `xlsx2csv`) and falls back to unzip + raw-XML strip when that tool is missing; PDF has no fallback and suggests uploading the file for cloud's native document block. Fixed-argv exec (no shell), 60s timeout per call, output capped at 100K runes with a `[Truncated: ...]` marker. See `internal/tools/doc_extract.go`.
-- Shell/system: `bash`, `system_info`, `process`, `http`, `think`
+- Shell/system: `bash`, `system_info`, `process`, `http`, `think`. All approval-required tools (bash / file_read / file_write / file_edit / glob / grep / directory_list / http / browser / applescript / process / clipboard / computer / ghostty / notify / cloud_delegate / generate_image / edit_image / archive_extract / schedule_*) declare a required `description` field — a 5-15 word natural-language summary surfaced on approval cards instead of the raw args. Shared spec: `internal/agent/approval_description.go`; cross-tool enforcement test: `internal/tools/description_field_test.go`.
 - macOS GUI: `accessibility`, `applescript`, `screenshot`, `computer`, `clipboard`, `notify`, `browser`, `wait_for`, `ghostty`
 - Schedule: `schedule_create`, `schedule_list`, `schedule_update`, `schedule_remove`
 - Memory: `memory_append`

@@ -22,8 +22,7 @@ const (
 	// Base64 inflates by 4/3, so 3.75 MB raw → 5 MB encoded. We leave 4 KB of
 	// headroom under client.MaxInlineImageBase64Bytes because Anthropic's
 	// boundary check is `> 5242880 bytes` and the exact-equal case has been
-	// observed to fail on whitespace/padding edge cases. Source: claude-code
-	// apiLimits.ts plus internal margin.
+	// observed to fail on whitespace/padding edge cases.
 	TargetRawImageBytes = (5*1024*1024 - 4096) * 3 / 4 // 3,929,088 → base64 ≈ 5,238,784
 
 	// CompressionMaxDimension caps the longest edge after first-pass resize.

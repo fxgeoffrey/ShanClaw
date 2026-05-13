@@ -198,7 +198,7 @@ When introducing a `const max[A-Z]\w+ = <small_int>` (count caps, retention wind
 3. **The path to override** (config key name, env var, or "not user-configurable — file an issue").
 
 This convention exists because of postmortems on `maxRecentImages = 5` (a 200K-context-era default that silently truncated "read all 14 screenshots" tasks on 1M-context families until #135 surfaced it) and `maxPDFPages = 2` (a hidden cap on PDF page count). Lessons:
-- CC-derived constants sized for 200K context often need bumping under 1M-context defaults — re-check whenever the model family upgrades.
+- Constants sized for 200K-context-era defaults often need bumping under 1M-context families — re-check whenever the model family upgrades.
 - "Conservative because we couldn't test the upper bound" is a smell — at minimum, run a bench at 3-5× the current value before adopting it as the default.
 - Hidden caps without a config override are the worst — they bite power users who can't even discover the dial. Prefer `viper.SetDefault(...)` over `const` when in doubt.
 

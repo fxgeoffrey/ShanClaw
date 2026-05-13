@@ -25,12 +25,12 @@ var imageReadExtensions = map[string]bool{
 // maxImageReadSize is the maximum file size for image reads (20 MB).
 const maxImageReadSize = 20 * 1024 * 1024
 
-// maxPDFPages is the number of pages rendered per file_read call. Matches
-// Claude Code's PDF_MAX_PAGES_PER_READ (src/constants/apiLimits.ts = 20).
-// Was 2 originally — too low for "review this 20-page contract" use cases
-// (model would silently see only pages 0-1). Raised to 10, then to 20 for
-// CC parity. Callers can pass `pages` ("1-20", "3", "10-20") or `limit` to
-// cap further, and `offset`/`pages` to start mid-document.
+// maxPDFPages is the number of pages rendered per file_read call. Was 2
+// originally — too low for "review this 20-page contract" use cases (model
+// would silently see only pages 0-1). Raised to 20, matching the industry-
+// standard cap used by other vision-capable agent tools. Callers can pass
+// `pages` ("1-20", "3", "10-20") or `limit` to cap further, and `offset` or
+// `pages` to start mid-document.
 const maxPDFPages = 20
 
 // pdfPageMaxDim is the max pixel dimension for rendered PDF pages.
@@ -40,8 +40,7 @@ const pdfPageMaxDim = 1024
 // offset+limit slices) whose estimated token count exceeds this return an
 // error pointing the agent at offset/limit instead of letting the loop's
 // 50K spill fallback drop a 2K preview into context. ~100B error vs ~2K
-// spill preview ≈ 95% per-call savings on oversized reads. Mirrors CC's
-// DEFAULT_MAX_OUTPUT_TOKENS in src/tools/FileReadTool/limits.ts:18.
+// spill preview ≈ 95% per-call savings on oversized reads.
 const fileReadMaxTokens = 25000
 
 const fileReadNoLimitMaxBytes = 256 * 1024
@@ -416,14 +415,14 @@ for i in start..<(start + count) {
 	}, nil
 }
 
-// parsePDFPageRange parses CC-style PDF page-range syntax used by the `pages`
+// parsePDFPageRange parses PDF page-range syntax used by the `pages`
 // parameter. Accepts:
 //
 //	"3"     → single page 3 → returns (start=2, count=1)
 //	"1-5"   → pages 1..5    → returns (start=0, count=5)
 //	"10-20" → pages 10..20  → returns (start=9, count=11)
 //
-// Pages are 1-indexed in the parameter (matches CC + claude.ai user expectation).
+// Pages are 1-indexed in the parameter (natural user expectation).
 // Returns an error if format is invalid OR count exceeds maxPDFPages.
 // Returns (start, count) where start is 0-indexed for the Swift renderer.
 func parsePDFPageRange(pages string) (start0Indexed int, count int, err error) {

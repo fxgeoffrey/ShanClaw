@@ -2040,6 +2040,17 @@ func captureTurnBaseline(sess *session.Session, source string, preLoopUserAppend
 // applyTurnMessages rebuilds sess.Messages/MessageMeta from baseline +
 // loop.RunMessages(). Idempotent — safe to call any number of times with
 // changing loop state (compaction shrinks etc.).
+//
+// Baseline messages (anything saved by prior turns) are NOT re-sanitized here —
+// only the new portion from the current turn passes through
+// loop.SanitizedRunMessages(). This is intentional: even if Layer 1 (source-
+// time compression) fails open and an oversize image lands in a baseline
+// session message, the wire-time sanitizer (filterOversizeImages inside
+// messagesForLLM) catches it on every API call, so the persisted-but-oversize
+// state has no API-failure impact. Re-sanitizing the baseline on every save
+// would double the work for no observable benefit. Trade-off: session.json
+// on disk may carry residual oversize bytes after a fail-open event until
+// the message ages out of context via the time-based image-strip pass.
 func applyTurnMessages(sess *session.Session, loop *agent.AgentLoop, b turnBaseline) {
 	if len(sess.Messages) > b.msgCount {
 		sess.Messages = sess.Messages[:b.msgCount]

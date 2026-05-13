@@ -327,12 +327,14 @@ func rotateRawDumpDir(dir string, max int) {
 // `dir:"req"` line on the same session is the standard correlation.
 //
 // Action vocabulary (free-form, but use these for analyzability):
-//   - "tier1"     — stripToMetadata (Anthropic native blocks)
-//   - "tier1_xml" — XML-format truncation
-//   - "tier2"     — head+tail truncation or micro-compact summary
-//   - "tbcompact" — time-based microcompact (timebasedcompact.go)
-//   - "tbclear"   — time-based result clear (replaces with sentinel)
-//   - "budget"    — query-time tool_result budget replacement
+//   - "tier1"               — stripToMetadata (Anthropic native blocks)
+//   - "tier1_xml"           — XML-format truncation
+//   - "tier2"               — head+tail truncation or micro-compact summary
+//   - "tbcompact"           — time-based microcompact (timebasedcompact.go)
+//   - "tbclear"             — time-based result clear (replaces with sentinel)
+//   - "budget"              — query-time tool_result budget replacement
+//   - "img_oversize_strip"  — per-image size cap (filterOversizeImages pass 1)
+//   - "img_aggregate_strip" — aggregate body cap (enforceAggregateImageCap)
 //
 // Silent when SHANNON_CACHE_DEBUG != "1". Skips no-op rewrites where bytes
 // are unchanged (idempotent re-visit on already-compacted blocks).

@@ -7,8 +7,16 @@ import (
 )
 
 // MaxAggregateImageBase64Bytes caps the SUM of all image base64 payloads in a
-// single request. Anthropic's hard request-body limit is 32 MB; we keep 25 MB
-// to leave headroom for system prompt + text + tool schemas.
+// single request. Anthropic's hard request-body limit is 32 MB; this leaves
+// ~7 MB headroom for system prompt, text, and tool schemas.
+//
+// Workload: a user reading 20+ screenshots in parallel (vision-heavy batch)
+// or accumulating large images across many turns within one session.
+// Symptom when binds: oldest images replaced with a "[image removed: aggregate
+// base64 across this request exceeded N bytes]" text placeholder, paired with
+// an "img_aggregate_strip" cache-compact event in cache-debug.log.
+// Override: not user-configurable — file an issue if your workload routinely
+// exceeds 25 MB of compressed inline images per request.
 const MaxAggregateImageBase64Bytes = 25 * 1024 * 1024
 
 // filterOversizeImages enforces two caps:

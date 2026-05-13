@@ -20,9 +20,12 @@ import (
 )
 
 const (
-	// defaultGrepMaxResults: bumped 250 → 500 to align with raised viper default
-	// (see internal/config/config.go). "Find all TODOs in this repo" routinely
-	// returns 400-800 hits; 250 was silently truncating.
+	// defaultGrepMaxResults is the single source of truth for the global cap on
+	// grep output lines. Bumped 250 → 500 because "find all TODOs in this repo"
+	// routinely returns 400-800 hits and 250 was silently truncating. Callers
+	// can override per-invocation via the `max_results` tool argument; there is
+	// no viper key (the previous tools.grep_max_results default was never read
+	// by this tool and was removed for clarity).
 	defaultGrepMaxResults = 500
 	grepPerFileMaxCount   = 50
 	grepTimeout           = 30 * time.Second

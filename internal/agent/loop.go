@@ -1853,7 +1853,7 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	// iterations triggers force-stop. Replaces the previous flat counter that
 	// never reset, which turned 3 widely-spaced harmless nudges in a long
 	// workflow (e.g. real Teams session at iter 9/15/16) into a premature
-	// force-stop. Window of 5 means a productive iteration ages out the
+	// force-stop. Window of 10 means a productive iteration ages out the
 	// oldest nudge, restoring "self-recovery" headroom.
 	const (
 		maxNudges        = 3  // unchanged — still a meaningful runaway-loop signal

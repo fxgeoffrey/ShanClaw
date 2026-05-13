@@ -5089,11 +5089,21 @@ func (a *AgentLoop) LastSentRequest() (client.CompletionRequest, bool) {
 }
 
 // LastLLMUsage returns the usage from the most recent single LLM iteration
-// (not the turn-aggregate). Returns (Usage{}, false) before the first LLM
-// call has completed. Used by the suggestion fork's cache-cold gate: judging
-// "did the LAST main call land in a cold cache" gives the fork an accurate
-// inheritance signal, whereas the turn-aggregate gets dragged colder by
-// early tool iterations that started uncached.
+// (not the turn-aggregate). The ok bool mirrors lastSentValid, which flips
+// true on LLM dispatch (captureSentRequest), NOT on response receipt — so
+// between dispatch and `resp.Usage.Normalized()` writing lastIterUsage,
+// this returns (Usage{}, true) — zero-valued usage with ok=true.
+//
+// The window is not observable in production: the only consumer is
+// fireSuggestionAfterRun which runs after RunAgent completes. If a future
+// caller needs to observe usage mid-iter, add a separate
+// `lastIterUsageValid` bool set at the response-receipt site (loop.go
+// near `lastIterUsage = normalizedUsage`) and gate ok on that bool here.
+//
+// Used by the suggestion fork's cache-cold gate: judging "did the LAST
+// main call land in a cold cache" gives the fork an accurate inheritance
+// signal, whereas the turn-aggregate gets dragged colder by early tool
+// iterations that started uncached.
 func (a *AgentLoop) LastLLMUsage() (client.Usage, bool) {
 	a.lastSentMu.Lock()
 	defer a.lastSentMu.Unlock()

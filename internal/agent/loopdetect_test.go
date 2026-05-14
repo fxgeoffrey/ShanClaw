@@ -1593,3 +1593,100 @@ func TestFamilyNoProgress_NonRepeatableOriginalThresholds(t *testing.T) {
 		t.Fatalf("12 same-topic web_search must still force-stop (v2 threshold), got %v", action)
 	}
 }
+
+// TestLoopDetector_Record_FlagsEmptyThinkInput verifies Record() sets
+// IsEmptyThinkInput on the ToolCallRecord for `think` calls whose args parse
+// to an empty / whitespace-only thought. The flag drives the Check() rule
+// that force-stops after two consecutive empty think calls. See plan
+// 2026-05-14-thinking-blocks-cc-alignment.md Phase 0.2.
+func TestLoopDetector_Record_FlagsEmptyThinkInput(t *testing.T) {
+	cases := []struct {
+		name      string
+		toolName  string
+		argsJSON  string
+		wantEmpty bool
+	}{
+		{"think empty object", "think", `{}`, true},
+		{"think empty thought", "think", `{"thought":""}`, true},
+		{"think whitespace thought", "think", `{"thought":"   "}`, true},
+		{"think tab/newline thought", "think", `{"thought":"\t\n"}`, true},
+		{"think real thought", "think", `{"thought":"plan A then B"}`, false},
+		{"think malformed JSON not flagged", "think", `not json`, false},
+		{"non-think empty args not flagged", "file_read", `{}`, false},
+		{"non-think tool with thought-like arg not flagged", "bash", `{"thought":""}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ld := NewLoopDetector()
+			ld.Record(tc.toolName, tc.argsJSON, false, "", "", false)
+			if len(ld.history) != 1 {
+				t.Fatalf("history len = %d, want 1", len(ld.history))
+			}
+			got := ld.history[0].IsEmptyThinkInput
+			if got != tc.wantEmpty {
+				t.Errorf("IsEmptyThinkInput = %v, want %v (tool=%q args=%q)", got, tc.wantEmpty, tc.toolName, tc.argsJSON)
+			}
+		})
+	}
+}
+
+// TestLoopDetector_EmptyThinkForceStop verifies the Phase 0 rule: two
+// consecutive `think` calls with empty input force-stop immediately. The
+// rule defends against Sonnet 4.6 / Opus 4.7 emitting ritual `think({})`
+// calls after native thinking blocks (saw 4 consecutive in one production
+// hang before the fix). See plan 2026-05-14-thinking-blocks-cc-alignment.md.
+func TestLoopDetector_EmptyThinkForceStop_OneNotEnough(t *testing.T) {
+	ld := NewLoopDetector()
+	ld.Record("think", `{}`, false, "", "", false)
+	action, _ := ld.Check("think")
+	if action == LoopForceStop {
+		t.Errorf("single empty think must not force-stop, got %v", action)
+	}
+}
+
+func TestLoopDetector_EmptyThinkForceStop_TwoConsecutiveFires(t *testing.T) {
+	ld := NewLoopDetector()
+	ld.Record("think", `{}`, false, "", "", false)
+	ld.Record("think", `{"thought":"   "}`, false, "", "", false)
+	action, msg := ld.Check("think")
+	if action != LoopForceStop {
+		t.Fatalf("two consecutive empty think calls must force-stop, got %v (msg=%q)", action, msg)
+	}
+	if msg == "" {
+		t.Error("force-stop should include an explanatory message")
+	}
+}
+
+func TestLoopDetector_EmptyThinkForceStop_InterleavedToolBreaksStreak(t *testing.T) {
+	ld := NewLoopDetector()
+	ld.Record("think", `{}`, false, "", "", false)
+	ld.Record("file_read", `{"path":"/x"}`, false, "", "", false)
+	ld.Record("think", `{}`, false, "", "", false)
+	action, _ := ld.Check("think")
+	if action == LoopForceStop {
+		t.Errorf("non-consecutive empty think must not force-stop (file_read broke streak), got %v", action)
+	}
+}
+
+func TestLoopDetector_EmptyThinkForceStop_NonEmptyBreaksStreak(t *testing.T) {
+	ld := NewLoopDetector()
+	ld.Record("think", `{}`, false, "", "", false)
+	ld.Record("think", `{"thought":"actual reasoning"}`, false, "", "", false)
+	ld.Record("think", `{}`, false, "", "", false)
+	action, _ := ld.Check("think")
+	if action == LoopForceStop {
+		t.Errorf("non-empty think between two empties must reset the streak, got %v", action)
+	}
+}
+
+func TestLoopDetector_EmptyThinkForceStop_NonThinkUnaffected(t *testing.T) {
+	// Two consecutive empty-args calls to a non-think tool must NOT trip
+	// the empty-think rule — only the dup-detector budget applies.
+	ld := NewLoopDetector()
+	ld.Record("file_read", `{}`, false, "", "", false)
+	ld.Record("file_read", `{}`, false, "", "", false)
+	action, _ := ld.Check("file_read")
+	if action == LoopForceStop {
+		t.Errorf("empty-args calls on non-think tools must not trip the empty-think rule, got %v", action)
+	}
+}

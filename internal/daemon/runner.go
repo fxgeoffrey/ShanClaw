@@ -1892,6 +1892,19 @@ func RunSlashWorkflow(ctx context.Context, deps *ServerDeps, req RunAgentRequest
 		route.storeSessionID(sess.ID)
 	}
 
+	// Notify the handler of the resolved session ID. Mirrors the RunAgent
+	// path at runner.go:946-948 — without this, any approval prompt that
+	// surfaces inside the cloud workflow would Mark the ApprovalTracker
+	// with an empty sessionID and be invisible to GET /approvals on
+	// reconnect. Today /research and /swarm rarely trigger user-facing
+	// approvals (most tools auto-route via Gateway), but the asymmetry is
+	// cheap to remove and keeps the contract consistent.
+	if sess != nil {
+		if setter, ok := handler.(interface{ SetSessionID(string) }); ok {
+			setter.SetSessionID(sess.ID)
+		}
+	}
+
 	// Stamp session metadata before persisting — mirrors runner.go:791-803.
 	// This makes the session searchable/displayable by source+channel and gives
 	// it a stable human-readable title.

@@ -215,11 +215,14 @@ type SessionSummary struct {
 	Title     string    `json:"title"`
 	CreatedAt time.Time `json:"created_at"`
 	MsgCount  int       `json:"msg_count"`
-	// Source identifies the originating IM / surface for this session:
-	// "slack", "feishu", "lark", "wecom", "line", "telegram", "webhook",
-	// "kocoro", "tui", "local", "cron", "scheduler", "web". Empty for legacy
-	// sessions written before the field was populated. Frontends use this
-	// to pick a channel icon / filter the sidebar.
+	// Source identifies the originating IM / surface for this session.
+	// Canonical values are the `Channel*` constants in
+	// `internal/daemon/types.go` (slack/line/teams/wechat/wecom/web/feishu/
+	// lark/discord/telegram/schedule/system/webhook) plus "kocoro" (set by
+	// POST /messages when the inbound request omits a source — i.e. the
+	// Desktop / TUI path). Empty for legacy sessions written before the
+	// column existed. Frontends use this to pick a channel icon / filter
+	// the sidebar.
 	Source string `json:"source,omitempty"`
 	// InProgress reports whether the daemon currently owns an in-flight
 	// agent run for this session (mirrors SessionCache.ActiveSessionIDs).

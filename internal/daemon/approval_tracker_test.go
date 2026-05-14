@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 )
@@ -71,7 +72,7 @@ func TestApprovalTracker_ConcurrentMarkClear(t *testing.T) {
 	const iters = 200
 	var wg sync.WaitGroup
 	for s := 0; s < sessions; s++ {
-		id := string(rune('a' + s))
+		id := fmt.Sprintf("sess-%d", s)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

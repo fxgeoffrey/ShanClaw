@@ -80,7 +80,8 @@ func (t *ApprovalTracker) SessionIDs() []string {
 }
 
 // AwaitingSet returns a map[sessionID]struct{} for O(1) membership checks
-// when enriching session listings.
+// when enriching session listings. The returned map is a snapshot copy —
+// safe to retain and iterate; mutating it has no effect on the tracker.
 func (t *ApprovalTracker) AwaitingSet() map[string]struct{} {
 	if t == nil {
 		return nil

@@ -123,10 +123,11 @@ internal/
     mcp_tool.go        # MCPTool adapter
     server.go          # ServerTool adapter (gateway tools)
     publish_to_web.go  # publish_to_web tool (path/extension guards + purpose validation; uses internal/uploads)
+    retract_published_file.go  # list_my_published_files (read-only) + retract_published_file (destructive, requires approval, NOT in DisallowsAutoApproval); uses internal/uploads List/Delete
     generate_image.go  # generate_image tool (text-to-image via Cloud; arg validation + error classification; uses internal/images)
     edit_image.go      # edit_image tool (CDN URL prefix check on image_urls; 1–4 sources; uses internal/images)
   uploads/
-    client.go          # POST /api/v1/uploads multipart streaming client (typed errors, retry/backoff). Reuses GatewayClient.HTTPClient().
+    client.go          # /api/v1/uploads client: POST (Upload, multipart streaming), GET (List, paged), DELETE (Delete by UUID). Typed errors with shared doWithRetry + classifyError(status, body, op); op disambiguates 404 (Upload→ErrEndpointNotFound; Delete→ErrNotFound). Reuses GatewayClient.HTTPClient().
   images/
     client.go          # POST /api/v1/images/{generations,edits} JSON client. `Generate` (text→image) and `Edit` (CDN URLs + prompt→image) share `doWithRetry` + `attempt` + `classifyError`. Typed sentinels, 3-attempt retry on ErrTransient. Disambiguates 502/500 sub-codes plus edits-only 400 invalid_image_url (ErrInvalidImageURL) and 413 source_too_large (ErrSourceTooLarge) so "fix-the-args" failures short-circuit (re-running same args wastes paid quota). Reuses GatewayClient.HTTPClient() (600s timeout meets API spec).
   skills/
@@ -358,6 +359,7 @@ E2E tests in `test/e2e/` split into offline (no API) and live (`SHANNON_E2E_LIVE
 - Session: `session_search` when a session manager is present
 - Cloud: `cloud_delegate` when gateway/cloud access is enabled
 - Cloud: `publish_to_web` when `cloud.enabled` AND `api_key` is configured. Always requires approval; `purpose` is mandatory. Path blocklist + extension allowlist are enforced client-side; details live with the tool and upload client.
+- Cloud: `list_my_published_files` (read-only, no approval) and `retract_published_file` (destructive, requires approval) when `cloud.enabled` AND `api_key` is configured. List wraps `GET /api/v1/uploads`; retract wraps `DELETE /api/v1/uploads/{id}`. retract is intentionally NOT in `DisallowsAutoApproval` (paid/permanent-public denylist) — destroying public content does not warrant the same hard-prompt-every-time stance as publish/generate/edit. Desktop UI calls daemon-local `GET /uploads` and `DELETE /uploads/{id}` for the management panel; these proxy the same cloud endpoints with the configured api_key.
 - Cloud: `generate_image` when `cloud.enabled` AND `api_key` is configured. Always requires approval; returns a permanent public CDN URL and consumes paid quota. Server pins `gpt-image-2`; args are validated client-side; retry/error policy lives with the images client.
 - Cloud: `edit_image` when `cloud.enabled` AND `api_key` is configured. Always requires approval; requires 1–4 `https://static.kocoro.ai/` source URLs and has no mask field. Shares the images client with `generate_image`.
 - Meta: `tool_search` in deferred mode only

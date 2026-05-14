@@ -291,6 +291,323 @@ func TestUploadResponseMissingURL(t *testing.T) {
 	}
 }
 
+// --- List ---
+
+func TestListHappyPath(t *testing.T) {
+	var got struct {
+		method    string
+		path      string
+		query     string
+		hadAPIKey bool
+		accept    string
+	}
+	c, srv := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.method = r.Method
+		got.path = r.URL.Path
+		got.query = r.URL.RawQuery
+		got.hadAPIKey = r.Header.Get("X-API-Key") == "sk_test_key"
+		got.accept = r.Header.Get("Accept")
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{
+			"uploads": [
+				{"id":"6b28b36c-d218-448f-adb5-e256218fb025","url":"https://x/y/a.html","filename":"a.html","content_type":"text/html","size":2688,"created_at":"2026-05-14T07:19:09.781827Z"},
+				{"id":"abcd-1234","url":"https://x/y/b.png","filename":"b.png","content_type":"image/png","size":1024,"created_at":"2026-05-13T11:00:00Z"}
+			],
+			"total_count": 2
+		}`))
+	}))
+	defer srv.Close()
+
+	res, err := c.List(context.Background(), 50, 10)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if got.method != "GET" {
+		t.Errorf("method = %q, want GET", got.method)
+	}
+	if got.path != "/api/v1/uploads" {
+		t.Errorf("path = %q", got.path)
+	}
+	if got.query != "limit=50&offset=10" {
+		t.Errorf("query = %q", got.query)
+	}
+	if !got.hadAPIKey {
+		t.Errorf("X-API-Key header missing")
+	}
+	if got.accept != "application/json" {
+		t.Errorf("Accept header = %q, want application/json", got.accept)
+	}
+	if res.TotalCount != 2 {
+		t.Errorf("total_count = %d, want 2", res.TotalCount)
+	}
+	if len(res.Uploads) != 2 {
+		t.Fatalf("got %d entries, want 2", len(res.Uploads))
+	}
+	if res.Uploads[0].ID != "6b28b36c-d218-448f-adb5-e256218fb025" {
+		t.Errorf("Uploads[0].ID = %q", res.Uploads[0].ID)
+	}
+	if res.Uploads[0].Size != 2688 {
+		t.Errorf("Uploads[0].Size = %d", res.Uploads[0].Size)
+	}
+}
+
+func TestListOmitsZeroPagingParams(t *testing.T) {
+	var gotQuery string
+	c, srv := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"uploads":[],"total_count":0}`))
+	}))
+	defer srv.Close()
+
+	if _, err := c.List(context.Background(), 0, 0); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if gotQuery != "" {
+		t.Errorf("expected empty query when limit/offset == 0, got %q", gotQuery)
+	}
+}
+
+func TestListEmptyUploadsArrayNotNil(t *testing.T) {
+	// Cloud may serialize empty list as `"uploads": null`; clients should
+	// always receive an empty slice so range-loops are safe.
+	c, srv := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"uploads":null,"total_count":0}`))
+	}))
+	defer srv.Close()
+
+	res, err := c.List(context.Background(), 0, 0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if res.Uploads == nil {
+		t.Error("Uploads is nil; expected non-nil empty slice")
+	}
+}
+
+func TestListUnauthorizedNoRetry(t *testing.T) {
+	var calls int32
+	c, srv := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(401)
+		_, _ = w.Write([]byte(`{"error":"Authentication required"}`))
+	}))
+	defer srv.Close()
+
+	_, err := c.List(context.Background(), 20, 0)
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("expected ErrUnauthorized, got %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("expected 1 attempt, got %d", got)
+	}
+}
+
+func TestListTransientExhausted(t *testing.T) {
+	var calls int32
+	c, srv := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(503)
+	}))
+	defer srv.Close()
+
+	_, err := c.List(context.Background(), 20, 0)
+	if !errors.Is(err, ErrTransient) {
+		t.Fatalf("expected ErrTransient, got %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Errorf("expected 3 attempts, got %d", got)
+	}
+}
+
+// --- Delete ---
+
+func TestDeleteHappyPath(t *testing.T) {
+	var got struct {
+		method    string
+		path      string
+		hadAPIKey bool
+		hasBody   bool
+	}
+	c, srv := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.method = r.Method
+		got.path = r.URL.Path
+		got.hadAPIKey = r.Header.Get("X-API-Key") == "sk_test_key"
+		body, _ := io.ReadAll(r.Body)
+		got.hasBody = len(body) > 0
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{
+			"deleted": true,
+			"id": "6b28b36c-d218-448f-adb5-e256218fb025",
+			"cdn_eviction_seconds": 300
+		}`))
+	}))
+	defer srv.Close()
+
+	res, err := c.Delete(context.Background(), "6b28b36c-d218-448f-adb5-e256218fb025")
+	if err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if got.method != "DELETE" {
+		t.Errorf("method = %q, want DELETE", got.method)
+	}
+	if got.path != "/api/v1/uploads/6b28b36c-d218-448f-adb5-e256218fb025" {
+		t.Errorf("path = %q", got.path)
+	}
+	if !got.hadAPIKey {
+		t.Errorf("X-API-Key header missing")
+	}
+	if got.hasBody {
+		t.Errorf("DELETE should not send a request body")
+	}
+	if !res.Deleted {
+		t.Errorf("Deleted = false, want true")
+	}
+	if res.ID != "6b28b36c-d218-448f-adb5-e256218fb025" {
+		t.Errorf("ID = %q", res.ID)
+	}
+	if res.CDNEvictionSeconds != 300 {
+		t.Errorf("CDNEvictionSeconds = %d, want 300", res.CDNEvictionSeconds)
+	}
+}
+
+func TestDeleteEmptyIDClientSide(t *testing.T) {
+	c, srv := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("server should not be hit when id is empty")
+	}))
+	defer srv.Close()
+
+	_, err := c.Delete(context.Background(), "")
+	if !errors.Is(err, ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest for empty id, got %v", err)
+	}
+	_, err = c.Delete(context.Background(), "   ")
+	if !errors.Is(err, ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest for whitespace id, got %v", err)
+	}
+}
+
+func TestDeleteNotFoundNoRetry(t *testing.T) {
+	var calls int32
+	c, srv := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(404)
+		_, _ = w.Write([]byte(`{"error":"not_found","message":"Upload not found"}`))
+	}))
+	defer srv.Close()
+
+	_, err := c.Delete(context.Background(), "nonexistent")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+	if errors.Is(err, ErrEndpointNotFound) {
+		t.Errorf("delete 404 must NOT classify as ErrEndpointNotFound")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("expected 1 attempt (no retry on 404), got %d", got)
+	}
+}
+
+func TestDeleteUnauthorizedNoRetry(t *testing.T) {
+	var calls int32
+	c, srv := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(401)
+		_, _ = w.Write([]byte(`{"error":"unauthorized","message":"Authentication required"}`))
+	}))
+	defer srv.Close()
+
+	_, err := c.Delete(context.Background(), "abc")
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("expected ErrUnauthorized, got %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("expected 1 attempt, got %d", got)
+	}
+}
+
+func TestDeleteTransientThenSuccess(t *testing.T) {
+	var calls int32
+	c, srv := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		if n == 1 {
+			w.WriteHeader(503)
+			return
+		}
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"deleted":true,"id":"abc","cdn_eviction_seconds":300}`))
+	}))
+	defer srv.Close()
+
+	res, err := c.Delete(context.Background(), "abc")
+	if err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if !res.Deleted {
+		t.Errorf("Deleted = false after retry; want true")
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Errorf("expected 2 server hits, got %d", got)
+	}
+}
+
+func TestDeleteIDPathEscaped(t *testing.T) {
+	// Defense in depth — caller is supposed to pass a UUID, but if a malformed
+	// id slips through it must not break the URL parser. RequestURI keeps the
+	// original (escaped) form; r.URL.Path is already %2F → '/' decoded by
+	// net/http, so it can't be used to detect escaping.
+	var gotURI string
+	c, srv := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotURI = r.RequestURI
+		w.WriteHeader(404)
+	}))
+	defer srv.Close()
+
+	_, _ = c.Delete(context.Background(), "weird id/with spaces")
+	if !strings.HasPrefix(gotURI, "/api/v1/uploads/") {
+		t.Errorf("URI = %q, expected /api/v1/uploads/ prefix", gotURI)
+	}
+	if !strings.Contains(gotURI, "%2F") {
+		t.Errorf("URI = %q must contain %%2F (PathEscape of '/') so the id stays in one segment", gotURI)
+	}
+	if !strings.Contains(gotURI, "%20") {
+		t.Errorf("URI = %q must contain %%20 (PathEscape of space)", gotURI)
+	}
+}
+
+// --- classifyError op disambiguation ---
+
+func TestClassifyError404UploadOpReturnsEndpointNotFound(t *testing.T) {
+	err := classifyError(404, []byte(""), "upload")
+	if !errors.Is(err, ErrEndpointNotFound) {
+		t.Errorf("upload op 404 → %v, want ErrEndpointNotFound", err)
+	}
+}
+
+func TestClassifyError404DeleteOpReturnsNotFound(t *testing.T) {
+	err := classifyError(404, []byte(`{"error":"not_found"}`), "delete")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("delete op 404 → %v, want ErrNotFound", err)
+	}
+	if errors.Is(err, ErrEndpointNotFound) {
+		t.Errorf("delete op 404 must NOT carry ErrEndpointNotFound")
+	}
+}
+
+func TestClassifyError404ListOpReturnsEndpointNotFound(t *testing.T) {
+	// List 404 means the endpoint isn't deployed (cloud has no other reason
+	// to return 404 for a GET on the collection root).
+	err := classifyError(404, []byte(""), "list")
+	if !errors.Is(err, ErrEndpointNotFound) {
+		t.Errorf("list op 404 → %v, want ErrEndpointNotFound", err)
+	}
+}
+
 func TestDefaultBackoff(t *testing.T) {
 	got := []time.Duration{
 		defaultBackoff(1), defaultBackoff(2), defaultBackoff(3), defaultBackoff(4),

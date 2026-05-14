@@ -203,6 +203,37 @@ When an agent produces something the user wants to **share externally** (a landi
 
 ---
 
+## Manage Previously Published Files
+
+Once a user has published a file via `publish_to_web`, two companion tools let the agent (and the user, via Kocoro Desktop's "Published Files" panel) review and retract those uploads:
+
+- **`list_my_published_files`** — read-only, no approval. Paginated (default 20, max 100), newest first. Use when the user asks "what have I shared?" / "find that landing page I sent yesterday" / before calling `retract_published_file` (the LLM needs an `id` from this list — the public URL alone is not enough).
+- **`retract_published_file`** — destructive. Soft-deletes the DB row and hard-deletes the S3 object. Approval required (each call by default; the user can opt in to `always_allow_tools` to skip after the first prompt — retract is destructive but not paid, so unlike `publish_to_web` / `generate_image` / `edit_image` it is NOT on the high-risk denylist).
+
+**Important caveats:**
+- Retraction is **not** undoable.
+- CDN edge nodes may still serve cached content for **up to 5 minutes** after a successful retract. The success message reports the exact window. Surface this proactively if the user asks "why is the URL still working?".
+- A user can only retract their own uploads. The cloud returns 404 (not 403) for cross-user attempts — it deliberately conflates "doesn't exist / already retracted / belongs to another user" to avoid existence leaks. Surface all three reasons in your reply when a 404 comes back.
+- Files published before this feature shipped are not tracked and **cannot** be managed via these tools. Tell the user this is a pre-existing limitation, not a bug.
+
+**Flow (typical "撤回那个文件" request):**
+
+1. Call `list_my_published_files` to find the matching `id`. Filter by filename / `content_type` / `created_at` in your reasoning when the user describes the file informally.
+2. Confirm with the user **which** file before calling `retract_published_file` — if the list has more than one plausible match, ask. Retraction is irreversible.
+3. Call `retract_published_file` with the `id` and a clear `description` for the approval card (e.g. `"撤回昨天发布的 landing page"`).
+4. Relay the success message to the user, including the 5-minute CDN cache caveat.
+
+**Daemon HTTP equivalents** (for Kocoro Desktop, not the agent):
+
+- `GET /uploads?limit=&offset=` — same response shape as the cloud's `/api/v1/uploads`.
+- `DELETE /uploads/{id}` — same response shape and 404 semantics. Owner-only.
+
+Both endpoints transparently proxy the request through Shannon Cloud using the daemon's configured `api_key`. Desktop builds its UI on these — the LLM tools and the management panel share the same backing data.
+
+**Requirements:** `cloud.enabled: true` AND `api_key`. Same as `publish_to_web`.
+
+---
+
 ## Generate an Image from a Text Prompt
 
 When the user asks the agent to **draw / generate / paint / create a picture of** something (illustration, banner, decorative artwork, photorealistic scene), use the `generate_image` tool. The output is a permanent public CDN URL — already shareable, no follow-up `publish_to_web` call needed.

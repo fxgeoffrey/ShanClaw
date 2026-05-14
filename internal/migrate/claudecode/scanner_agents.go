@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/Kocoro-lab/ShanClaw/internal/agents"
 )
 
 func scanAgents(claudeHome string) ([]ScannedAgent, []Warning, error) {
@@ -42,6 +44,10 @@ func scanAgents(claudeHome string) ([]ScannedAgent, []Warning, error) {
 			continue
 		}
 		slug := strings.TrimSuffix(name, ".md")
+		if err := agents.ValidateAgentName(slug); err != nil {
+			warns = append(warns, Warning{Kind: "invalid_name", Path: "~/.claude/agents/" + name})
+			continue
+		}
 		if info.Size() > MaxFileBytes {
 			warns = append(warns, Warning{Kind: "size_limit", Path: "~/.claude/agents/" + name})
 			continue

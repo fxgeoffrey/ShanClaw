@@ -23,6 +23,40 @@ func TestScanAgents_SingleFile(t *testing.T) {
 	}
 }
 
+func TestScanAgents_InvalidNamesRejected(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"valid-agent.md": "# Agent\n",
+		"BadName.md":     "# Bad\n",
+		"bad.name.md":    "# Bad\n",
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(home, "agents", name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, warns, err := scanAgents(home)
+	if err != nil {
+		t.Fatalf("scanAgents: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "valid-agent" {
+		t.Fatalf("scanned agents = %+v, want only valid-agent", got)
+	}
+	invalid := 0
+	for _, w := range warns {
+		if w.Kind == "invalid_name" {
+			invalid++
+		}
+	}
+	if invalid != 2 {
+		t.Fatalf("invalid_name warnings = %d, want 2: %+v", invalid, warns)
+	}
+}
+
 func TestScanAgents_SymlinkEntryRejected(t *testing.T) {
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, "agents"), 0o755); err != nil {

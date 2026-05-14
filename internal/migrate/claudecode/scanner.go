@@ -54,12 +54,17 @@ func Scan(src SourcePaths) (*ScanResult, error) {
 		}
 	}
 
-	if _, err := os.Stat(src.ClaudeUserConfig); err != nil {
+	configInfo, err := os.Lstat(src.ClaudeUserConfig)
+	switch {
+	case err != nil:
 		if !os.IsNotExist(err) {
 			r.SourceErrors["claude_user_config"] = err.Error()
 		}
 		// Absence of ~/.claude.json is normal; no warning, no SourceErrors entry.
-	} else {
+	case configInfo.Mode()&os.ModeSymlink != 0:
+		r.SourceErrors["claude_user_config"] = "symlinked_source_root"
+		r.Warnings = append(r.Warnings, Warning{Kind: "symlink_escape", Path: "~/.claude.json"})
+	default:
 		mcps, warns, err := scanMCP(src.ClaudeUserConfig)
 		if err != nil {
 			r.SourceErrors["claude_user_config"] = err.Error()

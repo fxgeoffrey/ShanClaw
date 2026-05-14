@@ -59,6 +59,51 @@ func TestScanMCP_ExtractsKeysNotValues(t *testing.T) {
 	}
 }
 
+func TestScanMCP_InvalidServerNamesRejected(t *testing.T) {
+	cfg := filepath.Join(t.TempDir(), "claude.json")
+	body := `{
+	  "mcpServers": {
+	    "valid-server": { "command": "node" },
+	    "also_valid_1": { "command": "node" },
+	    "bad.name": { "command": "node" },
+	    "bad/name": { "command": "node" },
+	    "-bad": { "command": "node" },
+	    "bad name": { "command": "node" }
+	  }
+	}`
+	if err := os.WriteFile(cfg, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, warns, err := scanMCP(cfg)
+	if err != nil {
+		t.Fatalf("scanMCP: %v", err)
+	}
+	byName := map[string]ScannedMCPServer{}
+	for _, s := range got {
+		byName[s.Name] = s
+	}
+	for _, name := range []string{"valid-server", "also_valid_1"} {
+		if byName[name].Status != "ok" {
+			t.Fatalf("%s should be accepted, got %+v", name, byName[name])
+		}
+	}
+	for _, name := range []string{"bad.name", "bad/name", "-bad", "bad name"} {
+		if _, ok := byName[name]; ok {
+			t.Fatalf("invalid server name %q should not be admitted: %+v", name, got)
+		}
+	}
+	invalid := 0
+	for _, w := range warns {
+		if w.Kind == "invalid_name" {
+			invalid++
+		}
+	}
+	if invalid != 4 {
+		t.Fatalf("invalid_name warnings = %d, want 4: %+v", invalid, warns)
+	}
+}
+
 func TestScanMCP_SymlinkConfigRejected(t *testing.T) {
 	outside := filepath.Join(t.TempDir(), "claude.json")
 	if err := os.WriteFile(outside, []byte(`{"mcpServers":{"leak":{"command":"node"}}}`), 0o644); err != nil {

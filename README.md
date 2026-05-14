@@ -11,6 +11,8 @@ Kocoro runs AI agents locally with full computer access — files, apps, browser
 
 > **Coming from Claude Code?** Kocoro Desktop can import your existing agents, skills, and instructions from `~/.claude/` in one click — preview-then-apply via the daemon's `/migrate/claude-code/*` endpoints.
 
+Built on **[Shannon](https://github.com/Kocoro-lab/Shannon)** — the open-source multi-agent framework that powers both the Shannon Cloud SaaS and the self-hosted Shannon Gateway.
+
 [**Interactive architecture diagram →**](https://www.waylandz.com/diagrams/shanclaw-architecture.html)
 
 ## Contents

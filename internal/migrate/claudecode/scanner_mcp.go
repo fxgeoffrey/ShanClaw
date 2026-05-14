@@ -3,6 +3,7 @@ package claudecode
 import (
 	"encoding/json"
 	"os"
+	"regexp"
 	"sort"
 )
 
@@ -19,6 +20,8 @@ type rawMCPServer struct {
 	// Capture additional fields we don't model so we can flag them.
 	Extra map[string]json.RawMessage `json:"-"`
 }
+
+var safeMCPServerNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
 
 func scanMCP(claudeUserConfig string) ([]ScannedMCPServer, []Warning, error) {
 	info, err := os.Lstat(claudeUserConfig)
@@ -58,7 +61,12 @@ func scanMCP(claudeUserConfig string) ([]ScannedMCPServer, []Warning, error) {
 	}
 
 	var out []ScannedMCPServer
+	var warns []Warning
 	for name, srvRaw := range servers {
+		if !safeMCPServerNameRe.MatchString(name) {
+			warns = append(warns, Warning{Kind: "invalid_name", Server: name})
+			continue
+		}
 		var perServer map[string]json.RawMessage
 		if err := json.Unmarshal(srvRaw, &perServer); err != nil {
 			out = append(out, ScannedMCPServer{Name: name, Status: "error", ErrorReason: "parse_failed"})
@@ -133,5 +141,5 @@ func scanMCP(claudeUserConfig string) ([]ScannedMCPServer, []Warning, error) {
 		out = append(out, s)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out, nil, nil
+	return out, warns, nil
 }

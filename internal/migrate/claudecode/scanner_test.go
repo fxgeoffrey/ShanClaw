@@ -130,3 +130,39 @@ func TestScan_ClaudeHomeIsSymlink_Rejected(t *testing.T) {
 		t.Error("symlinked claude_home should not affect MCP scan from claude_user_config")
 	}
 }
+
+func TestScan_ClaudeUserConfigIsSymlink_Rejected(t *testing.T) {
+	home := t.TempDir()
+	claudeHome := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(claudeHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "real.json")
+	if err := os.WriteFile(outside, []byte(`{"mcpServers":{"leak":{"command":"node"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(home, ".claude.json")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink unsupported here: %v", err)
+	}
+
+	got, err := Scan(SourcePaths{ClaudeHome: claudeHome, ClaudeUserConfig: link})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(got.MCPServers) != 0 {
+		t.Fatalf("symlinked user config must not yield MCP servers, got %+v", got.MCPServers)
+	}
+	if got.SourceErrors["claude_user_config"] != "symlinked_source_root" {
+		t.Fatalf("source error = %q, want symlinked_source_root", got.SourceErrors["claude_user_config"])
+	}
+	gotEscape := false
+	for _, w := range got.Warnings {
+		if w.Kind == "symlink_escape" && w.Path == "~/.claude.json" {
+			gotEscape = true
+		}
+	}
+	if !gotEscape {
+		t.Fatalf("expected symlink_escape warning for user config, got %+v", got.Warnings)
+	}
+}

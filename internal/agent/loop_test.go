@@ -4929,3 +4929,100 @@ func (f *fakeThinkTool) Run(_ context.Context, _ string) (ToolResult, error) {
 }
 
 func (f *fakeThinkTool) RequiresApproval() bool { return false }
+
+// TestBuildAssistantMessage_PrefersContentBlocksWhenPresent verifies that
+// when Cloud emits the new content_blocks wire field, we pass the verbatim
+// ordered list through (including interleaved thinking + signatures).
+func TestBuildAssistantMessage_PrefersContentBlocksWhenPresent(t *testing.T) {
+	resp := &client.CompletionResponse{
+		OutputText:   "visible",
+		FinishReason: "tool_use",
+		ToolCalls:    []client.FunctionCall{{ID: "t1", Name: "f", Arguments: json.RawMessage(`{}`)}},
+		ContentBlocks: []client.ContentBlock{
+			{Type: "thinking", Thinking: "first reasoning", Signature: "sigA"},
+			{Type: "text", Text: "visible"},
+			{Type: "tool_use", ID: "t1", Name: "f", Input: json.RawMessage(`{}`)},
+			{Type: "thinking", Thinking: "interleaved reasoning", Signature: "sigB"},
+		},
+	}
+	msg := buildAssistantMessage(resp, "ignored normalized preamble")
+	if msg.Role != "assistant" {
+		t.Fatalf("Role = %q, want assistant", msg.Role)
+	}
+	blocks := msg.Content.Blocks()
+	if len(blocks) != 4 {
+		t.Fatalf("expected 4 blocks (verbatim from ContentBlocks), got %d: %+v", len(blocks), blocks)
+	}
+	want := []string{"thinking", "text", "tool_use", "thinking"}
+	for i, w := range want {
+		if blocks[i].Type != w {
+			t.Errorf("blocks[%d].Type = %q, want %q (order must be preserved)", i, blocks[i].Type, w)
+		}
+	}
+	if blocks[0].Signature != "sigA" || blocks[3].Signature != "sigB" {
+		t.Errorf("signatures lost: %+v", blocks)
+	}
+	// The normalizedToolText argument MUST be ignored when ContentBlocks is present.
+	for _, b := range blocks {
+		if b.Type == "text" && b.Text == "ignored normalized preamble" {
+			t.Error("normalizedToolText leaked into output when ContentBlocks already had a text block")
+		}
+	}
+}
+
+// TestBuildAssistantMessage_LegacyFallbackUsesAllToolCalls verifies the
+// legacy code path (Cloud without content_blocks) rebuilds text+tool_use
+// using AllToolCalls — handles both FunctionCall (single, legacy) and
+// ToolCalls (array, modern) shapes.
+func TestBuildAssistantMessage_LegacyFallbackUsesAllToolCalls(t *testing.T) {
+	resp := &client.CompletionResponse{
+		OutputText:   "hello world",
+		FinishReason: "tool_use",
+		// Use the single FunctionCall shape (legacy / non-array providers).
+		FunctionCall: &client.FunctionCall{ID: "fc1", Name: "file_read", Arguments: json.RawMessage(`{"path":"/x"}`)},
+		// ContentBlocks intentionally nil — exercise legacy fallback.
+	}
+	msg := buildAssistantMessage(resp, "hello world")
+	blocks := msg.Content.Blocks()
+	if len(blocks) != 2 {
+		t.Fatalf("expected 2 blocks (text+tool_use), got %d: %+v", len(blocks), blocks)
+	}
+	if blocks[0].Type != "text" || blocks[0].Text != "hello world" {
+		t.Errorf("first block must be text from normalizedToolText, got %+v", blocks[0])
+	}
+	if blocks[1].Type != "tool_use" || blocks[1].Name != "file_read" {
+		t.Errorf("second block must be tool_use from FunctionCall, got %+v", blocks[1])
+	}
+}
+
+// TestBuildAssistantMessage_EmptyPreambleSkipsTextBlock matches the prior
+// inline behavior at loop.go:3207 — when the model produced ONLY tool_use
+// (no preamble text), the assistant message must contain only tool_use
+// blocks. Emitting an empty text block here would change wire bytes.
+func TestBuildAssistantMessage_EmptyPreambleSkipsTextBlock(t *testing.T) {
+	resp := &client.CompletionResponse{
+		FinishReason: "tool_use",
+		ToolCalls:    []client.FunctionCall{{ID: "t1", Name: "bash", Arguments: json.RawMessage(`{"cmd":"ls"}`)}},
+	}
+	msg := buildAssistantMessage(resp, "") // empty preamble
+	blocks := msg.Content.Blocks()
+	if len(blocks) != 1 {
+		t.Fatalf("expected 1 block (tool_use only), got %d: %+v", len(blocks), blocks)
+	}
+	if blocks[0].Type != "tool_use" {
+		t.Errorf("expected tool_use only, got %q", blocks[0].Type)
+	}
+}
+
+// TestBuildAssistantMessage_NilResponseReturnsEmpty defends against a
+// caller accidentally passing nil — should produce an empty assistant
+// message rather than panic.
+func TestBuildAssistantMessage_NilResponseReturnsEmpty(t *testing.T) {
+	msg := buildAssistantMessage(nil, "")
+	if msg.Role != "assistant" {
+		t.Errorf("Role = %q, want assistant", msg.Role)
+	}
+	if len(msg.Content.Blocks()) != 0 {
+		t.Errorf("expected zero blocks for nil response, got %+v", msg.Content.Blocks())
+	}
+}

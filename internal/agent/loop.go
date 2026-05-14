@@ -955,6 +955,51 @@ func (a *AgentLoop) operationalRules() string {
 	return strings.Replace(coreOperationalRules, planningBulletSection, "", 1)
 }
 
+// buildAssistantMessage constructs an assistant client.Message from a
+// CompletionResponse + the preamble already normalized by the caller.
+//
+// When resp.ContentBlocks is non-empty (Cloud ≥ 2026-05), it is the source
+// of truth: the verbatim ordered list of blocks Anthropic returned. This
+// preserves thinking content + signatures + their interleaved positions,
+// satisfying CC rule 3 (thinking blocks survive the assistant trajectory).
+//
+// When resp.ContentBlocks is empty (legacy Cloud or non-Anthropic provider
+// that never populates it), fall back to assembling text+tool_use blocks
+// from normalizedToolText + resp.AllToolCalls(). `AllToolCalls()` handles
+// both `FunctionCall` (legacy single-call shape) and `ToolCalls` (array
+// shape) — using it ensures we don't drop the tool call when Cloud emits
+// only the function_call form. An empty normalizedToolText suppresses the
+// text block entirely (matches the prior inline behavior).
+func buildAssistantMessage(resp *client.CompletionResponse, normalizedToolText string) client.Message {
+	if resp == nil {
+		return client.Message{
+			Role:    "assistant",
+			Content: client.NewBlockContent(nil),
+		}
+	}
+	if len(resp.ContentBlocks) > 0 {
+		// Shallow copy: future mutations to resp.ContentBlocks must not
+		// reach back into the persisted message.
+		blocks := make([]client.ContentBlock, len(resp.ContentBlocks))
+		copy(blocks, resp.ContentBlocks)
+		return client.Message{
+			Role:    "assistant",
+			Content: client.NewBlockContent(blocks),
+		}
+	}
+	var blocks []client.ContentBlock
+	if normalizedToolText != "" {
+		blocks = append(blocks, client.ContentBlock{Type: "text", Text: normalizedToolText})
+	}
+	for _, fc := range resp.AllToolCalls() {
+		blocks = append(blocks, client.NewToolUseBlock(fc.ID, fc.Name, fc.Arguments))
+	}
+	return client.Message{
+		Role:    "assistant",
+		Content: client.NewBlockContent(blocks),
+	}
+}
+
 func (a *AgentLoop) SetReasoningEffort(effort string) {
 	a.reasoningEffort = effort
 }
@@ -3200,20 +3245,15 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 
 		useNative := hasNativeToolIDs(toolCalls)
 
-		// Native path: build assistant message with tool_use blocks before execution
+		// Native path: build assistant message with tool_use blocks before execution.
+		// Uses buildAssistantMessage so Anthropic thinking content blocks (when
+		// Cloud emits them via resp.ContentBlocks) are preserved verbatim with
+		// signatures intact — CC rule 3. Legacy fallback inside the helper
+		// reconstructs from normalizedToolText + AllToolCalls() when the wire
+		// shape predates 2026-05.
 		var resultBlocks []client.ContentBlock
 		if useNative {
-			var assistantBlocks []client.ContentBlock
-			if normalizedToolText != "" {
-				assistantBlocks = append(assistantBlocks, client.ContentBlock{Type: "text", Text: normalizedToolText})
-			}
-			for _, fc := range toolCalls {
-				assistantBlocks = append(assistantBlocks, client.NewToolUseBlock(fc.ID, fc.Name, fc.Arguments))
-			}
-			messages = append(messages, client.Message{
-				Role:    "assistant",
-				Content: client.NewBlockContent(assistantBlocks),
-			})
+			messages = append(messages, buildAssistantMessage(resp, normalizedToolText))
 			stampMessage()
 		}
 

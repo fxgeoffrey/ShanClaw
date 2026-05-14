@@ -97,7 +97,7 @@ func (t *FileReadTool) Run(ctx context.Context, argsJSON string) (agent.ToolResu
 	// Image files: return as vision image block instead of text lines.
 	ext := strings.ToLower(filepath.Ext(args.Path))
 	if imageReadExtensions[ext] {
-		return t.readImage(args.Path)
+		return t.readImage(ctx, args.Path)
 	}
 
 	// PDF files: render pages as images for vision analysis.
@@ -107,9 +107,9 @@ func (t *FileReadTool) Run(ctx context.Context, argsJSON string) (agent.ToolResu
 			if perr != nil {
 				return agent.ToolResult{Content: perr.Error(), IsError: true}, nil
 			}
-			return t.readPDF(args.Path, start0, count)
+			return t.readPDF(ctx, args.Path, start0, count)
 		}
-		return t.readPDF(args.Path, args.Offset, args.Limit)
+		return t.readPDF(ctx, args.Path, args.Offset, args.Limit)
 	}
 
 	// Dedup check: when the same (path, offset, limit) was read earlier in
@@ -229,7 +229,13 @@ func readTextLineRange(path string, offset, limit int) (lines []string, totalLin
 }
 
 // readImage reads an image file and returns it as a vision-compatible image block.
-func (t *FileReadTool) readImage(path string) (agent.ToolResult, error) {
+// Repeat reads of the same path (mtime + size unchanged) return the standard
+// "[file unchanged since last read…]" stub from CheckFileReadDedup — same
+// contract text files have. Without this, "read all N screenshots" workflows
+// where the model loops and re-reads the same paths cost N× the image-token
+// budget on every retry. Dedup key uses offset=0/limit=0 because image reads
+// have no slicing dimension.
+func (t *FileReadTool) readImage(ctx context.Context, path string) (agent.ToolResult, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsPermission(err) {
@@ -244,10 +250,15 @@ func (t *FileReadTool) readImage(path string) (agent.ToolResult, error) {
 		}, nil
 	}
 
+	if hit, stub := agent.CheckFileReadDedup(ctx, path, 0, 0, info.ModTime(), info.Size()); hit {
+		return agent.ToolResult{Content: stub}, nil
+	}
+
 	block, err := EncodeImage(path)
 	if err != nil {
 		return agent.ToolResult{Content: fmt.Sprintf("error encoding image: %v", err), IsError: true}, nil
 	}
+	agent.RecordFileRead(ctx, path, 0, 0, info.ModTime(), info.Size())
 	return agent.ToolResult{
 		Content: fmt.Sprintf("[Image: %s (%d bytes)]", filepath.Base(path), info.Size()),
 		Images:  []agent.ImageBlock{block},
@@ -257,8 +268,13 @@ func (t *FileReadTool) readImage(path string) (agent.ToolResult, error) {
 // readPDF renders PDF pages to images using macOS PDFKit (via swift) and returns
 // them as vision-compatible image blocks. startPage is 0-based, maxPages defaults
 // to maxPDFPages. This uses the macOS-native Swift PDFKit which is always available.
-func (t *FileReadTool) readPDF(path string, startPage, maxPages int) (agent.ToolResult, error) {
-	if _, err := os.Stat(path); err != nil {
+// Dedup key uses the POST-normalization (startPage, maxPages) so a repeat call
+// with `pages="1-20"` matches a prior call with `offset=0 limit=0` (both render
+// the same physical pages). Without this, an agent that double-reads "the
+// contract" pays the swift-render cost twice.
+func (t *FileReadTool) readPDF(ctx context.Context, path string, startPage, maxPages int) (agent.ToolResult, error) {
+	info, err := os.Stat(path)
+	if err != nil {
 		if os.IsPermission(err) {
 			return agent.PermissionError(fmt.Sprintf("cannot read %s: permission denied", path)), nil
 		}
@@ -270,6 +286,10 @@ func (t *FileReadTool) readPDF(path string, startPage, maxPages int) (agent.Tool
 	}
 	if maxPages <= 0 || maxPages > maxPDFPages {
 		maxPages = maxPDFPages
+	}
+
+	if hit, stub := agent.CheckFileReadDedup(ctx, path, startPage, maxPages, info.ModTime(), info.Size()); hit {
+		return agent.ToolResult{Content: stub}, nil
 	}
 
 	tmpDir, err := os.MkdirTemp("", "shannon-pdf-*")
@@ -391,6 +411,11 @@ for i in start..<(start + count) {
 			IsError: true,
 		}, nil
 	}
+
+	// Record the successful render for future dedup. Mirrors the post-success
+	// RecordFileRead in Run() for text files. Failures above intentionally
+	// skip recording so the agent can retry without dedup blocking it.
+	agent.RecordFileRead(ctx, path, startPage, maxPages, info.ModTime(), info.Size())
 
 	// Build summary text.
 	var sb strings.Builder

@@ -387,6 +387,113 @@ func TestFileRead_DedupSameFile_FileModified(t *testing.T) {
 	}
 }
 
+// minPNGBytes returns a minimal valid 1×1 PNG (red pixel). Lets image dedup
+// tests share a byte sequence with TestFileRead_ImageReturnsVisionBlock.
+func minPNGBytes() []byte {
+	return []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+		0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
+		0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41,
+		0x54, 0x08, 0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00,
+		0x00, 0x00, 0x03, 0x00, 0x01, 0x36, 0x28, 0x19,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E,
+		0x44, 0xAE, 0x42, 0x60, 0x82,
+	}
+}
+
+// TestFileRead_DedupImage_SameFile: production bug — file_read.go skipped
+// dedup for image extensions, so 13 file_reads of the same path all
+// re-encoded full image bytes into context. With dedup wired in, the second
+// read returns the same short "unchanged since last read" stub used for
+// text files: ~120 bytes and NO Images block.
+func TestFileRead_DedupImage_SameFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "shot.png")
+	if err := os.WriteFile(path, minPNGBytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tracker := agent.NewReadTracker()
+	ctx := context.WithValue(context.Background(), agent.ReadTrackerKey(), tracker)
+
+	tool := &FileReadTool{}
+	args, _ := json.Marshal(fileReadArgs{Path: path})
+
+	// First read: real image.
+	r1, err := tool.Run(ctx, string(args))
+	if err != nil {
+		t.Fatalf("first read transport error: %v", err)
+	}
+	if r1.IsError {
+		t.Fatalf("first read error: %s", r1.Content)
+	}
+	if len(r1.Images) != 1 {
+		t.Fatalf("first read should return 1 image, got %d", len(r1.Images))
+	}
+
+	// Second read with same args: stub, no Images.
+	r2, err := tool.Run(ctx, string(args))
+	if err != nil {
+		t.Fatalf("second read transport error: %v", err)
+	}
+	if r2.IsError {
+		t.Fatalf("dedup hit should not be IsError: %s", r2.Content)
+	}
+	if len(r2.Images) != 0 {
+		t.Errorf("dedup stub must not re-attach image bytes, got %d image(s)", len(r2.Images))
+	}
+	if !strings.Contains(r2.Content, "unchanged since last read") {
+		t.Errorf("expected dedup stub, got: %s", r2.Content)
+	}
+	if len(r2.Content) > 200 {
+		t.Errorf("dedup stub should be short (~120B), got %d bytes", len(r2.Content))
+	}
+}
+
+// TestFileRead_DedupImage_FileModified: when the image is overwritten between
+// reads, mtime/size change must defeat dedup so the model sees the new bytes.
+func TestFileRead_DedupImage_FileModified(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "shot.png")
+	if err := os.WriteFile(path, minPNGBytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tracker := agent.NewReadTracker()
+	ctx := context.WithValue(context.Background(), agent.ReadTrackerKey(), tracker)
+
+	tool := &FileReadTool{}
+	args, _ := json.Marshal(fileReadArgs{Path: path})
+
+	if _, err := tool.Run(ctx, string(args)); err != nil {
+		t.Fatalf("first read transport error: %v", err)
+	}
+
+	// Touch mtime forward (same content, but new size to defeat any same-byte
+	// optimization). 15ms covers macOS APFS sub-second mtime resolution edge cases.
+	time.Sleep(15 * time.Millisecond)
+	enlarged := append(minPNGBytes(), 0x00)
+	if err := os.WriteFile(path, enlarged, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r2, err := tool.Run(ctx, string(args))
+	if err != nil {
+		t.Fatalf("second read transport error: %v", err)
+	}
+	if r2.IsError {
+		t.Fatalf("second read error: %s", r2.Content)
+	}
+	if strings.Contains(r2.Content, "unchanged since last read") {
+		t.Errorf("modified image must NOT dedup, got stub: %s", r2.Content)
+	}
+	if len(r2.Images) != 1 {
+		t.Errorf("modified image should return fresh image, got %d image(s)", len(r2.Images))
+	}
+}
+
 // TestParsePDFPageRange_SinglePage: "3" → start=2, count=1 (1-indexed param,
 // 0-indexed start for the Swift renderer).
 func TestParsePDFPageRange_SinglePage(t *testing.T) {

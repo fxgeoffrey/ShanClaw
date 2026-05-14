@@ -141,9 +141,12 @@ type publishArgs struct {
 func (t *PublishToWebTool) Info() agent.ToolInfo {
 	return agent.ToolInfo{
 		Name: "publish_to_web",
-		Description: "⚠️ Publishes a local file to a PUBLIC, PERMANENT URL on Shannon Cloud.\n\n" +
-			"Anyone who obtains the URL can read the file. There is no DELETE — once\n" +
-			"published, the file stays accessible forever.\n\n" +
+		Description: "⚠️ Publishes a local file to a PUBLIC URL on Shannon Cloud.\n\n" +
+			"Anyone who obtains the URL can read the file. The URL stays live until\n" +
+			"the user (or you, on their behalf) retracts it via `retract_published_file`\n" +
+			"— and even after a successful retract, CDN edge caches may serve the\n" +
+			"content for up to 5 more minutes. Treat the URL as a leak vector\n" +
+			"regardless: never publish secrets, credentials, or private data.\n\n" +
 			"USE ONLY when the user explicitly asked to share / publish / send the file\n" +
 			"to an external recipient (Slack/LINE/Feishu reply, web link, email, etc.).\n\n" +
 			"DO NOT USE for:\n" +
@@ -158,7 +161,9 @@ func (t *PublishToWebTool) Info() agent.ToolInfo {
 			"Constraints:\n" +
 			"  - 50 MiB hard limit per file\n" +
 			"  - Allowed extensions: html, md, txt, pdf, png, jpg, jpeg, gif, webp, svg, csv, json, mp4, mp3, wav, webm\n" +
-			"  - Each upload returns a fresh URL — no idempotent re-upload" +
+			"  - Each upload returns a fresh URL — no idempotent re-upload\n\n" +
+			"Companion tools: `list_my_published_files` (review what's still live) and\n" +
+			"`retract_published_file` (delete by id)." +
 			agent.DescriptionGuidance,
 		Parameters: map[string]any{
 			"type": "object",

@@ -61,6 +61,7 @@ func TestApprovalToolsRequireDescription(t *testing.T) {
 	for _, t := range []agent.Tool{
 		&CloudDelegateTool{},
 		&PublishToWebTool{},
+		&RetractPublishedFileTool{},
 		&GenerateImageTool{},
 		&EditImageTool{},
 	} {

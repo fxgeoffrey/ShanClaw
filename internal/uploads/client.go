@@ -1,8 +1,9 @@
-// Package uploads is a thin HTTP client for Shannon Cloud's POST /api/v1/uploads
-// endpoint. It streams a multipart/form-data body via io.Pipe so 50 MiB files
-// never sit in memory in full, classifies HTTP responses into typed errors that
-// callers can branch on, and retries transient failures (5xx + network) with
-// exponential backoff.
+// Package uploads is a thin HTTP client for Shannon Cloud's /api/v1/uploads
+// endpoints — POST to publish a file, GET to list the current user's still-
+// active uploads, DELETE to retract one. POST streams a multipart/form-data
+// body via io.Pipe so 50 MiB files never sit in memory in full. All three
+// methods classify HTTP responses into typed errors that callers can branch on
+// and retry transient failures (5xx + network) with exponential backoff.
 package uploads
 
 import (
@@ -14,17 +15,49 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
 
-// UploadResponse mirrors the JSON returned by /api/v1/uploads on success.
+// UploadResponse mirrors the JSON returned by POST /api/v1/uploads on success.
 // Use URL directly — its path segments are already percent-encoded server-side.
 type UploadResponse struct {
 	URL         string `json:"url"`
 	Key         string `json:"key"`
 	Size        int64  `json:"size"`
 	ContentType string `json:"content_type"`
+}
+
+// UploadEntry is a single record in GET /api/v1/uploads. Cloud omits
+// s3_key / tenant_id / user_id by design — do not assume they exist.
+type UploadEntry struct {
+	ID          string `json:"id"`
+	URL         string `json:"url"`
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type"`
+	Size        int64  `json:"size"`
+	CreatedAt   string `json:"created_at"` // RFC3339 UTC
+}
+
+// ListResponse mirrors the JSON returned by GET /api/v1/uploads on success.
+// TotalCount is the user's active (non-deleted) file count under the current
+// filters — it is not "everything they've ever published".
+type ListResponse struct {
+	Uploads    []UploadEntry `json:"uploads"`
+	TotalCount int           `json:"total_count"`
+}
+
+// DeleteResponse mirrors the JSON returned by DELETE /api/v1/uploads/{id} on
+// success. CDNEvictionSeconds is the worst-case window during which CloudFront
+// edge nodes may still serve cached content — surface it to the user so
+// they don't think the retract silently failed when the URL "still works"
+// for a few minutes.
+type DeleteResponse struct {
+	Deleted            bool   `json:"deleted"`
+	ID                 string `json:"id"`
+	CDNEvictionSeconds int    `json:"cdn_eviction_seconds"`
 }
 
 // errorBody is the on-the-wire shape of {"error": "...", "message": "..."}.
@@ -48,6 +81,12 @@ var (
 	ErrFileTooLarge = errors.New("upload: file too large")
 	// ErrServerConfig is a 500 with code "s3_unconfigured". Permanent — server-side fix needed.
 	ErrServerConfig = errors.New("upload: server misconfigured")
+	// ErrNotFound is a 404 on the Delete path — the upload id does not exist,
+	// has already been retracted, or belongs to another user. Cloud
+	// deliberately conflates these three cases to avoid existence leaks, so
+	// callers must surface a single "not found or already retracted" message
+	// without trying to disambiguate.
+	ErrNotFound = errors.New("upload: not found")
 	// ErrTransient wraps 500 (other reasons) / 502 / 503 / 504 / network errors.
 	// The client retries these internally before returning; once returned, retries
 	// have already been exhausted.
@@ -110,29 +149,66 @@ func (c *Client) Upload(
 	if openBody == nil {
 		return nil, fmt.Errorf("upload: openBody is required")
 	}
+	return doWithRetry(ctx, c.maxAttempts, c.backoff, func(ctx context.Context) (*UploadResponse, error) {
+		return c.uploadOnce(ctx, filename, contentType, openBody)
+	})
+}
 
+// List calls GET /api/v1/uploads?limit=&offset= and returns the parsed
+// response. limit/offset are passed through as-is; cloud clamps limit to
+// [1, 100] internally (and 0 → default 20), but callers are encouraged to
+// validate before calling so error messages stay close to the user.
+func (c *Client) List(ctx context.Context, limit, offset int) (*ListResponse, error) {
+	return doWithRetry(ctx, c.maxAttempts, c.backoff, func(ctx context.Context) (*ListResponse, error) {
+		return c.listOnce(ctx, limit, offset)
+	})
+}
+
+// Delete calls DELETE /api/v1/uploads/{id} and returns the parsed response.
+// id must be a UUID; the client does not pre-validate format (cloud answers
+// 404 for malformed ids, same as for legitimately missing ones).
+//
+// Delete is idempotent on the server (a second call after a successful first
+// returns 404 because deleted_at is non-NULL and the WHERE clause filters the
+// row out), so 5xx retries are safe: the worst case is one extra 404 on a
+// later retry, which the caller surfaces as "already retracted".
+func (c *Client) Delete(ctx context.Context, id string) (*DeleteResponse, error) {
+	if strings.TrimSpace(id) == "" {
+		return nil, fmt.Errorf("%w: id is required", ErrBadRequest)
+	}
+	return doWithRetry(ctx, c.maxAttempts, c.backoff, func(ctx context.Context) (*DeleteResponse, error) {
+		return c.deleteOnce(ctx, id)
+	})
+}
+
+// doWithRetry runs attempt up to maxAttempts times with backoff between
+// retries. Only ErrTransient is retried; everything else short-circuits.
+// Generic so each method's response type stays statically typed at the call
+// site (no any-cast in callers).
+func doWithRetry[T any](
+	ctx context.Context,
+	maxAttempts int,
+	backoff func(int) time.Duration,
+	attempt func(ctx context.Context) (*T, error),
+) (*T, error) {
 	var lastErr error
-	for attempt := 1; attempt <= c.maxAttempts; attempt++ {
-		if delay := c.backoff(attempt); delay > 0 {
+	for n := 1; n <= maxAttempts; n++ {
+		if delay := backoff(n); delay > 0 {
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			case <-time.After(delay):
 			}
 		}
-
-		resp, err := c.attempt(ctx, filename, contentType, openBody)
+		resp, err := attempt(ctx)
 		if err == nil {
 			return resp, nil
 		}
-
 		lastErr = err
-		// Permanent errors short-circuit immediately.
 		if !isRetriable(err) {
 			return nil, err
 		}
-		// Don't sleep again past the last attempt.
-		if attempt == c.maxAttempts {
+		if n == maxAttempts {
 			break
 		}
 	}
@@ -143,10 +219,10 @@ func isRetriable(err error) bool {
 	return errors.Is(err, ErrTransient)
 }
 
-// attempt performs a single multipart POST. Streaming is via io.Pipe + a
+// uploadOnce performs a single multipart POST. Streaming is via io.Pipe + a
 // goroutine that writes the multipart envelope; the HTTP body is the pipe
 // reader so net/http drains it incrementally without buffering the file.
-func (c *Client) attempt(
+func (c *Client) uploadOnce(
 	ctx context.Context,
 	filename, contentType string,
 	openBody func() (io.ReadCloser, error),
@@ -235,14 +311,100 @@ func (c *Client) attempt(
 		return &out, nil
 	}
 
-	return nil, classifyError(resp.StatusCode, respBody)
+	return nil, classifyError(resp.StatusCode, respBody, "upload")
 }
 
-// classifyError maps non-2xx responses to the typed sentinel errors. The
-// response body is consulted for the {"error": "..."} code — in particular,
-// 500 + s3_unconfigured is a permanent server-config problem, while 500 +
-// upload_failed (or no body) is treated as transient.
-func classifyError(status int, body []byte) error {
+// listOnce performs a single GET /api/v1/uploads with the given paging.
+func (c *Client) listOnce(ctx context.Context, limit, offset int) (*ListResponse, error) {
+	endpoint, err := url.Parse(c.baseURL + "/api/v1/uploads")
+	if err != nil {
+		return nil, fmt.Errorf("upload: build request: %w", err)
+	}
+	q := endpoint.Query()
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	if offset > 0 {
+		q.Set("offset", strconv.Itoa(offset))
+	}
+	endpoint.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("upload: build request: %w", err)
+	}
+	if c.apiKey != "" {
+		req.Header.Set("X-API-Key", c.apiKey)
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: network: %v", ErrTransient, err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB cap on list payload
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		var out ListResponse
+		if jerr := json.Unmarshal(respBody, &out); jerr != nil {
+			return nil, fmt.Errorf("upload: parse list response: %w", jerr)
+		}
+		if out.Uploads == nil {
+			out.Uploads = []UploadEntry{}
+		}
+		return &out, nil
+	}
+
+	return nil, classifyError(resp.StatusCode, respBody, "list")
+}
+
+// deleteOnce performs a single DELETE /api/v1/uploads/{id}.
+func (c *Client) deleteOnce(ctx context.Context, id string) (*DeleteResponse, error) {
+	endpoint := c.baseURL + "/api/v1/uploads/" + url.PathEscape(id)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("upload: build request: %w", err)
+	}
+	if c.apiKey != "" {
+		req.Header.Set("X-API-Key", c.apiKey)
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: network: %v", ErrTransient, err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		var out DeleteResponse
+		if jerr := json.Unmarshal(respBody, &out); jerr != nil {
+			return nil, fmt.Errorf("upload: parse delete response: %w", jerr)
+		}
+		return &out, nil
+	}
+
+	return nil, classifyError(resp.StatusCode, respBody, "delete")
+}
+
+// classifyError maps non-2xx responses to the typed sentinel errors. op
+// disambiguates the meaning of 404: "delete" treats 404 as "file not found /
+// already retracted / cross-user" (ErrNotFound); all other ops treat 404 as
+// "the endpoint isn't deployed at this gateway" (ErrEndpointNotFound). The
+// response body is also consulted for the {"error": "..."} code — in
+// particular, 500 + s3_unconfigured is a permanent server-config problem,
+// while 500 + upload_failed (or no body) is treated as transient.
+func classifyError(status int, body []byte, op string) error {
 	var parsed errorBody
 	_ = json.Unmarshal(body, &parsed)
 	code := parsed.Error
@@ -265,7 +427,13 @@ func classifyError(status int, body []byte) error {
 		return fmt.Errorf("%w (status %d, code %q)%s", ErrUnauthorized, status, code, suffix())
 	case http.StatusBadRequest: // 400
 		return fmt.Errorf("%w (status %d, code %q)%s", ErrBadRequest, status, code, suffix())
-	case http.StatusNotFound: // 404 — endpoint not deployed at this gateway
+	case http.StatusNotFound: // 404
+		if op == "delete" {
+			// Cloud returns 404 for: file does not exist / already retracted /
+			// belongs to another user / malformed UUID. Do not try to
+			// disambiguate — the API deliberately conflates them.
+			return fmt.Errorf("%w (status %d)%s", ErrNotFound, status, suffix())
+		}
 		return fmt.Errorf("%w (status %d)%s", ErrEndpointNotFound, status, suffix())
 	case http.StatusRequestEntityTooLarge: // 413
 		return fmt.Errorf("%w (status %d, code %q)%s", ErrFileTooLarge, status, code, suffix())

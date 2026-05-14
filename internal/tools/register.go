@@ -548,6 +548,31 @@ func RegisterEditImageTool(reg *agent.ToolRegistry, gw *client.GatewayClient, cf
 	reg.Register(NewEditImageTool(imagesClient))
 }
 
+// RegisterListPublishedFilesTool registers the read-only list_my_published_files
+// tool. Same gating as publish_to_web — it talks to the same /api/v1/uploads
+// collection, so without cloud.enabled + api_key the endpoint returns 401.
+// Tool is read-only and does not require approval.
+func RegisterListPublishedFilesTool(reg *agent.ToolRegistry, gw *client.GatewayClient, cfg *config.Config) {
+	if cfg == nil || !cfg.Cloud.Enabled || cfg.APIKey == "" || gw == nil {
+		return
+	}
+	uploadsClient := uploads.NewClient(cfg.Endpoint, cfg.APIKey, gw.HTTPClient())
+	reg.Register(NewListPublishedFilesTool(uploadsClient))
+}
+
+// RegisterRetractPublishedFileTool registers the destructive
+// retract_published_file tool. Same gating as publish_to_web. Tool requires
+// approval but is intentionally NOT on the high-risk DisallowsAutoApproval
+// denylist — retract destroys public content rather than creating it, so
+// always_allow is a legitimate user choice (see plan Q2).
+func RegisterRetractPublishedFileTool(reg *agent.ToolRegistry, gw *client.GatewayClient, cfg *config.Config) {
+	if cfg == nil || !cfg.Cloud.Enabled || cfg.APIKey == "" || gw == nil {
+		return
+	}
+	uploadsClient := uploads.NewClient(cfg.Endpoint, cfg.APIKey, gw.HTTPClient())
+	reg.Register(NewRetractPublishedFileTool(uploadsClient))
+}
+
 // buildPublishAllowlist merges user-supplied extensions onto the default
 // allowlist. Extensions are normalised to lowercase and given a leading dot
 // if missing. Empty / nil extra returns the default unmodified.

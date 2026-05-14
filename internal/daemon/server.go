@@ -269,6 +269,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /schedules", s.handleCreateSchedule)
 	mux.HandleFunc("PATCH /schedules/{id}", s.handlePatchSchedule)
 	mux.HandleFunc("DELETE /schedules/{id}", s.handleDeleteSchedule)
+	mux.HandleFunc("GET /uploads", s.handleListUploads)
+	mux.HandleFunc("DELETE /uploads/{id}", s.handleDeleteUpload)
 	mux.HandleFunc("GET /config", s.handleGetConfig)
 	mux.HandleFunc("GET /config/status", s.handleConfigStatus)
 	mux.HandleFunc("PATCH /config", s.handlePatchConfig)
@@ -3821,6 +3823,8 @@ func (s *Server) handleConfigReload(w http.ResponseWriter, r *http.Request) {
 		}
 		tools.RegisterCloudDelegate(newReg, s.deps.GW, newCfg, nil, "", "")
 		tools.RegisterPublishTool(newReg, s.deps.GW, newCfg)
+		tools.RegisterListPublishedFilesTool(newReg, s.deps.GW, newCfg)
+		tools.RegisterRetractPublishedFileTool(newReg, s.deps.GW, newCfg)
 		tools.RegisterGenerateImageTool(newReg, s.deps.GW, newCfg)
 		tools.RegisterEditImageTool(newReg, s.deps.GW, newCfg)
 
@@ -3892,6 +3896,8 @@ func (s *Server) handleConfigReload(w http.ResponseWriter, r *http.Request) {
 		gwCancel()
 		tools.RegisterCloudDelegate(freshReg, s.deps.GW, newCfg, nil, "", "")
 		tools.RegisterPublishTool(freshReg, s.deps.GW, newCfg)
+		tools.RegisterListPublishedFilesTool(freshReg, s.deps.GW, newCfg)
+		tools.RegisterRetractPublishedFileTool(freshReg, s.deps.GW, newCfg)
 		tools.RegisterGenerateImageTool(freshReg, s.deps.GW, newCfg)
 		tools.RegisterEditImageTool(freshReg, s.deps.GW, newCfg)
 		var newGatewayOverlay []agent.Tool
@@ -4178,3 +4184,4 @@ func (s *Server) buildSyncDeps(cfg syncpkg.Config) (syncpkg.Deps, bool) {
 		OnSyncDone: onSyncDone,
 	}, true
 }
+

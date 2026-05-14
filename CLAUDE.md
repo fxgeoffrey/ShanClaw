@@ -51,6 +51,7 @@ internal/
     session_cwd.go     # Cloud-source scratch CWD allocator (ephemeral, per-session tmp dir)
     readtracker_cache.go # Per-session ReadTracker cache; entries released via SessionManager.OnSessionClose
     suggestion_handler.go # GET /suggestion + POST /accept, validateSuggestionRoute, atomic persist on accept
+    uploads_handler.go # GET /uploads (paged) + DELETE /uploads/{id} HTTP proxies for the Desktop "Published Files" panel. Constructs a fresh internal/uploads.Client per request from the snapshot cfg/gw. writeUploadsError maps sentinel errors to HTTP status: ErrNotFound→404 (delete-only), ErrUnauthorized→401, ErrEndpointNotFound→503 (so UI shows "service unavailable" not a misleading "already retracted"), ErrTransient→503. DELETE audits the retract; GET does not (read-only).
   agent/
     loop.go              # AgentLoop.Run() — core agentic loop, SwitchAgent()
     tools.go             # Tool interface, ToolRegistry, FilterByAllow/Deny, Schemas()
@@ -152,18 +153,20 @@ internal/
     marketplace.go     # ClawHub marketplace fetch/install/uninstall (zip download, sandboxed stage, atomic install)
     provenance.go      # InstallSource tracking (marketplace vs. user) for skill origin/upgrade decisions
   tools/
-    register.go        # RegisterLocalTools, RegisterAll, CompleteRegistration, ApplyToolFilter, RegisterPublishTool, RegisterGenerateImageTool, RegisterEditImageTool
+    register.go        # RegisterLocalTools, RegisterAll, CompleteRegistration, ApplyToolFilter, RegisterPublishTool, RegisterListPublishedFilesTool, RegisterRetractPublishedFileTool, RegisterGenerateImageTool, RegisterEditImageTool
     # Tool files: file_read, file_write, file_edit, glob, grep, bash,
     # directory_list, think, http, system_info, clipboard, notify, process,
     # applescript, accessibility, ghostty, browser, screenshot, computer,
-    # wait (wait_for), cloud_delegate, publish_to_web, generate_image, edit_image,
+    # wait (wait_for), cloud_delegate, publish_to_web,
+    # list_my_published_files + retract_published_file (retract_published_file.go),
+    # generate_image, edit_image,
     # imaging (helper), pinchtab (legacy), safe_path, skill (use_skill), memory_append
     schedule.go        # schedule_create/list/update/remove tools
     session_search.go  # session_search tool (FTS5 keyword search)
     mcp_tool.go        # MCPTool adapter
     server.go          # ServerTool adapter (gateway remote tools)
   uploads/
-    client.go          # POST /api/v1/uploads multipart streaming client (typed errors + retry/backoff). Used by publish_to_web tool. Reuses GatewayClient.HTTPClient() — does not own its own *http.Client.
+    client.go          # /api/v1/uploads client — POST (Upload, multipart streaming, openBody factory rewinds per retry), GET (List, paged with limit/offset, RawQuery omitted when both are 0), DELETE (Delete by UUID, url.PathEscape on id). Shared retry skeleton via generic doWithRetry[T]; classifyError(status, body, op) — `op` disambiguates 404 (POST/GET → ErrEndpointNotFound; DELETE → ErrNotFound) so the existence-leak-avoiding cloud-conflated 404 surfaces as "file not found or already retracted" only on retract. Used by publish_to_web (POST), list_my_published_files (GET), retract_published_file (DELETE), and the daemon's /uploads HTTP handlers (Desktop UI proxy). Reuses GatewayClient.HTTPClient() — does not own its own *http.Client.
   images/
     client.go          # POST /api/v1/images/{generations,edits} JSON client (typed sentinel errors + 3-attempt retry on ErrTransient). `Generate` (text→image) and `Edit` (CDN URLs + prompt→image) share `doWithRetry` + `attempt` + `classifyError`. Disambiguates 502 sub-codes (upstream_error/no_images_returned/decode_failed/source_fetch_failed), 500 sub-codes (image_failed vs server_misconfigured), and edits-only sub-codes (400 invalid_image_url → ErrInvalidImageURL, 413 source_too_large → ErrSourceTooLarge) so retriable failures retry and "fix-the-args" failures (504, no_images_returned, invalid_image_url, source_too_large) short-circuit. Reuses GatewayClient.HTTPClient() (600s timeout meets API spec).
   tui/
@@ -395,7 +398,9 @@ E2E tests in `test/e2e/` are split into offline (no API, runs in CI) and live (n
 **Conditional (registered outside `RegisterLocalTools`):**
 - session_search — added when a session manager is available
 - cloud_delegate — added when `cloud.enabled: true`
-- publish_to_web — gated on `cloud.enabled: true` AND `cfg.APIKey != ""`. Always requires approval (permanent CDN URL). Path-segment + basename blocklist (`.env`/`.pem`/…), extension allowlist (extensible via `cloud.publish_allowed_extensions`; denylist is not user-configurable). Tool: `internal/tools/publish_to_web.go`; HTTP: `internal/uploads/client.go` (multipart streaming, retry on `ErrTransient`).
+- publish_to_web — gated on `cloud.enabled: true` AND `cfg.APIKey != ""`. Always requires approval (permanent CDN URL until retracted). Path-segment + basename blocklist (`.env`/`.pem`/…), extension allowlist (extensible via `cloud.publish_allowed_extensions`; denylist is not user-configurable). Tool: `internal/tools/publish_to_web.go`; HTTP: `internal/uploads/client.go` (multipart streaming, retry on `ErrTransient`).
+- list_my_published_files — gated on `cloud.enabled: true` AND `cfg.APIKey != ""`. Read-only, **no approval**. Args: `limit` (default 20, max 100), `offset` (default 0). Returns a paginated text rendering of `UploadEntry` rows (id / filename / human-readable size / content_type / created_at / public URL) keyed by id so the LLM can feed an id straight to retract. Tool: `internal/tools/retract_published_file.go`; HTTP: `internal/uploads/client.go List`.
+- retract_published_file — gated on `cloud.enabled: true` AND `cfg.APIKey != ""`. Destructive, **requires approval** but intentionally NOT in `agent.DisallowsAutoApproval` (always_allow_tools is honored per user opt-in — retract destroys public content rather than creating it, so the publish/generate/edit per-call denylist does not apply). Args: `id` (UUID, must come from `list_my_published_files` — NOT the URL) + `description`. 404 from cloud surfaces a friendly "not found / already retracted / not yours" message because cloud deliberately conflates the three causes to avoid existence leaks. Tool: `internal/tools/retract_published_file.go`; HTTP: `internal/uploads/client.go Delete`.
 - generate_image — gated on `cloud.enabled: true` AND `cfg.APIKey != ""`. Always requires approval (paid quota + permanent public CDN URL). Args: `prompt`/`size`/`quality`/`n`/`background`; server pins `gpt-image-2`. Tool: `internal/tools/generate_image.go`; HTTP + retry/error policy: `internal/images/client.go`.
 - edit_image — gated on `cloud.enabled: true` AND `cfg.APIKey != ""`. Always requires approval. Args: `prompt` + `image_urls` (1–4 entries, must start with `https://static.kocoro.ai/`, pre-validated client-side); no mask field (region in prose). Tool: `internal/tools/edit_image.go`; shares `internal/images/client.go` with `generate_image`.
 - tool_search — added in deferred mode when tool count > 30 (lives in `internal/agent/deferred.go`, not `tools/`)

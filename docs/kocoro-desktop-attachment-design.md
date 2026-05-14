@@ -50,10 +50,10 @@ Status as of 2026-05-14. All rows are shipped; the only gap relative to claude.a
 | `maxImageDimension` | **8192×8192** | ✅ shipped — matches Anthropic single-image upper bound |
 | Image type allowlist | jpg / jpeg / png / gif / webp / heic / heif / avif / tiff / bmp | ✅ shipped |
 | Document type allowlist | pdf / docx / pptx / key / txt / md / html / rtf / odt / epub | ✅ shipped |
-| Data type allowlist | csv / json / xlsx | ✅ shipped (rendered as "Data" chip but caps shared with documents) |
+| Data type allowlist | csv / json / xlsx | ✅ shipped (rendered as "Data" chip; the 500 MB / 20-file caps apply — no separate `maxDataAttachments` quota) |
 | Code extensions (text fallback) | 50+ entries — see `AttachmentLimits.supportedCodeExtensions` | ✅ shipped |
 | Archive types | zip (others fall through to file_ref) | ✅ shipped |
-| Folder drops | treated as directory `file_ref` | ✅ shipped (commit `702cf59`) |
+| Folder drops | treated as directory `file_ref` | ✅ shipped (ShanClawKit; SHA omitted — lives in a separate repo) |
 | Universal accept (unknown ext → file_ref) | ✅ shipped — daemon decides downstream | |
 | Per-violation `lastError` toast | ✅ shipped — only feedback when limit hit, matches claude.ai behavior | |
 
@@ -92,7 +92,7 @@ Kocoro daemon auto-compresses images at source (`internal/tools/imaging_compress
 | Inline image | 5 MB base64 string | 30 MB (server compresses) | 500 MB raw on disk (daemon compresses); 20 MB inline paste |
 | Images per request | 100 (200K) / 600 (others) | no separate per-image cap | no separate per-image cap |
 | Total attachments | — | 20 per message, 20 per conversation (cumulative) | **20 per message** (per-conversation cumulative cap deferred) |
-| Total request | 32 MB | — | 500 MB upload, daemon shrinks |
+| Total request | 32 MB | — | 500 MB daemon-side disk read; Anthropic still receives ≤32 MB after daemon compression |
 | Image dimensions | ≤ 8000×8000 (single), ≤ 2000×2000 (many-image, >20) | — | daemon resizes to ≤ 2000×2000 |
 | PDF pages | 100 (200K) / 600 (others) | — | daemon renders at 1024 px width |
 

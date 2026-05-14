@@ -127,3 +127,80 @@ func TestFilterOversizeImages_AggregateCap(t *testing.T) {
 		t.Fatal("expected oldest message to be replaced first")
 	}
 }
+
+// TestFilterOversizeImages_AggregateCap_PartialToolResultDrop pins the
+// incremental-drop contract on multi-image tool_results. Workload: a 10-page
+// PDF rendered as one tool_result with 10 nested 5 MB images = 50 MB total,
+// 2× over the 25 MB cap. Pre-fix behavior nuked ALL 10 pages. Correct
+// behavior drops the oldest until the aggregate falls under cap, leaving
+// the most recent pages intact so the model still has something to work with.
+func TestFilterOversizeImages_AggregateCap_PartialToolResultDrop(t *testing.T) {
+	const perImageBytes = 5 * 1024 * 1024 // 5 MB each
+	const pages = 10                       // 10 × 5 MB = 50 MB > 25 MB cap
+	nested := make([]client.ContentBlock, pages)
+	for i := range nested {
+		nested[i] = client.ContentBlock{
+			Type:   "image",
+			Source: &client.ImageSource{Type: "base64", MediaType: "image/png", Data: strings.Repeat("A", perImageBytes)},
+		}
+	}
+	messages := []client.Message{{
+		Role: "user",
+		Content: client.NewBlockContent([]client.ContentBlock{{
+			Type:        "tool_result",
+			ToolUseID:   "toolu_pdf",
+			ToolContent: nested,
+		}}),
+	}}
+	filterOversizeImages(messages)
+
+	// Count survivors inside the tool_result.
+	var keptImages, droppedPlaceholders int
+	tr := messages[0].Content.Blocks()[0]
+	if tr.Type != "tool_result" {
+		t.Fatalf("expected first block to remain a tool_result, got %s", tr.Type)
+	}
+	nestedOut, ok := tr.ToolContent.([]client.ContentBlock)
+	if !ok {
+		t.Fatalf("tool_result.ToolContent should remain []ContentBlock, got %T", tr.ToolContent)
+	}
+	for _, nb := range nestedOut {
+		switch nb.Type {
+		case "image":
+			keptImages++
+		case "text":
+			if strings.Contains(nb.Text, "aggregate base64") {
+				droppedPlaceholders++
+			}
+		}
+	}
+
+	// At cap=25 MB and per-image=5 MB, exactly the oldest 5 pages must be
+	// dropped (50 MB - 5*5 MB = 25 MB). Pre-fix nuked all 10.
+	if keptImages == 0 {
+		t.Fatal("regression: all images dropped, partial-drop contract broken")
+	}
+	if droppedPlaceholders+keptImages != pages {
+		t.Fatalf("block count mismatch: kept=%d dropped=%d expected total=%d",
+			keptImages, droppedPlaceholders, pages)
+	}
+	// Strong assertion on the exact arithmetic so off-by-one regressions
+	// in the running-total math surface immediately.
+	wantDropped := (pages*perImageBytes - MaxAggregateImageBase64Bytes + perImageBytes - 1) / perImageBytes
+	if droppedPlaceholders != wantDropped {
+		t.Errorf("dropped=%d, want exactly %d (cap arithmetic check)", droppedPlaceholders, wantDropped)
+	}
+
+	// Oldest dropped first: the placeholders should appear at the start of
+	// the nested slice, with surviving images at the end.
+	for i := 0; i < droppedPlaceholders; i++ {
+		if nestedOut[i].Type != "text" {
+			t.Errorf("nested[%d] should be text placeholder (oldest dropped first), got %s", i, nestedOut[i].Type)
+		}
+	}
+	for i := droppedPlaceholders; i < pages; i++ {
+		if nestedOut[i].Type != "image" {
+			t.Errorf("nested[%d] should be image (newer kept), got %s", i, nestedOut[i].Type)
+		}
+	}
+}

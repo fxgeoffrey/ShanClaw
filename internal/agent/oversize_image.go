@@ -123,9 +123,9 @@ func enforceAggregateImageCap(messages []client.Message) {
 				}
 				newBlocks[j] = b
 			case "tool_result":
-				nb, nestedChanged, removed := dropImagesFromToolResultForAggregate(b)
+				nb, nestedChanged, newTotal := dropImagesFromToolResultForAggregate(b, total)
 				if nestedChanged {
-					total -= removed
+					total = newTotal
 					changed = true
 				}
 				newBlocks[j] = nb
@@ -148,17 +148,27 @@ func aggregateImagePlaceholder() client.ContentBlock {
 	}
 }
 
-func dropImagesFromToolResultForAggregate(b client.ContentBlock) (client.ContentBlock, bool, int) {
+// dropImagesFromToolResultForAggregate evicts nested images from a tool_result
+// block ONE AT A TIME (oldest first) until the running aggregate total falls
+// under MaxAggregateImageBase64Bytes. Previously this function dropped ALL
+// nested images unconditionally once entered — a 20-page PDF in a single
+// tool_result lost all 20 pages when only the oldest 2-3 needed to go.
+// Returns (modified block, whether anything changed, new running total).
+func dropImagesFromToolResultForAggregate(b client.ContentBlock, currentTotal int) (client.ContentBlock, bool, int) {
 	nested, ok := b.ToolContent.([]client.ContentBlock)
 	if !ok {
-		return b, false, 0
+		return b, false, currentTotal
 	}
 	newNested := make([]client.ContentBlock, len(nested))
 	changed := false
-	removed := 0
+	total := currentTotal
 	for k, nb := range nested {
+		if total <= MaxAggregateImageBase64Bytes {
+			newNested[k] = nb
+			continue
+		}
 		if nb.Type == "image" && nb.Source != nil && len(nb.Source.Data) > 0 {
-			removed += len(nb.Source.Data)
+			total -= len(nb.Source.Data)
 			newNested[k] = aggregateImagePlaceholder()
 			changed = true
 			continue
@@ -166,11 +176,11 @@ func dropImagesFromToolResultForAggregate(b client.ContentBlock) (client.Content
 		newNested[k] = nb
 	}
 	if !changed {
-		return b, false, 0
+		return b, false, currentTotal
 	}
 	out := b
 	out.ToolContent = newNested
-	return out, true, removed
+	return out, true, total
 }
 
 func oversizeImageSource(s *client.ImageSource) bool {

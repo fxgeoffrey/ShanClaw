@@ -1,33 +1,48 @@
 # Kocoro (`shan`)
 
-AI agent runtime powered by Shannon. Daemon mode connects to Shannon Cloud via WebSocket for channel messaging (Slack, LINE, Feishu, Telegram, webhook), with local tool execution and streaming results. Also provides interactive TUI, one-shot CLI, and MCP server. Named agents with independent instructions/memory, local tools for macOS computer control, MCP client for third-party integrations (GitHub, databases, etc.), local scheduled tasks via launchd, and remote research/swarm orchestration via the Shannon Gateway API.
+**An AI cowork agent that lives on your Mac.**
 
-## Architecture
+Kocoro runs AI agents locally with full computer access — files, apps, browser, terminal, screen — and connects to your team's Slack / LINE / Feishu / Telegram channels via Shannon Cloud. Named agents with their own memory and tools, MCP-native, daemon-driven. The `shan` CLI is the runtime; **Kocoro Desktop** is the recommended way to use it.
 
-Interactive diagram of how the daemon, Shannon Cloud, MCP servers, and local tools fit together:
-[**waylandz.com/diagrams/shanclaw-architecture.html**](https://www.waylandz.com/diagrams/shanclaw-architecture.html)
+### Get Kocoro
+
+- **[Download Kocoro Desktop (macOS)](https://kocoro.ai/download/mac)** — DMG, the recommended way to use Kocoro
+- **CLI only** — `npm install -g @kocoro/kocoro` (build-from-source and other options under [Installation](#installation))
+
+> **Coming from Claude Code?** Kocoro Desktop can import your existing agents, skills, and instructions from `~/.claude/` in one click — preview-then-apply via the daemon's `/migrate/claude-code/*` endpoints.
+
+[**Interactive architecture diagram →**](https://www.waylandz.com/diagrams/shanclaw-architecture.html)
+
+## Contents
+
+- [Installation](#installation) · [Updating](#updating) · [Setup](#setup) · [Requirements](#requirements)
+- [Quick Start](#quick-start) · [One-Shot Examples](#one-shot-examples) · [Multi-step Cowork Recipes](#multi-step-cowork-recipes)
+- [CLI Usage](#cli-usage) · [Commands](#commands)
+- [Local Tools](#local-tools) · [Permission Engine](#permission-engine) · [Audit Logging](#audit-logging) · [Hooks](#hooks)
+- [MCP Server](#mcp-server) · [MCP Client](#mcp-client)
+- [Configuration](#configuration) · [Instructions & Memory](#instructions--memory) · [Sessions](#sessions)
+- [Named Agents](#named-agents)
+- [Daemon Mode](#daemon-mode) · [Local HTTP API](#local-http-api-port-7533) · [Prompt Suggestion](#prompt-suggestion-ghost-text-in-input)
+- [Memory (Kocoro Cloud)](#memory-kocoro-cloud-feature) · [Session sync to Cloud](#session-sync-to-cloud)
+- [Scheduled Tasks](#scheduled-tasks) · [File System Watcher](#file-system-watcher) · [Heartbeat Mode](#heartbeat-mode)
+- [SSE Event Handling](#sse-event-handling) · [UI Behavior](#ui-behavior) · [Keyboard](#keyboard)
+- [Building & Testing](#building--testing) · [Known Limitations](#known-limitations) · [License](#license)
 
 ## Installation
 
-### Option A: npm (Recommended)
+**npm (recommended)** — auto-updates on every launch:
 
 ```bash
 npm install -g @kocoro/kocoro
 ```
 
-Auto-updates on every launch — no manual upgrading needed.
-
-### Option B: Install Script
-
-Downloads the latest release binary to `/usr/local/bin`:
+**Install script** — downloads the latest binary to `/usr/local/bin`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Kocoro-lab/Kocoro/main/install.sh | sh
 ```
 
-### Option C: Build from Source
-
-Requires **Go 1.25+**:
+**From source** — requires **Go 1.25+**:
 
 ```bash
 git clone https://github.com/Kocoro-lab/Kocoro.git
@@ -35,273 +50,149 @@ cd Kocoro
 go install .
 ```
 
-> **Note:** `go install` places the binary in `$GOPATH/bin` (default: `~/go/bin`).
-> Make sure this directory is in your PATH:
-> ```bash
-> # Add to your ~/.zshrc or ~/.bashrc if not already present:
-> export PATH="$HOME/go/bin:$PATH"
-> ```
-> Then restart your shell or run `source ~/.zshrc`.
+`go install` places the binary in `$GOPATH/bin` (default `~/go/bin`). Add `export PATH="$HOME/go/bin:$PATH"` to your shell rc if it's not already on PATH.
 
-### Verify Installation
-
-```bash
-shan --help
-```
+Verify with `shan --help`.
 
 ## Updating
 
-shan auto-updates when you launch it. You can also update explicitly:
+shan auto-updates on launch. To update explicitly:
 
 ```bash
-shan update              # manual update
-npm update -g @kocoro/kocoro  # if installed via npm (re-runs postinstall to fetch latest)
+shan update                       # manual update
+npm update -g @kocoro/kocoro      # via npm (re-runs postinstall to fetch latest)
 ```
 
 ## Setup
 
 Kocoro requires a Gateway API for LLM completions and remote tools.
 
-**Option A: Shannon Cloud** — get an API key from [shannon.run](https://shannon.run):
+**Shannon Cloud** — get an API key from [shannon.run](https://shannon.run):
 
 ```bash
 shan --setup
 # Enter endpoint: https://api-dev.shannon.run
-# Enter API key: <your key from shannon.run>
+# Enter API key: <your key>
 ```
 
-**Option B: Self-hosted** — run the open-source [Shannon Gateway](https://github.com/Kocoro-lab/Shannon) locally:
+**Self-hosted** — run the open-source [Shannon Gateway](https://github.com/Kocoro-lab/Shannon) locally, then `shan --setup` with `http://localhost:8080` and an empty API key.
 
-```bash
-# Clone and run Shannon Gateway (see repo for full instructions)
-git clone https://github.com/Kocoro-lab/Shannon.git
-cd Shannon && docker compose up -d
-
-# Point shan to your local instance
-shan --setup
-# Enter endpoint: http://localhost:8080
-# Enter API key: (leave empty for local)
-```
-
-**Option C: Ollama (local LLMs)** — run models locally with [Ollama](https://ollama.com):
-
-```bash
-# Install and start Ollama, then pull a model
-ollama pull llama3.1
-
-# Configure shan to use Ollama
-# In ~/.shannon/config.yaml:
-provider: ollama
-ollama:
-  endpoint: "http://localhost:11434"   # default, can be omitted
-  model: "llama3.1"
-```
-
-When `provider: ollama` is set, Kocoro connects to Ollama's OpenAI-compatible API. Standard function tools work; native Anthropic tool types (computer use) are not available. Thinking models (e.g. Qwen3) are supported — reasoning output is surfaced with a `[thinking]` prefix.
+**Ollama (local LLMs)** — set `provider: ollama` in `~/.shannon/config.yaml`. See [docs/config-reference.md](docs/config-reference.md#connection) for the full block.
 
 ## Quick Start
 
 ```bash
-# Interactive mode — chat with Shannon in your terminal
-shan
-
-# One-shot mode — ask a question and get an answer
-shan "who is wayland zhang"
-
-# Use a named agent
-shan --agent ops-bot "check production health"
-
-# Configure your endpoint and API key
-shan --setup
+shan                                         # interactive TUI
+shan "who is wayland zhang"                  # one-shot
+shan --agent ops-bot "check prod health"     # named agent
+shan --setup                                 # configure endpoint + API key
 ```
 
-### Interactive Commands
+In the TUI, type `/` to see built-in commands:
 
-In the TUI (`shan`), type `/` to access built-in commands:
-
-```bash
-/research deep "latest advances in AI agents"    # deep research via Gateway
-/swarm "build a marketing plan for our launch"   # multi-agent orchestration
-/model large                                      # switch to large model
-/copy                                             # copy last response to clipboard
-/sessions                                         # browse and resume past sessions
-/session new                                      # start a fresh session
-/search websocket reconnect                       # search session history
+```
+/research deep "latest advances in AI agents"
+/swarm "build a marketing plan for our launch"
+/model large
+/sessions                       # browse and resume past sessions
+/search websocket reconnect     # search session history
 ```
 
 ### One-Shot Examples
 
-**Web Search & Research**
 ```bash
-shan "who is wayland zhang"
-shan "what happened in the news today"
+# Web research
 shan "compare React vs Vue for a new project"
-```
 
-**File Operations** — `file_read`, `file_write`, `file_edit`, `glob`, `grep`, `directory_list`
-```bash
+# File ops — file_read, file_write, file_edit, glob, grep, directory_list
 shan "find all TODO comments in this project"
-shan "read the main.go file and explain what it does"
-shan "list all files in the current directory"
-shan "create a .gitignore for a Go project"
 shan "replace all tabs with spaces in config.yaml"
-shan "search for any hardcoded passwords in the codebase"
-```
 
-**Archives** — `archive_inspect`, `archive_extract` (zip / tar / tar.gz / tgz)
-```bash
+# Archives — archive_inspect (no approval), archive_extract (approval)
 shan "list what's inside ./backup.zip"
-shan "extract backup.zip into ./restore — use overwrite if it already exists"
-shan "inspect data.tar.gz and show me the largest files"
-```
+shan "extract backup.zip into ./restore — overwrite if it exists"
 
-Both tools use only Go standard library (no external dependencies). `archive_inspect` is read-only and never asks for approval. `archive_extract` always asks (writes to disk), refuses encrypted zips, symlinks, absolute-path entries, setuid bits, and device files, and caps payload at 50 MB per entry / 200 MB total / 500 entries. Extraction is atomic: a staging directory is built first and renamed into `dest` only on full success, so a failed run leaves no half-populated output.
-
-**Documents** — `pdf_to_text`, `docx_to_text`, `xlsx_to_text`, `pptx_to_text`
-```bash
+# Documents — pdf_to_text, docx_to_text, xlsx_to_text, pptx_to_text
 shan "extract the text from quarterly-report.pdf, pages 3 to 8"
-shan "summarize the contents of slides.pptx"
 shan "what's in pricing.xlsx Sheet2?"
-```
 
-Each tool prefers a high-quality external extractor (poppler / pandoc / xlsx2csv) and falls back to a zero-dependency unzip + raw-XML strip when that extractor isn't installed. Read-only; no approval; output capped at 100K characters with a `[Truncated: ...]` marker. The fallback path is intentionally simple — it's "good enough for the LLM to read" without preserving table structure — install the primary extractor for better fidelity.
+# Shell & system — bash, system_info, process
+shan "run go test and fix any failures"
+shan -y "kill the process on port 3000"
+
+# macOS apps — applescript (use -y to auto-approve)
+shan -y "open Safari and navigate to github.com"
+shan -y "set my Mac volume to 50%"
+
+# GUI via accessibility tree — annotate → click by ref
+shan -y "open Calendar and show me today's events"
+shan -y "open TextEdit and type '你好世界 🌍'"
+
+# Vision + computer use — screenshot, computer
+shan -y "open Chrome, go to x.com, and post a tweet"
+
+# Browser automation — Playwright MCP (preferred) or pinchtab/chromedp fallback
+shan -y "open https://news.ycombinator.com and get the top 5 stories"
+
+# Ghostty terminal — requires Ghostty >= 1.3.0
+shan ghostty workspace writer ops-bot      # open one window per agent
+
+# MCP integrations (requires server config — see "MCP Client")
+shan "list files on my Desktop"            # filesystem MCP
+shan "show all tables in the database"     # sqlite MCP
+```
 
 #### Inbound file format support
 
 | Format | Built-in fallback | Better with |
 |---|---|---|
-| PDF | n/a — suggests uploading the PDF so cloud renders it as a native Anthropic document block | `pdftotext` (`brew install poppler`) |
+| PDF | n/a — suggests upload so cloud renders it as a native Anthropic document block | `pdftotext` (`brew install poppler`) |
 | DOCX | unzip + XML strip (raw text) | `pandoc` (`brew install pandoc`) |
 | XLSX | unzip + raw XML | `xlsx2csv` (`pip install xlsx2csv`) |
 | PPTX | unzip + XML strip | `pandoc` (`brew install pandoc`) |
 | HEIC / AVIF | transcoded server-side by cloud | — |
 
-**Shell & System** — `bash`, `system_info`, `process`
-```bash
-shan "run go test and fix any failures"
-shan "what's using port 8080"
-shan "show my system info — CPU, memory, disk"
-shan "list all running node processes"
-shan -y "kill the process on port 3000"
-```
-
-**macOS App Control** — `applescript` (use `-y` to auto-approve)
-```bash
-shan -y "open Calculator"
-shan -y "use applescript to open Safari and navigate to github.com"
-shan -y "use applescript to open my Downloads folder in Finder"
-shan -y "set my Mac volume to 50%"
-shan -y "get the name of the frontmost application"
-```
-
-**Notifications & Clipboard** — `notify`, `clipboard`
-```bash
-shan -y "send me a notification saying 'Build complete!'"
-shan -y "copy the current date to my clipboard"
-shan -y "read my clipboard and summarize the content"
-```
-
-**GUI Interaction via Accessibility Tree** — `accessibility`, `wait_for` (annotate → click by ref)
-```bash
-shan -y "annotate the Finder window and tell me what you see"
-shan -y "open Calendar and show me today's events"
-shan -y "open System Settings and check my display resolution"
-shan -y "open Finder to Downloads and list the files"
-shan -y "open TextEdit, create a new document, and type 'hello world'"
-shan -y "open Notes and type '你好世界 🌍'"
-shan -y "find the search field in Safari and type 'shannon ai'"
-```
-
-**Screenshot & Computer Use** — `screenshot`, `computer` (vision + CGEvent, CJK/emoji safe)
-```bash
-shan -y "take a screenshot and tell me what's on my screen"
-shan -y "open LINE app and bring it to the front"
-shan -y "open Chrome, go to x.com, and post a tweet"
-shan -y "click on the Finder icon in the dock"
-```
-
-**Browser Automation** — Playwright MCP (preferred) or legacy `browser` (pinchtab/chromedp fallback)
-```bash
-shan -y "open https://news.ycombinator.com and get the top 5 stories"
-shan -y "navigate to waylandz.com and take a browser screenshot"
-shan -y "go to wikipedia.org, search for 'Shannon entropy', and summarize the page"
-```
-
-**Ghostty Terminal** — `ghostty` (requires [Ghostty](https://ghostty.org) >= 1.3.0)
-```bash
-# In TUI — agent opens and controls Ghostty terminals
-"open a new terminal and run top"
-"open a new split to the right running go test ./... -v and tell me the results"
-"set up my dev environment: open a new terminal running the server, and a new split tailing logs"
-
-# CLI — open one Ghostty window per agent
-shan ghostty workspace                    # all agents
-shan ghostty workspace writer ops-bot     # specific agents
-```
-
-**HTTP Requests** — `http`
-```bash
-shan "check if https://api.github.com is responding"
-shan "fetch https://httpbin.org/ip and show my public IP"
-```
-
-**MCP Integrations** (requires MCP server config in `~/.shannon/config.yaml`)
-```bash
-shan "list the files in my Desktop folder"          # filesystem MCP
-shan "show all tables in the database"              # sqlite MCP
-```
-
 ### Multi-step Cowork Recipes
 
-Beyond one-shot prompts, the daemon is meant to carry multi-step work that spans research, browser automation, and artifact generation in a single session. A growing set of recipes lives in [`examples/cookbook/`](examples/cookbook/):
+The daemon is meant to carry multi-step work that spans research, browser automation, and artifact generation in a single session. Pattern-focused recipes live in [`examples/cookbook/`](examples/cookbook/):
 
-- **[Publish a Truth Social digest to note.com from Slack](examples/cookbook/slack-to-note-publish.md)** — `web_search` + `web_fetch` for research → Playwright MCP to publish in the user's authenticated browser.
+- **[Publish a Truth Social digest to note.com from Slack](examples/cookbook/slack-to-note-publish.md)** — `web_search` + `web_fetch` → Playwright MCP to publish in the user's authenticated browser.
 - **[Scrape a Substack and generate a Word doc](examples/cookbook/substack-scrape-to-docx.md)** — attempted browser scraping, pivot to the site's JSON API, then `docx` skill → doc on the user's Desktop.
 
-Each recipe is short and pattern-focused — key tools, gotchas, when to reach for it. Add one when you find a task shape you keep coming back to; [`examples/cookbook/README.md`](examples/cookbook/README.md) has the format.
+Add one when you find a task shape you keep coming back to; [`examples/cookbook/README.md`](examples/cookbook/README.md) has the format.
 
 ## Requirements
 
 - **macOS** (clipboard, notifications, AppleScript, screencapture, accessibility)
-- **Shannon Gateway** at configurable endpoint (for LLM completions + remote tools)
+- **Shannon Gateway** at configurable endpoint
 - **Accessibility permission** granted in System Settings > Privacy & Security > Accessibility (for `accessibility` and `computer` tools)
-- **Chrome** (optional, for browser automation — Playwright MCP preferred, chromedp fallback with isolated profile)
-- **[Ghostty](https://ghostty.org) >= 1.3.0** (optional, for `ghostty` tool — terminal tabs, splits, input)
+- **Chrome** (optional, for browser automation — Playwright MCP preferred)
+- **[Ghostty](https://ghostty.org) >= 1.3.0** (optional, for `ghostty` tool)
 
 ## CLI Usage
 
 ```bash
 shan                              # interactive TUI
-shan "who is wayland zhang"       # one-shot mode (prompts for tool approval)
-shan -y "query"                   # one-shot, auto-approve all tools
+shan "who is wayland zhang"       # one-shot (prompts for tool approval)
+shan -y "query"                   # auto-approve all tools
 shan --agent ops-bot "query"      # use a named agent
 shan --setup                      # configure endpoint + API key
-shan mcp serve                    # start MCP server over stdio
-shan daemon start                 # start channel messaging daemon
-shan schedule list                # manage local scheduled tasks
+shan mcp serve                    # MCP server over stdio
+shan daemon start                 # channel messaging daemon
+shan schedule list                # local scheduled tasks
 ```
 
-### Flags
-
-| Flag | Short | Description |
-|------|-------|-------------|
-| `--yes` | `-y` | Auto-approve all tool calls in one-shot mode |
-| `--agent` | | Named agent to use (from `~/.shannon/agents/`) |
-| `--dangerously-skip-permissions` | | Skip all permission checks in interactive mode |
-| `--setup` | | Run interactive setup wizard |
+Flags: `-y/--yes` auto-approve; `--agent` named agent; `--dangerously-skip-permissions` skip checks in interactive mode; `--setup` interactive wizard.
 
 ## Commands
 
-Type `/` in the TUI to see the interactive command menu:
+Type `/` in the TUI for the interactive menu:
 
 | Command | Description |
 |---------|-------------|
 | `/help` | Show help |
 | `/research [quick\|standard\|deep] <query>` | Remote research via Gateway |
 | `/swarm <query>` | Multi-agent swarm orchestration |
-
-> Both `/research` and `/swarm` are also accepted via `POST /message` with `Accept: text/event-stream` (HTTP clients including Kocoro Desktop).
-
 | `/copy` | Copy last response to clipboard |
 | `/model [small\|medium\|large]` | Switch model tier |
 | `/rename <title>` | Rename current session |
@@ -319,158 +210,127 @@ Type `/` in the TUI to see the interactive command menu:
 | `/update` | Self-update from GitHub releases |
 | `/setup` | Reconfigure endpoint & API key |
 | `/quit` | Exit (alias: `/exit`) |
-| `/<custom>` | Custom commands from global/project command dirs plus agent commands and attached agent skills |
+| `/<custom>` | Custom commands from global/project command dirs, plus agent commands and attached skills |
 
-### Subcommands
+> `/research` and `/swarm` are also accepted via `POST /message` with `Accept: text/event-stream` (HTTP clients including Kocoro Desktop).
 
-| Command | Description |
-|---------|-------------|
-| `shan mcp serve` | Start MCP server over stdio |
-| `shan daemon start` | Start channel messaging daemon |
-| `shan daemon stop` | Stop background daemon |
-| `shan daemon status` | Show daemon connection status |
-| `shan schedule create` | Create a scheduled task |
-| `shan schedule list` | List scheduled tasks |
-| `shan schedule update <id>` | Update a scheduled task |
-| `shan schedule remove <id>` | Remove a scheduled task |
-| `shan schedule enable <id>` | Enable a scheduled task |
-| `shan schedule disable <id>` | Disable a scheduled task |
-| `shan schedule sync` | Re-sync failed launchd plists |
+Subcommands: `shan mcp serve`, `shan daemon {start,stop,status}`, `shan schedule {create,list,update,remove,enable,disable,sync}`.
 
 ## Local Tools
 
-Local tools executed on your macOS machine:
+Tools executed on your macOS machine. Detailed schemas live in each tool's `Info()` method in `internal/tools/`.
 
 ### File Operations
 
 | Tool | Approval | Description |
 |------|----------|-------------|
-| `file_read` | CWD auto | Read files with line numbers (offset/limit). Repeat reads of the same range return a short "unchanged since last read" stub when the file has not been modified. Oversized text reads (~25K tokens estimated) return an error directing the caller to use `offset+limit`. Images (png/jpg/gif/webp) returned as base64 vision blocks; auto-compresses large images so vision works on any screenshot without manual resizing. PDFs rendered page-by-page via Swift/PDFKit (offset=start page, limit=page count). |
-| `file_write` | Yes | Write/create files, creates parent dirs |
-| `file_edit` | Yes | Find-and-replace. `old_string` must be unique by default; pass `replace_all: true` to rewrite every occurrence (useful for renames). |
-| `glob` | CWD auto | Find files by pattern (supports `**` recursive) |
-| `grep` | CWD auto | Search file contents (ripgrep, falls back to grep). `output_mode` selects `files_with_matches` (default), `content`, or `count`. Supports `glob` filtering, `head_limit`, `offset`, `type`, `ignore_case`, `multiline`, `before_context`/`after_context`, and `sort_by` (`mtime` newest-first). VCS metadata directories (`.git`, etc.) are skipped automatically; rg output uses `--max-columns 500` to keep minified lines from dominating results. |
-| `directory_list` | CWD auto | List directory contents with sizes |
-| `archive_inspect` | No | List the contents of a `.zip / .tar / .tar.gz / .tgz` archive without extracting. Returns entry list (name, size, is_dir, mode) and totals. |
-| `archive_extract` | Yes | Extract a `.zip / .tar / .tar.gz / .tgz` archive to `dest`. `dest` must not exist unless `overwrite=true`. Atomic via staging dir + rename. Rejects encrypted zips, symlink/absolute-path/setuid/device entries. Caps: 500 entries, 50 MB per entry, 200 MB total. Single-layer only (nested archives stay as files). |
+| `file_read` | CWD auto | Read files with line numbers (`offset`/`limit`). Repeat reads of the same unchanged range return a short "unchanged since last read" stub. Oversized text reads (~25K tokens estimated) return an error directing to use `offset+limit`. Images (png/jpg/gif/webp) returned as base64 vision blocks; auto-compresses large images. PDFs rendered page-by-page via Swift/PDFKit. |
+| `file_write` | Yes | Write/create files, creates parent dirs. |
+| `file_edit` | Yes | Find-and-replace. `old_string` must be unique unless `replace_all: true`. |
+| `glob` | CWD auto | Find files by pattern (supports `**`). |
+| `grep` | CWD auto | Search file contents (ripgrep, falls back to grep). `output_mode`: `files_with_matches` (default), `content`, `count`. Supports `glob`, `head_limit`, `offset`, `type`, `ignore_case`, `multiline`, `before_context`/`after_context`, `sort_by` (`mtime`). VCS dirs skipped; `--max-columns 500` keeps minified lines from dominating. |
+| `directory_list` | CWD auto | List directory contents with sizes. |
+| `archive_inspect` | No | List `.zip / .tar / .tar.gz / .tgz` contents without extracting. |
+| `archive_extract` | Yes | Extract to `dest` (must not exist unless `overwrite=true`). Atomic via staging dir + rename. Rejects encrypted zips, symlink / absolute-path / setuid / device entries. Caps: 500 entries, 50 MB per entry, 200 MB total. Single-layer only. |
 
 ### Documents
 
 | Tool | Approval | Description |
 |------|----------|-------------|
-| `pdf_to_text` | No | Extract plain text from a PDF using poppler's `pdftotext -layout`. Optional `pages` selector: `"all"` (default), `"5"` (single page), or `"1-10"` (range). Requires `pdftotext` on PATH — if missing, returns an install hint (`brew install poppler`) and suggests uploading the PDF so cloud renders it as a native Anthropic document block. Output capped at 100K characters. |
-| `docx_to_text` | No | Extract plain text from a `.docx`. Prefers `pandoc -t plain --wrap=preserve`; falls back to unzipping and stripping XML tags from `word/document.xml`. Install hint on fallback: `brew install pandoc`. Output capped at 100K characters. |
-| `xlsx_to_text` | No | Extract CSV/plain-text from a `.xlsx`. Prefers `xlsx2csv` (`-a` to dump every sheet); falls back to unzipping and reading `sharedStrings.xml` + sheet XML. `sheet` selector: `"all"` (default), a sheet name, or a 1-based index. Install hint on fallback: `pip install xlsx2csv`. Output capped at 100K characters. |
-| `pptx_to_text` | No | Extract plain text from a `.pptx`. Prefers `pandoc -t plain`; falls back to unzipping and stripping XML tags from each `ppt/slides/slide*.xml`. Install hint on fallback: `brew install pandoc`. Output capped at 100K characters. |
+| `pdf_to_text` | No | Extract plain text via poppler's `pdftotext -layout`. Optional `pages`: `"all"` (default), `"5"`, `"1-10"`. Install hint on missing binary. Output capped at 100K chars. |
+| `docx_to_text` | No | Prefers `pandoc -t plain --wrap=preserve`; falls back to unzip + XML strip from `word/document.xml`. |
+| `xlsx_to_text` | No | Prefers `xlsx2csv` (`-a` for every sheet); fallback unzip + `sharedStrings.xml`. `sheet` selector: `"all"` (default), name, or 1-based index. |
+| `pptx_to_text` | No | Prefers `pandoc -t plain`; fallback unzip + XML strip per slide. |
 
 ### System & Shell
 
 | Tool | Approval | Description |
 |------|----------|-------------|
-| `bash` | Auto for safe | Shell commands, 120s timeout, safe commands auto-approved. Output is capped (default 30K chars) with head+tail truncation; pass `max_output_chars` to override (raise or lower). |
-| `system_info` | No | OS, arch, hostname, CPU, memory, disk |
-| `process` | Auto for list/ports | Process management: list, ports, kill |
-| `http` | Network allowlist | HTTP client, localhost auto-approved |
-| `think` | No | Scratchpad for reasoning — the thought is captured in the tool call and the result is an `ack` so it does not echo back into context. **Conditionally registered (2026-05+)**: skipped on the default gateway + native-thinking path (Sonnet 4.6 / Opus 4.7 with `agent.thinking: true` cover the same role via interleaved thinking blocks). Still registered when `agent.thinking: false`, `provider: ollama`, or escape-hatch `agent.force_think_tool: true`. |
+| `bash` | Auto for safe | Shell commands, 120s default timeout (per-call `timeout` arg clamped at `tools.bash_max_timeout`, default 600s). Output capped at 30K chars with head+tail truncation; pass `max_output_chars` to override. Process-group kill on timeout. |
+| `system_info` | No | OS, arch, hostname, CPU, memory, disk. |
+| `process` | Auto for list/ports | Process management: list, ports, kill. |
+| `http` | Network allowlist | HTTP client, localhost auto-approved. |
+| `think` | No | Scratchpad for reasoning. **Conditionally registered**: skipped on the default gateway + native-thinking path (Sonnet 4.6 / Opus 4.7 with `agent.thinking: true` cover this via interleaved thinking). Still registered when `agent.thinking: false`, `provider: ollama`, or `agent.force_think_tool: true`. |
 
 ### macOS Control
 
 | Tool | Approval | Description |
 |------|----------|-------------|
-| `accessibility` | Yes | **Primary GUI tool.** Reads macOS accessibility tree via persistent `ax_server` (compiled Swift sidecar). Actions: `read_tree`, `click`, `press`, `set_value`, `get_value`, `find`, `scroll`, `annotate`. Semantic depth traversal (layout containers cost 0), click auto-fallback (AXPress → synthetic coordinate click). Works with Finder, Safari, Chrome, TextEdit, Calendar, System Settings, etc. |
+| `accessibility` | Yes | **Primary GUI tool.** Reads macOS accessibility tree via persistent `ax_server` (compiled Swift sidecar). Actions: `read_tree`, `click`, `press`, `set_value`, `get_value`, `find`, `scroll`, `annotate`. Semantic depth traversal (layout containers cost 0); click auto-fallback (AXPress → synthetic coordinate click). Works with Finder, Safari, Chrome, TextEdit, Calendar, System Settings, etc. |
 | `wait_for` | Yes | Wait for UI conditions: `elementExists`, `elementGone`, `titleContains`, `urlContains`, `titleChanged`, `urlChanged`. Use instead of sleep after navigation or app launch. |
-| `clipboard` | Yes | Read/write system clipboard (pbcopy/pbpaste) |
-| `notify` | Yes | macOS desktop notifications via osascript |
-| `applescript` | Yes | Execute arbitrary AppleScript. Use for operations with no AX equivalent (e.g., "tell Finder to empty trash") |
-| `screenshot` | Yes | Screen capture (fullscreen/window/region). Visual fallback when accessibility tree is insufficient |
-| `computer` | Yes | Mouse/keyboard via CGEvent (CJK/emoji safe). Click, type, hotkey, move, screenshot. Fallback when accessibility refs don't work or for drag operations. No Python dependency. |
-| `browser` | Yes | Browser automation via Playwright MCP (preferred), pinchtab, or chromedp fallback. When Playwright MCP is configured, the legacy browser tool is auto-disabled. Isolated profile for web scraping; pinchtab connects to user's real browser for authenticated sessions. |
-| `ghostty` | Yes | Ghostty terminal control: open tabs, splits, send input. Requires [Ghostty](https://ghostty.org) >= 1.3.0. |
+| `clipboard` | Yes | Read/write system clipboard. |
+| `notify` | Yes | macOS desktop notifications. |
+| `applescript` | Yes | Arbitrary AppleScript. Use for operations with no AX equivalent. |
+| `screenshot` | Yes | Screen capture (fullscreen/window/region). |
+| `computer` | Yes | Mouse/keyboard via CGEvent (CJK/emoji safe). Click, type, hotkey, move, screenshot. No Python dependency. |
+| `browser` | Yes | Playwright MCP (preferred), pinchtab, or chromedp fallback. When Playwright MCP is configured, the legacy browser tool is auto-disabled. Pinchtab connects to user's real browser for authenticated sessions; chromedp uses an isolated profile. |
+| `ghostty` | Yes | Ghostty terminal control: open tabs, splits, send input. |
 
-### Scheduling
-
-| Tool | Approval | Description |
-|------|----------|-------------|
-| `schedule_create` | Yes | Create a launchd-backed scheduled task |
-| `schedule_list` | No | List all scheduled tasks with sync status |
-| `schedule_update` | Yes | Update cron, prompt, or enabled state |
-| `schedule_remove` | Yes | Remove a scheduled task and unload plist |
-
-### Session Search
+### Scheduling, Search, Memory & Skills
 
 | Tool | Approval | Description |
 |------|----------|-------------|
-| `session_search` | No | FTS5 keyword search across past session messages |
-
-### Memory, Skills & Cloud
-
-| Tool | Approval | Description |
-|------|----------|-------------|
-| `memory_append` | No | Append entries to agent MEMORY.md (flock-protected) |
+| `schedule_create` / `_update` / `_remove` | Yes | Manage launchd-backed scheduled tasks. |
+| `schedule_list` | No | List with sync status. |
+| `session_search` | No | FTS5 keyword search across past session messages. |
+| `memory_append` | No | Append entries to agent MEMORY.md (flock-protected). |
 | `use_skill` | No | Activate a skill by name — returns full SKILL.md body. Skill discovery auto-suggests relevant skills each turn via `model_tier: small` prefetch. |
-| `cloud_delegate` | Yes | Delegate tasks to Shannon Cloud for remote research/swarm execution |
-| `publish_to_web` | Yes | ⚠️ Upload a local file to a **public** S3 URL on Shannon Cloud (50 MiB cap). Requires both `cloud.enabled` and `api_key`. Path blocklist (`.env`, `.ssh`, `credentials`, `*.pem`, …) and extension allowlist (html/md/txt/pdf/png/jpg/svg/csv/json/mp4/…) prevent obvious leaks; mandatory `purpose` field is shown to the user during approval. Extend the allowlist with `cloud.publish_allowed_extensions: [".go", ...]`. Files can be revoked via `retract_published_file` (DB row + S3 object deleted), but **anyone with the URL can read content until then** — plus up to 5 minutes after, via CDN edge cache — so secrets must still never be uploaded. |
-| `list_my_published_files` | No | List the current user's still-active files previously published via `publish_to_web`. Paginated (`limit` default 20, max 100; `offset` default 0), newest first. Read-only. Returns `id` (UUID), filename, content-type, size, created_at, and the public CDN URL per entry, plus `total_count` of active rows. Requires `cloud.enabled` + `api_key`. |
-| `retract_published_file` | Yes | ⚠️ Retract (soft-delete + S3 hard-delete) a previously published file. Args: `id` (UUID from `list_my_published_files`, **NOT** the URL). Owner-only — cross-user calls return a friendly 404 ("not found / already retracted / not yours"; cloud deliberately conflates the three to prevent existence leaks). CDN edge caches may still serve content for up to 5 minutes after the call succeeds. Approval required each time by default, but **unlike `publish_to_web`** it is NOT on the high-risk auto-approval denylist — the user can opt in to `always_allow_tools` to skip the prompt after the first one (retract destroys public content rather than creating it). Requires `cloud.enabled` + `api_key`. |
-| `generate_image` | Yes | ⚠️ Generate an image from a text `prompt` via Shannon Cloud (`POST /api/v1/images/generations`, backed by `gpt-image-2`); returns a **public, permanent** CDN URL. Args: `prompt` (1–32000 chars, required), `size` (`1024x1024`/`1024x1536`/`1536x1024`/`auto`), `quality` (`auto`/`low`/`medium`/`high` — affects latency: 30s→180s), `n` (1–10), `background` (`transparent`/`opaque`/`auto`). Requires both `cloud.enabled` and `api_key`. Each call consumes paid quota — keep `n=1` unless the user asks for variants. For charts / data viz use `kocoro-generative-ui` instead. |
-| `edit_image` | Yes | ⚠️ Edit one or more existing images via Shannon Cloud (`POST /api/v1/images/edits`, backed by `gpt-image-2`); returns a new **public, permanent** CDN URL. Args: `prompt` (1–32000 chars, required) describing the modification, `image_urls` (required, **1–4 entries that must each start with `https://static.kocoro.ai/`** — external URLs are rejected; pipe through `generate_image` or `publish_to_web` first to obtain a CDN URL), plus the same `size`/`quality`/`n`/`background` enums as `generate_image`. No mask field — describe the region in natural language. Latency: 40–70s (single source, low) up to 200–350s (4 sources, high). Each source charges ~85 image-tokens on top of the prompt. Requires both `cloud.enabled` and `api_key`. |
+
+### Cloud Tools (gated on `cloud.enabled` + `api_key`)
+
+| Tool | Approval | Description |
+|------|----------|-------------|
+| `cloud_delegate` | Yes | Delegate to Shannon Cloud for remote research/swarm execution. |
+| `publish_to_web` | Yes ⚠️ | Upload to a **public** S3 URL on Shannon Cloud (50 MiB cap). Path blocklist (`.env`, `.ssh`, `credentials`, `*.pem`, …) and extension allowlist (html/md/txt/pdf/png/jpg/svg/csv/json/mp4/…). Extend allowlist via `cloud.publish_allowed_extensions`. Files retractable via `retract_published_file`, but **anyone with the URL can read content until then** plus up to 5 minutes after via CDN edge cache. |
+| `list_my_published_files` | No | List the user's still-active published files. Paginated (`limit` default 20, max 100). |
+| `retract_published_file` | Yes ⚠️ | Retract a published file by `id` (UUID from list, **not** the URL). Owner-only; cross-user calls return a friendly 404 (cloud conflates not-found/already-retracted/not-yours to prevent existence leaks). NOT on the high-risk auto-approval denylist — user can opt in to `always_allow_tools`. CDN edges may serve content for up to 5 min after success. |
+| `generate_image` | Yes ⚠️ | Generate via `POST /api/v1/images/generations` (`gpt-image-2`); returns a **public permanent** CDN URL. Args: `prompt`, `size`, `quality` (latency 30s→180s), `n` (1–10), `background`. Each call consumes paid quota. For charts use `kocoro-generative-ui` instead. |
+| `edit_image` | Yes ⚠️ | Edit via `POST /api/v1/images/edits`. Args: `prompt` + `image_urls` (1–4, must start with `https://static.kocoro.ai/` — external URLs rejected; pipe through `generate_image` / `publish_to_web` first). No mask field — describe the region in prose. Latency 40s–350s. |
 
 ### Tool Approval Flow
 
 ```
-Tool call from LLM
-  → Permission engine (hard-block → denied_commands → split compounds → always-ask → allowed_commands → default safe)
-  → RequiresApproval + SafeChecker
-  → Pre-tool hook (can deny)
-  → Execute tool
-  → Post-tool hook
-  → Audit log
+Tool call → Permission engine → RequiresApproval + SafeChecker → Pre-tool hook (can deny)
+         → Execute → Post-tool hook → Audit log
 ```
 
-- **Hard-blocked**: `rm -rf /`, `mkfs`, `dd if=`, `curl|sh`, etc. — always denied, cannot be overridden
-- **CWD auto-approve**: Read-only tools (`file_read`, `glob`, `grep`, `directory_list`) auto-approve paths under the session working directory (request `cwd` → resumed session → agent config `cwd` → process CWD fallback)
-- **Auto-approve**: Safe bash commands (`ls`, `git status`, `go test`, `make`, etc.), `process list/ports`, localhost HTTP
-- **Prompt**: Destructive tools show `[y/n]` in TUI or one-shot mode
-- **Denied-call blocking**: If you deny a tool call, the same tool+args won't be re-prompted for the rest of the turn
-- **`-y` flag**: Auto-approves everything in one-shot mode
-- **No handler**: Denied by default (security fail-safe)
+- **Hard-blocked**: `rm -rf /`, `mkfs`, `dd if=`, `curl|sh` — cannot be overridden
+- **CWD auto-approve**: read-only tools (`file_read`, `glob`, `grep`, `directory_list`) auto-approve under the session CWD
+- **Auto-approve**: safe bash commands (`ls`, `git status`, `go test`), `process list/ports`, localhost HTTP
+- **Prompt**: destructive tools show `[y/n]` in TUI or one-shot
+- **Denied-call blocking**: denying a call suppresses the same tool+args for the rest of the turn
+- **`-y` flag**: auto-approves everything in one-shot mode
+- **No handler**: denied by default (fail-safe)
 
 ### Tool Result Sizing
 
-Kocoro protects context window pressure with three layered caps:
+Three layered caps protect context window pressure:
 
-- **Per-result spill**: any single tool result over ~50K characters is written to a temp file under `~/.shannon/tmp/` and replaced in-context with a 2K preview plus the file path. Cleaned up per-run (daemon/TUI) or on manager close (one-shot).
-- **Per-turn aggregate cap**: when a turn returns more than 200K characters total across all parallel tool calls, the largest results are spilled until the aggregate drops back under the cap (counted in runes, so multibyte content is measured fairly).
-- **Bloat nudge**: a high-water-mark detector surfaces a `tool_result_bloat` run-status hint when a single tool emits unusually large output for the agent's context budget, so the user/UI can see why the loop slowed down.
+- **Per-result spill**: any tool result over ~50K characters is written to a temp file under `~/.shannon/tmp/` and replaced inline with a 2K preview plus the file path.
+- **Per-turn aggregate cap**: when a turn returns more than 200K characters total, the largest results are spilled until the aggregate drops back under cap (counted in runes, multibyte-fair).
+- **Bloat nudge**: surfaces a `tool_result_bloat` run-status hint when a single tool emits unusually large output, so the user/UI can see why the loop slowed down.
 
-Per-tool overrides apply where it matters: `file_read` is treated as unlimited at the budget layer (its own 25K-token throw guards growth), `grep` ranks tighter (~20K), and unspecified tools use the 50K default.
+Per-tool overrides: `file_read` is unlimited at the budget layer (its own 25K-token guard), `grep` is tighter (~20K), unspecified tools use 50K.
 
 ## Permission Engine
 
 Bash command resolution order:
 
-1. **Hard-block** — built-in constants (rm -rf /, mkfs, dd, curl|sh, etc.), cannot be overridden
+1. **Hard-block** — built-in constants (rm -rf /, mkfs, dd, curl|sh), cannot be overridden
 2. **Denied commands** — `permissions.denied_commands` in config
-3. **Compound command split** — `&&`, `||`, `;`, `|`, bare `&` (background separator), and `(...)` subshell groups are split and checked per sub-command. The bare `&` is preserved on the prior segment so background launches still trigger always-ask. Subshell parens are dropped and inner commands are evaluated as plain segments.
-4. **Always-ask high-risk gate** — runs BEFORE the allowlist. Two checks: (a) fixed-prefix list (`python -c`, `bash -c`, `pip install`, `npx`, `rm -rf`, etc.); (b) dangerous-flag token scan, currently for `git push` (any of `--force`, `-f`, `--force-with-lease`, `--force-if-includes`, `--mirror`, `--delete`, `-d`, `--prune`, `--prune-tags` anywhere in args). Trailing `&` background launches are also gated. Selecting "Always Allow" on a high-risk command is honored once for the current run but is NOT persisted to `allowed_commands`.
-5. **Allowed commands** — `permissions.allowed_commands` in config. Two match modes: literal/glob pattern match against the full command, then a token-prefix family fallback (depth N=2 for known CLIs like git/kubectl/docker/npm, N=3 for unknowns). So `ptengine-cli config get` covers `ptengine-cli config show --json`, but not `ptengine-cli heatmap query` (different sub-command family). The always-ask gate above prevents family expansion from silently widening scope to destructive variants.
-6. **Default safe commands** — built-in safe list (ls, git status, go test, make, etc.)
-7. **User approval** — interactive prompt or `-y` flag
+3. **Compound split** — `&&`, `||`, `;`, `|`, bare `&`, and `(...)` subshells split and checked per sub-command. Bare `&` is preserved so background launches still trigger always-ask.
+4. **Always-ask high-risk gate** — runs BEFORE the allowlist. (a) fixed-prefix list (`python -c`, `bash -c`, `pip install`, `npx`, `rm -rf`, etc.); (b) dangerous-flag token scan for `git push` (`--force`, `-f`, `--force-with-lease`, `--mirror`, `--delete`, `--prune`, etc.). "Always Allow" on a high-risk command is honored once but NOT persisted.
+5. **Allowed commands** — literal/glob match against the full command, then a token-prefix family fallback (depth N=2 for known CLIs like git/kubectl/docker/npm, N=3 for unknowns). So `ptengine-cli config get` covers `ptengine-cli config show --json` but not `ptengine-cli heatmap query`. The always-ask gate above prevents family expansion from silently widening scope to destructive variants.
+6. **Default safe** — built-in safe list (ls, git status, go test, make).
+7. **User approval** — interactive prompt or `-y`.
 
-For compound commands, every sub-command must be explicitly allowed to auto-allow the whole command. If any sub-command is denied, the whole command is denied.
+For compound commands, every sub-command must be explicitly allowed for auto-approval. Any denied sub-command denies the whole.
 
-Additional checks:
-- **File paths**: symlink protection (`filepath.EvalSymlinks`), sensitive file patterns (`.env`, `*.pem`, `id_rsa`), allowed_dirs
-- **Network egress**: allowlist-based, localhost always allowed
-- **Hooks**: PreToolUse can deny with exit code 2
+Additional checks: file paths use `filepath.EvalSymlinks` + sensitive patterns (`.env`, `*.pem`, `id_rsa`) + `allowed_dirs`; network egress uses allowlist (localhost always allowed); PreToolUse hook can deny with exit 2.
 
 ## Audit Logging
 
-All tool calls are logged to `~/.shannon/logs/audit.log`:
-
-- JSON-lines format, append-only
-- Each entry: timestamp, session ID, tool name, input/output summary, decision, approved, duration
-- **Auto-redaction**: AWS keys, JWT, `sk-`/`key-` prefixes, Bearer tokens, PEM markers, env var assignments
+All tool calls logged to `~/.shannon/logs/audit.log`. JSON-lines, append-only. Each entry: timestamp, session ID, tool name, input/output summary, decision, approved, duration. **Auto-redaction**: AWS keys, JWT, `sk-`/`key-` prefixes, Bearer tokens, PEM markers, env var assignments.
 
 ## Hooks
 
@@ -483,8 +343,6 @@ Shell scripts triggered at lifecycle events:
 | `SessionStart` | Session begins | No |
 | `Stop` | Session ends | No |
 
-Configure in `~/.shannon/config.yaml`:
-
 ```yaml
 hooks:
   PostToolUse:
@@ -492,11 +350,7 @@ hooks:
       command: ".shannon/hooks/post-edit.sh"
 ```
 
-Hook protocol:
-- Receives JSON on stdin with tool name, arguments, result
-- Exit 0 = allow, exit 2 = deny (PreToolUse only)
-- 10s timeout, 10KB output limit
-- Hook commands must use `./` prefix (relative) or absolute paths under `~/.shannon/` (bare command names and absolute paths outside `~/.shannon/` are rejected for security)
+Protocol: JSON on stdin (tool name, args, result), exit 0 = allow, exit 2 = deny (PreToolUse only), 10s timeout, 10KB output limit. Commands must use `./` prefix or absolute paths under `~/.shannon/`.
 
 ## MCP Server
 
@@ -506,14 +360,10 @@ Expose local tools to MCP clients via JSON-RPC 2.0 over stdio:
 shan mcp serve
 ```
 
-The MCP server enforces the same permission engine, hooks, and audit logging as the interactive CLI. Tools requiring approval are denied in MCP mode (no interactive TTY).
+Same permission engine, hooks, and audit logging as the CLI. Tools requiring approval are denied in MCP mode (no interactive TTY).
 
-Supported methods:
-- `initialize` — handshake with protocol version
-- `tools/list` — returns all tool schemas
-- `tools/call` — execute a tool by name with arguments
+Supported methods: `initialize`, `tools/list`, `tools/call`.
 
-Example:
 ```bash
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | shan mcp serve
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"system_info","arguments":{}}}' | shan mcp serve
@@ -521,214 +371,83 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"system_inf
 
 ## MCP Client
 
-Connect to external MCP servers to extend Shannon with third-party tools. Configure in `~/.shannon/config.yaml` under `mcp_servers:`.
-
-Each server supports:
-- `command` / `args` — stdio transport (default)
-- `type: http` + `url` — HTTP transport
-- `env` — environment variables passed to the server process
-- `context` — guidance injected into the LLM system prompt (critical for correct tool usage)
-- `disabled: true` — skip without removing config
-
-### Filesystem
+Connect to external MCP servers in `~/.shannon/config.yaml` under `mcp_servers:`.
 
 ```yaml
 mcp_servers:
   filesystem:
     command: "npx"
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "/Users/you/Desktop", "/Users/you/Documents"]
-    context: "Filesystem access to ~/Desktop and ~/Documents. Use read_file, write_file, list_directory, search_files."
-```
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/Users/you/Desktop"]
+    context: "Filesystem access to ~/Desktop. Use read_file, write_file, list_directory."
 
-```bash
-shan "list files on my Desktop"
-shan "search for .md files in my Documents"
-shan "create a notes.txt file on my Desktop"
-```
-
-### SQLite
-
-```yaml
-mcp_servers:
   sqlite:
     command: "npx"
     args: ["-y", "mcp-server-sqlite-npx", "/path/to/database.db"]
     context: "Connected to SQLite database. Use read_query for SELECT, write_query for writes."
-```
 
-### HTTP Transport (Remote MCP Server)
-
-```yaml
-mcp_servers:
-  my-remote-server:
+  my-remote:
     type: http
     url: "https://mcp.example.com/sse"
     context: "Remote MCP server providing custom tools."
 ```
 
-### Multiple Servers
+Per-server: `command`/`args` (stdio), `type: http` + `url` (HTTP), `env`, `context` (LLM guidance — critical), `disabled: true` (skip without removing).
 
-You can run multiple MCP servers simultaneously:
-
-```yaml
-mcp_servers:
-  filesystem:
-    command: "npx"
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "/Users/you/Desktop"]
-    context: "Filesystem access to ~/Desktop."
-  sqlite:
-    command: "npx"
-    args: ["-y", "mcp-server-sqlite-npx", "/path/to/database.db"]
-    context: "SQLite database."
-```
-
-### MCP Client Notes
-
-- **`context` is critical** — tells the LLM who's authenticated and what queries to use. Without it, the LLM guesses wrong.
-- **All MCP tools require approval**. Use `shan -y` for auto-approve in one-shot mode.
-- **Local tools take priority** — if an MCP tool has the same name as a local tool, the local one wins.
+- **`context` is critical** — tells the LLM what auth, capabilities, and queries to use. Without it, the LLM guesses wrong.
+- **All MCP tools require approval.** Use `-y` for auto-approve in one-shot.
+- **Local tools take priority** — same-name local tool wins over MCP.
 - **Project-level overrides** — put server configs in `.shannon/config.yaml` (project) or `.shannon/config.local.yaml` (gitignored).
-- **One-shot vs interactive** — each `shan "query"` starts fresh MCP connections. In interactive TUI mode (`shan`), connections persist for the session.
-- Find more servers at [MCP Server Registry](https://registry.modelcontextprotocol.io/) and [Awesome MCP Servers](https://github.com/punkpeye/awesome-mcp-servers).
+- **One-shot vs interactive** — each `shan "query"` starts fresh MCP connections. In `shan` (TUI), connections persist for the session.
+- More servers: [MCP Server Registry](https://registry.modelcontextprotocol.io/) and [Awesome MCP Servers](https://github.com/punkpeye/awesome-mcp-servers).
 
 ## Configuration
 
-### Multi-level Config
-
-Config files are merged in order (later overrides earlier):
+Multi-level merge — later overrides earlier:
 
 1. `~/.shannon/config.yaml` — global
 2. `.shannon/config.yaml` — project
-3. `.shannon/config.local.yaml` — local override (gitignored)
+3. `.shannon/config.local.yaml` — local (gitignored)
 
-Merge behavior: scalars override, lists merge + dedup, structs field-level merge.
+Scalars override, lists merge + dedup, structs field-level merge.
 
-### Full Config Structure
+Minimal `~/.shannon/config.yaml`:
 
 ```yaml
-# Connection
-endpoint: http://localhost:8080    # Shannon Gateway URL
-api_key: ""                        # Gateway API key
-model_tier: medium                 # small, medium, large (default: medium)
+endpoint: https://api.shannon.run
+api_key: <your key>
+model_tier: medium
 
-# Permissions
 permissions:
-  allowed_dirs:
-    - ~/Documents/notes
-    - ./docs
   allowed_commands:
     - "git *"
-    - "go test *"
     - "make *"
-  denied_commands:
-    - "rm -rf *"
-  network_allowlist:
-    - "localhost"
-    - "127.0.0.1"
-    - "api.example.com"
-
-# MCP servers (external tool sources)
-mcp_servers:
-  filesystem:
-    command: "npx"
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "/Users/you/Desktop"]
-    context: "Filesystem access to ~/Desktop."
-
-# Agent behavior
-agent:
-  max_iterations: 25               # max tool calls per turn (default: 25)
-  temperature: 0                   # LLM temperature (default: 0)
-  max_tokens: 32000                # max output tokens (default: 32000)
-  thinking: true                   # enable extended thinking (default: true)
-  thinking_mode: adaptive          # "adaptive" or "enabled" (default: adaptive)
-  thinking_budget: 10000           # thinking token budget (default: 10000)
-  force_think_tool: false          # re-enable local `think` tool even when native thinking is active (default: false). Skip on gateway + thinking=true by default; explicit override for workflows that depend on the explicit planning tool surface.
-  model: ""                        # specific model override (empty = use model_tier)
-  context_window: 200000           # seed; auto-adjusted from observed model (default: 200000). Per-agent override locks the cap.
-  reasoning_effort: ""             # "low", "medium", "high" (empty = model default)
-  idle_soft_timeout_secs: 90       # watchdog: emit "still working" status after this long waiting on the LLM (0 = disabled, default: 90)
-  idle_hard_timeout_secs: 0        # watchdog: cancel the run as a soft/partial failure after this long idle (0 = disabled; recommended: 540 once enabled, stays below the 600s gateway timeout)
-  skill_discovery: true            # per-turn small-model skill matching (default: true). Set false to disable the prefetch call.
-  time_based_compact:              # time-gated tool_result clearing for prompt-cache stability (off by default — enable per-rollout)
-    enabled: false                 # master switch (default: false)
-    gap_threshold_minutes: 60      # fire when last assistant response is older than this (default: 60)
-    keep_recent: 5                 # number of trailing tool_result blocks to keep per cleanup (default: 5, floor: 1)
-
-# Tool settings
-tools:
-  bash_timeout: 120                # default per-call timeout (seconds, default: 120)
-  bash_max_timeout: 600            # hard cap on per-call timeout (seconds, default: 600). Per-call `timeout` arg above this is clamped and a one-shot log line is emitted to stderr. Raise for slow integration suites; the cap protects UI cards from looking frozen for unbounded minutes before SIGKILL.
-  bash_max_output: 30000           # max chars in bash output (default: 30000)
-  result_truncation: 30000         # max chars in tool result (default: 30000)
-  args_truncation: 200             # max chars in displayed args (default: 200)
-  server_tool_timeout: 5           # gateway tool timeout in seconds (default: 5)
-
-# Hooks
-hooks:
-  PreToolUse:
-    - matcher: "bash"
-      command: ".shannon/hooks/check-bash.sh"
-  PostToolUse:
-    - matcher: "file_edit|file_write"
-      command: ".shannon/hooks/post-edit.sh"
-  SessionStart:
-    - command: ".shannon/hooks/on-start.sh"
-  Stop:
-    - command: ".shannon/hooks/on-stop.sh"
 ```
 
-Use `/config` in the TUI to see the merged config with sources showing which file each value came from.
-
-### UI Settings — `~/.shannon/settings.json`
-
-```json
-{
-  "spinner_texts": [
-    "Thinking deeply...",
-    "Exploring possibilities...",
-    "Connecting the dots..."
-  ]
-}
-```
+See [docs/config-reference.md](docs/config-reference.md) for the full key list including `agent.*`, `tools.*`, `mcp_servers`, `cloud`, `memory`, `sync`, `daemon`, `hooks`, UI settings, etc. Run `/config` in the TUI to see the merged config with sources.
 
 ## Instructions & Memory
 
-### Instructions
+AI behavior customization from markdown files (token-budgeted, deduplicated; `.md` links auto-expanded inline):
 
-AI behavior customization loaded from markdown files:
-
-- `~/.shannon/instructions.md` — global instructions
-- `~/.shannon/rules/*.md` — global rules (sorted alphabetically)
-- `.shannon/instructions.md` — project instructions
+- `~/.shannon/instructions.md` — global
+- `~/.shannon/rules/*.md` — global rules (alphabetical)
+- `.shannon/instructions.md` — project
 - `.shannon/rules/*.md` — project rules
 - `.shannon/instructions.local.md` — project local override (gitignored)
 
-All are loaded into the system prompt (token-budgeted, deduplicated). Markdown links to `.md` files in the same directory are auto-expanded inline.
+Persistent memory: `~/.shannon/memory/MEMORY.md` (first 200 lines loaded on startup). The agent can write to this file to remember across sessions.
 
-### Persistent Memory
-
-- `~/.shannon/memory/MEMORY.md` — first 200 lines loaded on startup
-- The agent can write to this file to remember information across sessions
-
-### Custom Slash Commands
-
-Create `.shannon/commands/<name>.md` or `~/.shannon/commands/<name>.md`:
-
-```markdown
-Review the following code for bugs and security issues.
-Focus on: $ARGUMENTS
-```
-
-This creates a `/name` command in the TUI. `$ARGUMENTS` is replaced with whatever follows the command.
+Custom slash commands: create `.shannon/commands/<name>.md` (or under `~/.shannon/`). `$ARGUMENTS` is replaced with the text after the command name in the TUI.
 
 ## Sessions
 
-Conversations are persisted as JSON files in `~/.shannon/sessions/` (or `~/.shannon/agents/<name>/sessions/` for named agents).
+Conversations persisted as JSON in `~/.shannon/sessions/` (or `~/.shannon/agents/<name>/sessions/` for named agents).
 
-- Each session is a `<id>.json` file containing messages, metadata, and remote task IDs
+- Each session is `<id>.json` (messages, metadata, remote task IDs)
 - Saved after each agent turn and on exit
-- Titles generated from the first user message (truncated to 50 chars)
-- **Search index**: a `sessions.db` (SQLite FTS5) is auto-created alongside JSON files for fast keyword search. Safe to delete — rebuilds automatically on next launch
+- Titles generated from the first user message (50-char cap)
+- Sessions can be **pinned** and **favorited** via `PATCH /sessions/{id}` — Kocoro Desktop surfaces these as UI flags for quick access
+- Search index `sessions.db` (SQLite FTS5) auto-created alongside JSON. Safe to delete — rebuilds on next launch.
 
 ```
 /sessions                              # interactive picker
@@ -744,14 +463,12 @@ Create independent agents with their own instructions, memory, tools, MCP server
 ```
 ~/.shannon/agents/
   ops-bot/
-    AGENT.md          # agent instructions (replaces default system prompt)
-    MEMORY.md         # agent-specific memory (persists across sessions)
+    AGENT.md          # instructions (replaces default system prompt)
+    MEMORY.md         # agent-specific memory
     config.yaml       # optional: tool filtering, MCP scoping, model overrides
-    commands/          # optional: agent-scoped slash commands (*.md)
-    _attached.yaml     # optional: attached installed skill names
+    commands/         # optional: agent-scoped slash commands
+    _attached.yaml    # optional: attached installed skill names
 ```
-
-### Creating an Agent
 
 Minimal agent — just `AGENT.md`:
 
@@ -767,201 +484,31 @@ EOF
 
 Agents without `config.yaml` inherit all tools, global MCP servers, and default model settings.
 
-### Agent Config
-
-Create `config.yaml` to scope an agent's capabilities:
-
-```yaml
-# Default project directory for this agent.
-# Must be an absolute path. Drives: prompt context, instructions,
-# file tools, bash, auto-approval scope, read-before-edit tracking.
-# Request-level cwd and resumed sessions can override this default.
-cwd: /Users/you/Code/myproject
-
-# Tool allow list — agent can ONLY use these tools
-tools:
-  allow:
-    - file_read
-    - grep
-    - glob
-    - bash
-    - think
-    - directory_list
-
-# Per-agent MCP servers
-# _inherit: false → only these servers (ignore global config)
-# _inherit: true  → merge on top of global servers
-mcp_servers:
-  _inherit: false
-  filesystem:
-    command: "npx"
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "/Users/you/Desktop"]
-
-# Model and behavior overrides
-agent:
-  model: "claude-sonnet-4-6"
-  max_iterations: 10
-  temperature: 0.2
-  max_tokens: 16000
-  context_window: 64000             # per-agent value is a lock (bypasses model auto-detect — use for cost caps or Ollama / custom-cap models)
-
-# File system watcher — trigger agent on file changes
-watch:
-  - path: ~/Code/myproject
-    glob: "*.go"
-  - path: ~/Downloads
-    glob: "*.csv"
-
-# Heartbeat — periodic "anything need attention?" checks
-heartbeat:
-  every: 30m                    # Go duration (required)
-  active_hours: "09:00-22:00"   # optional time window (supports overnight e.g. "22:00-02:00")
-  model: small                  # optional cheaper model for heartbeat runs
-  isolated_session: true        # default true — fresh session per heartbeat
-```
-
-**Tool filtering options:**
-
-```yaml
-# Allow list — only these tools available
-tools:
-  allow: [file_read, grep, glob, bash]
-
-# OR deny list — all tools EXCEPT these
-tools:
-  deny: [computer, browser, screenshot, applescript]
-
-# Omit tools section entirely → all tools available
-```
-
-The filter applies to all tool sources (local, MCP, gateway). If both `allow` and `deny` are set, `allow` takes precedence.
-
-### Project Context and `cwd`
-
-Kocoro uses a session-scoped working directory (`cwd`) to decide which project a run is operating in.
-
-This affects:
-
-- relative file paths
-- project instructions
-- bash execution
-- safe path checks
-- read-before-edit tracking
-- project-local runtime config
-
-The effective `cwd` is resolved in this order:
-
-1. request `cwd`
-2. stored session `cwd` for resumed sessions
-3. agent config `cwd`
-4. process working directory fallback
-
-This means:
-
-- a request can explicitly target a project
-- resumed sessions return to the same project
-- agents can define a default project
-- older flows still keep working through fallback behavior
-
-Project-local config is still loaded from the active project directory, but only for session-safe runtime fields such as:
-
-- `model_tier`
-- `agent.*`
-- `tools.*`
-- `permissions.*`
-
-Process-global settings remain global and are not overridden by project-local config:
-
-- `endpoint`
-- `api_key`
-- `mcp_servers`
-- `daemon.*`
-- `auto_update_check`
-
-### Agent Commands
-
-Create `.md` files in the `commands/` directory to add agent-scoped slash commands:
+Use:
 
 ```bash
-mkdir -p ~/.shannon/agents/reviewer/commands
-
-cat > ~/.shannon/agents/reviewer/commands/review.md << 'EOF'
-Review the code in $ARGUMENTS for:
-- Correctness and logic errors
-- Security vulnerabilities
-- Performance issues
-Focus on bugs that matter, skip nitpicks.
-EOF
+shan --agent ops-bot "check error rate in prod"     # one-shot
+shan --agent ops-bot                                 # TUI (with agent commands + attached skills)
+# In daemon mode, @mention routes:
+# "@ops-bot check prod"     → ops-bot agent
+# "check prod"              → default Shannon agent
 ```
 
-Use in the TUI: `/review src/auth/login.go`
+Names must match `^[a-z0-9][a-z0-9_-]{0,63}$`. Each agent gets its own session directory at `~/.shannon/agents/<name>/sessions/`.
 
-`$ARGUMENTS` is replaced with everything after the command name. Agent commands cannot overwrite built-in commands (`/help`, `/quit`, etc.).
+Skills can be installed from **ClawHub** (the Kocoro skill marketplace) via the daemon HTTP API — `GET /skills/marketplace`, `POST /skills/marketplace/install/{slug}`, or upload a local ZIP with `POST /skills/upload`. Kocoro Desktop surfaces the marketplace as a browseable UI.
 
-### Agent Skills
-
-Skills use the [Anthropic SKILL.md spec](https://agentskills.io/specification). Install skills globally, then attach them to an agent by name:
-
-```bash
-mkdir -p ~/.shannon/skills/summarize
-
-cat > ~/.shannon/skills/summarize/SKILL.md << 'EOF'
----
-name: summarize
-description: Summarize codebase architecture
----
-
-Provide a concise summary of the architecture and key decisions.
-Focus on: entry points, data flow, error handling patterns.
-EOF
-
-cat > ~/.shannon/agents/reviewer/_attached.yaml << 'EOF'
-- summarize
-EOF
-```
-
-Attached skill names are resolved from installed skills in `~/.shannon/skills/`. Bundled skills must be installed before they can be attached to an agent — except for two **auto-installed builtins** that the daemon syncs from the binary on every startup: `kocoro` (platform / HTTP API configuration assistant) and `kocoro-generative-ui` (inline visualization assistant for Kocoro Desktop's sandboxed `html-artifact` widgets — hidden from end-user listings, still callable via `use_skill`). Builtins are daemon-managed: editing their on-disk SKILL.md gets overwritten on next startup; fork under a different skill name if you need to customize.
-
-Skills are listed in the system prompt (name + description only). The LLM activates a skill by calling the `use_skill` tool, which returns the full SKILL.md body — progressive disclosure that keeps prompt size small.
-
-Attached agent skills also appear as `/summarize` slash commands in the TUI.
-
-**Skill secrets.** Skills that need API keys declare required env vars in their ClawHub metadata (`metadata.openclaw.requires.env` / `metadata.clawdbot.requires.env` / `metadata.clawdis.requires.env`). Values are stored in the macOS Keychain — never on disk, never in the prompt or session transcript — and scoped to active skills only: a skill that is installed but never activated via `use_skill` contributes no env vars to `bash`. Manage keys over the daemon API (`PUT/DELETE /skills/{name}/secrets`); `GET /skills` returns `required_secrets` and `configured_secrets` (names only, never values).
-
-**Installing from a local ZIP.** Beyond the ClawHub marketplace, the daemon accepts a direct upload via `POST /skills/upload` (multipart, 50 MB cap). Unwraps a GitHub/Finder single-top-level-dir layout, strips `__MACOSX`, inherits the marketplace extractor's zipbomb / symlink / path-escape guards, and serializes concurrent uploads of the same slug. On slug collision returns a 409 with a side-by-side compare body (existing vs. uploaded name / description / prompt, prompts capped at 8 KB) so Kocoro Desktop can render a compare sheet; re-issue with `?force=true` to overwrite (crash-safe rename-to-backup + atomic rename, backup removed on success). Uploads targeting the `kocoro` / `kocoro-generative-ui` builtins are rejected unconditionally — the daemon re-overlays builtins from the binary on every startup, so an upload there would be reverted.
-
-### Using Agents
-
-```bash
-# One-shot mode
-shan --agent ops-bot "check error rate in prod"
-
-# Interactive TUI (with agent commands and attached skills as /slash commands)
-shan --agent ops-bot
-
-# In daemon mode, @mention routes to agents:
-# "@ops-bot check prod" → ops-bot agent
-# "@reviewer look at PR" → reviewer agent
-# "check prod" → default Shannon agent
-```
-
-### Agent Name Rules
-
-Names must match `^[a-z0-9][a-z0-9_-]{0,63}$` (lowercase alphanumeric, hyphens, underscores).
-
-### Agent-Scoped Sessions
-
-Each agent gets its own session directory at `~/.shannon/agents/<name>/sessions/`, keeping conversation histories separate.
+See [docs/agents-reference.md](docs/agents-reference.md) for the full `config.yaml` reference, `cwd` resolution, project-local config scope, tool filtering semantics, attached skills, builtin skills (`kocoro`, `kocoro-generative-ui`), skill secrets, and ZIP installs.
 
 ## Daemon Mode
 
-The daemon serves two roles: it connects to Shannon Cloud via WebSocket to receive channel messages (Slack, LINE, etc.), and it exposes a local HTTP API on port 7533 for native apps and scripts.
+The daemon connects to Shannon Cloud via WebSocket for channel messages (Slack, LINE, etc.) and exposes a local HTTP API on port 7533 for native apps and scripts.
 
 ```bash
 shan daemon start           # foreground (logs to stdout)
 shan daemon start -d        # background via launchd (macOS, survives reboots)
 shan daemon stop            # stop daemon + remove launchd service if installed
-shan daemon status          # show connection status + launchd state
+shan daemon status          # show connection + launchd state
 ```
 
 ### Architecture
@@ -976,59 +523,74 @@ Slack/LINE ──webhook──▶ Shannon Cloud ──WebSocket──▶ shan da
 
 ### Channel Messaging (via Shannon Cloud)
 
-- **Envelope protocol** — typed messages with claim/ack handshake (broadcast + first-to-claim)
+- **Envelope protocol** — typed messages with claim/ack (broadcast + first-to-claim)
 - **Progress heartbeats** — 15s interval extends claim TTL during long agent runs
-- **Channel routing** — agent name set per channel in cloud config, fallback to `@mention` parsing
-- **Session continuity** — conversation history maintained per agent across messages
-- **Up to 5 concurrent agents** — bounded worker pool prevents resource exhaustion
-- **Auto-reconnect** with exponential backoff on connection loss
-- **Graceful disconnect** — sends disconnect message on shutdown
-- **Schedule mutation tools** (`schedule_create/update/remove`) are denied by default in daemon mode
-- **Interactive approval** — tools requiring approval send requests to the client app (via WS relay through Shannon Cloud). "Always Allow" persists tool-level at two scopes: **global** (`~/.shannon/config.yaml permissions.always_allow_tools` — applies to every agent including the default agent) and **per-agent** (`~/.shannon/agents/<name>/config.yaml permissions.always_allow_tools` — narrows trust to a single agent). Clicking it on a bash, file_write, http, etc. call writes the tool name to the appropriate scope (named agent → per-agent; default agent → global); from then on every future call of that tool skips approval. **Two independent safety gates** remain regardless of what either persisted list contains — they're checked by separate code paths and a hand-edited config can't bypass either: (a) high-risk bash commands (`pip install`, `rm -rf`, `python -c`, `git push --force`, etc.) still prompt every call (enforced by the runtime gate at `internal/agent/loop.go checkPermissionAndApproval` against `permissions.alwaysAskPrefixes`); (b) paid / permanent-public tools (`publish_to_web`, `generate_image`, `edit_image`) cannot be persisted at all (enforced both at write-time and at runtime by `agent.DisallowsAutoApproval`).
-- **Human-readable approval prompts** — every approval-required tool (`bash`, `file_read`, `file_write`, `file_edit`, `glob`, `grep`, `directory_list`, `http`, `browser`, `applescript`, `process`, `clipboard`, `computer`, `ghostty`, `notify`, `cloud_delegate`, `generate_image`, `edit_image`, `schedule_*`) declares a required `description` field — a 5-15 word natural-language summary in the user's UI language, e.g. `"查看 ui-components 文件"` or `"在 Documents 中搜 TODO"`. Approval cards render the description prominently and fold the raw arguments (paths, URLs, JSON, shell). Non-technical users can review what an agent is about to do without reading syntax. `publish_to_web` uses its existing `purpose` required field instead of a duplicate `description`; UI fallback covers both. Older sessions and edge cases without `description` fall back to displaying the raw args — the daemon passes them through unchanged (audit-log integrity).
-- **HITL message injection** — send follow-up messages to a running agent via `POST /message`; messages are injected mid-turn and incorporated into the conversation
-- **File attachments** — Slack / LINE / Feishu / Telegram / webhook messages with files are surfaced to the agent. The daemon picks one of three branches per file: `document_b64` (cloud-supplied PDF base64) → native `document` content block + a `text` hint pointing at a locally-cached copy; `extracted_text` (cloud's server-side DOCX/XLSX/PPTX/CSV/TXT/JSON extraction, plus large-PDF fallback) → a single `text` block headed `[Attached: <name> (<mime>)]`; otherwise the legacy URL is downloaded to `~/.shannon/tmp/attachments/` and exposed as a `file_ref`. Caps: 20 files / message, 500 MB / file. Daemon also enforces a 500K-char rune ceiling on `extracted_text` as a defense-in-depth guard against oversized payloads. SSRF-protected URL validation, scheme/IP allowlist, and Authorization-header redirect preservation are retained on the URL path. Cleaned up on session close. Cloud must advertise the matching `inline_document_b64` / `inline_extracted_text` capabilities; daemons missing them silently fall back to URL-only delivery.
+- **Channel routing** — agent name set per channel in cloud config, fallback to `@mention`
+- **Session continuity** — per-agent history across messages
+- **Up to 5 concurrent agents** — bounded worker pool
+- **Auto-reconnect** with exponential backoff; graceful disconnect on shutdown
+- **Schedule mutation tools** (`schedule_create/update/remove`) denied by default in daemon mode
+- **HITL message injection** — `POST /message` while an agent is running injects mid-turn
+- **File attachments** — Slack / LINE / Feishu / Telegram / webhook messages with files are surfaced to the agent. Three branches per file: `document_b64` (cloud-supplied PDF base64) → native Anthropic `document` block; `extracted_text` (cloud DOCX/XLSX/PPTX/CSV extraction or large-PDF fallback) → `text` block headed `[Attached: <name> (<mime>)]`; otherwise legacy URL download to `~/.shannon/tmp/attachments/` as `file_ref`. Caps: 20 files / message, 500 MB / file, 500K-char rune ceiling on `extracted_text`. SSRF-protected URL validation, scheme/IP allowlist, Authorization-header redirect preservation. Cleaned up on session close.
+
+#### Interactive approval + always-allow
+
+Tools requiring approval send requests to the client app (via WS relay through Shannon Cloud). "Always Allow" persists tool-level at two scopes:
+
+- **Global** (`~/.shannon/config.yaml permissions.always_allow_tools`) — every agent, including default
+- **Per-agent** (`~/.shannon/agents/<name>/config.yaml permissions.always_allow_tools`) — single agent
+
+Clicking it writes the tool name to the appropriate scope (named agent → per-agent; default agent → global); future calls of that tool skip approval.
+
+**Two safety gates remain regardless of what either list contains** — checked by separate code paths, hand-edited config cannot bypass:
+
+- **High-risk bash commands** (`pip install`, `rm -rf`, `python -c`, `git push --force`, etc.) still prompt every call. Enforced by the runtime gate in `internal/agent/loop.go` against `permissions.alwaysAskPrefixes`.
+- **Paid / permanent-public tools** (`publish_to_web`, `generate_image`, `edit_image`) cannot be persisted at all. Enforced at write-time AND at runtime via `agent.DisallowsAutoApproval`.
+
+#### Approval-card descriptions
+
+Every approval-required tool (`bash`, `file_read`, `file_write`, `file_edit`, `glob`, `grep`, `directory_list`, `http`, `browser`, `applescript`, `process`, `clipboard`, `computer`, `ghostty`, `notify`, `cloud_delegate`, `generate_image`, `edit_image`, `schedule_*`) declares a required `description` field — a 5-15 word natural-language summary in the user's UI language (e.g. `"查看 ui-components 文件"`). Approval cards render the description prominently and fold raw args (paths, URLs, JSON, shell) behind a "View details" toggle, so non-technical users can review what an agent is about to do without reading syntax.
+
+`publish_to_web` uses its existing required `purpose` field. UI clients fall back to displaying raw args when `description` is missing — the daemon passes args through unchanged for audit integrity.
 
 ### Local HTTP API (port 7533)
 
-The daemon exposes a localhost-only HTTP server for native app integration and scripting.
+Localhost-only HTTP for native-app integration and scripting.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/health` | GET | Liveness check → `{"status":"ok","version":"..."}` |
+| `/health` | GET | Liveness → `{"status":"ok","version":"..."}` |
 | `/status` | GET | Connection state, active agent, uptime, version |
-| `/agents` | GET | List named agents from `~/.shannon/agents/` |
+| `/agents` | GET | List named agents |
 | `/sessions` | GET | List sessions, optional `?agent=` filter |
-| `/sessions/{id}` | GET | Get full session with messages, `?agent=<name>` |
-| `/sessions/{id}/edit` | POST | Truncate history at index, re-run with new content (edit & retry) |
-| `/sessions/{id}/reset` | POST | Clear session history in place (named agent only, `?agent=<name>` required) |
+| `/sessions/{id}` | GET | Full session with messages, `?agent=<name>` |
+| `/sessions/{id}` | PATCH | Update `title`, `pinned`, `favorite` (any subset) |
+| `/sessions/{id}/edit` | POST | Truncate history at index, re-run with new content |
+| `/sessions/{id}/reset` | POST | Clear session history in place (named agent only) |
 | `/sessions/search` | GET | Search session history, `?q=<query>&agent=<name>` |
-| `/message` | POST | Send a message to an agent, get reply (supports HITL injection) |
+| `/message` | POST | Send a message; supports HITL injection |
+| `/migrate/claude-code/preview` | POST | Scan `~/.claude/` and return what would be imported (dry-run) |
+| `/migrate/claude-code/apply` | POST | Execute a previewed import — copies agents, skills, instructions from Claude Code |
 | `/config/reload` | POST | Reload config, restart watchers and heartbeat managers |
-| `/events` | GET | SSE stream of daemon events (`agent_reply`, `heartbeat_alert`, etc.) |
-| `/shutdown` | POST | Graceful daemon shutdown (used by `shan daemon stop`) |
+| `/events` | GET | SSE stream of daemon events (`agent_reply`, `heartbeat_alert`, …) |
+| `/shutdown` | POST | Graceful shutdown (used by `shan daemon stop`) |
 
-**Send a message:**
+Send a message:
 
 ```bash
-# Synchronous (blocks until agent completes)
+# Synchronous
 curl -X POST http://localhost:7533/message \
-  -d '{"text":"what is 2+2?"}' \
-  -H "Content-Type: application/json"
-
-# With a named agent and session resumption
-curl -X POST http://localhost:7533/message \
-  -d '{"text":"check disk usage","agent":"ops-bot","session_id":"2026-03-08-abc123"}' \
-  -H "Content-Type: application/json"
-
-# SSE streaming (tool progress + text deltas)
-curl -X POST http://localhost:7533/message \
-  -d '{"text":"analyze this codebase"}' \
   -H "Content-Type: application/json" \
-  -H "Accept: text/event-stream"
+  -d '{"text":"what is 2+2?"}'
+
+# SSE streaming — same body, add Accept header
+curl -X POST http://localhost:7533/message \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"text":"analyze this codebase","agent":"ops-bot"}'
 ```
 
-**Response (synchronous):**
+Synchronous response:
 
 ```json
 {
@@ -1043,14 +605,11 @@ curl -X POST http://localhost:7533/message \
 
 ### Prompt Suggestion (ghost text in input)
 
-When enabled, Kocoro's daemon generates a 2-12 word suggestion for your
-next message after each agent turn. Desktop renders it as gray placeholder
-text in the input — press the right arrow (or Tab) to accept, then edit if needed.
+When enabled, the daemon generates a 2-12 word suggestion for your next message after each agent turn. Desktop renders it as gray placeholder text — press → or Tab to accept.
 
-**To enable:**
+Enable in `~/.shannon/config.yaml`:
 
 ```yaml
-# ~/.shannon/config.yaml
 agent:
   prompt_suggestion:
     enabled: true
@@ -1058,35 +617,22 @@ agent:
 
 Or toggle from Desktop: Settings → Suggestions → Enable next-prompt suggestion.
 
-**Cost:** Depends on whether `agent.thinking` is enabled. Without thinking,
-each suggestion call is cheap (≈ 5-20% of one main-turn — input mostly
-cache_read, output capped at ~30 tokens by the filter). With thinking
-enabled, the fork inherits the same `thinking.budget_tokens` (cannot be
-trimmed without invalidating Anthropic's cache key), so cost rises to
-≈ 50-90% of one main-turn. Disabled by default. Skipped when the prompt
-cache is cold (see `cache_cold_threshold_tokens`).
+**Cost** depends on `agent.thinking`. Without thinking, each suggestion is ~5–20% of one main-turn (input mostly cache_read, output capped ~30 tokens). With thinking, the fork inherits the same `thinking.budget_tokens` (cannot be trimmed without invalidating Anthropic's cache key), so cost rises to ~50–90% of one main-turn. Disabled by default. Skipped when the prompt cache is cold (`cache_cold_threshold_tokens`).
 
 ## Memory (Kocoro Cloud feature)
 
-Kocoro includes a `memory_recall` tool that lets the agent look up facts
-learned from prior sessions before asking the user. The structured memory
-runs as a local sidecar over a Unix socket; the daemon manages spawn,
-readiness, restart, and bundle pull. Episodic Memory is **opt-in** —
-disabled by default; users enable it from Kocoro Desktop settings (or by
-editing `memory.provider`/`sync.enabled` directly). Three modes:
+`memory_recall` lets the agent look up facts learned from prior sessions before asking the user. Structured memory runs as a local sidecar over a Unix socket; the daemon manages spawn, readiness, restart, and bundle pull.
 
-- `memory.provider: "disabled"` (default) — no sidecar, `memory_recall` falls
-  back to keyword session search and MEMORY.md.
-- `memory.provider: "cloud"` — daemon pulls fresh memory bundles from Kocoro
-  Cloud every 24h and runs the sidecar against them. Requires `cloud.api_key`
-  (or override via `memory.api_key`) and `cloud.endpoint`.
-- `memory.provider: "local"` — daemon runs the sidecar against bundles you
-  build locally; no Cloud calls. Useful for self-hosted setups.
+**Opt-in** — disabled by default; Kocoro Desktop's Episodic Memory toggle enables it. Three modes:
+
+- `memory.provider: "disabled"` (default) — no sidecar; `memory_recall` falls back to session search + MEMORY.md
+- `memory.provider: "cloud"` — daemon pulls fresh memory bundles from Kocoro Cloud every 24h. Requires `cloud.api_key` + `cloud.endpoint` (overridable via `memory.api_key` / `memory.endpoint`)
+- `memory.provider: "local"` — daemon runs the sidecar against bundles you build locally; no Cloud calls
 
 ### Quickstart (cloud mode)
 
 1. Install the `tlm` binary somewhere on `$PATH` (or set `memory.tlm_path`).
-2. Configure your Cloud API key (already used for Phase 2.0 session sync):
+2. Configure Cloud credentials:
 
    ```yaml
    cloud:
@@ -1096,129 +642,47 @@ editing `memory.provider`/`sync.enabled` directly). Three modes:
      provider: cloud
    ```
 
-3. Restart the daemon. First bundle download starts ~60s after boot, then
-   re-pulls every 24h. The agent's `memory_recall` tool delegates to the
-   sidecar once it's ready.
+3. Restart the daemon. First bundle download starts ~60s after boot, then every 24h.
 
 ### Implicit episodic preflight
 
-Before the first main-model call on a memory-relevant turn, Kocoro runs an
-implicit preflight: a small-tier helper compiles `QueryIntent`s via forced
-`tool_use`, the sidecar resolves them, and a `<private_memory>` block is
-injected into the current user message before it reaches the main model.
-Effect: many memory questions are answered on turn 0 without an explicit
-`memory_recall` invocation. Behaviour:
+Before the first main-model call on a memory-relevant turn, a small-tier helper compiles `QueryIntent`s via forced `tool_use`, the sidecar resolves them, and a `<private_memory>` block is injected into the current user message. Many memory questions get answered on turn 0 without an explicit `memory_recall` invocation.
 
-- Fires only when the sidecar is `Ready`; otherwise the agent falls back to
-  the explicit `memory_recall` tool (or its session-search degradation path).
-- The `<private_memory>` block is in-message-only — never persisted to the
-  session transcript, never replayed, stripped from compaction summaries.
-- Audit event `memory_preflight` records a content-free trace
-  (`attempted` / `helper_used` / `intents_count` / `results_count` /
-  `context_injected` / `outcome` / `error_class` / `http_status`). Query
-  text, anchors, relation labels, and recalled content are never logged.
+- Fires only when the sidecar is `Ready`; otherwise falls back to explicit `memory_recall` (or its session-search degradation path).
+- The `<private_memory>` block is in-message-only — never persisted to the transcript, never replayed, stripped from compaction summaries.
+- Audit event `memory_preflight` records a content-free trace: `attempted`, `helper_used`, `intents_count`, `results_count`, `context_injected`, `outcome`, `error_class`, `http_status`. Query text, anchors, relation labels, and recalled content are never logged.
 
 ### Configuration
 
-| Key | Default | Notes |
-|---|---|---|
-| `memory.provider` | `disabled` | `disabled` / `cloud` / `local` — Episodic Memory is opt-in |
-| `memory.endpoint` | `""` | Falls back to `cloud.endpoint` |
-| `memory.api_key` | `""` | Falls back to `cloud.api_key` |
-| `memory.socket_path` | `$TMPDIR/com.kocoro.tlm.sock` | UDS path |
-| `memory.bundle_root` | `$HOME/.shannon/memory` | Where bundles + symlink live |
-| `memory.tlm_path` | `""` | Empty = `PATH` lookup; missing = silent disable |
-| `memory.bundle_pull_interval` | `24h` | Cloud bundle refresh cadence |
-| `memory.bundle_pull_startup_delay` | `60s` | Wait before first pull on daemon boot |
-| `memory.sidecar_ready_timeout` | `15s` | Spawn → /health probe ceiling |
-| `memory.sidecar_shutdown_grace` | `5s` | SIGTERM → SIGKILL grace |
-| `memory.sidecar_restart_max` | `5` | Crashes before degraded |
-| `memory.client_request_timeout` | `5s` | Per-request UDS timeout |
+See the `memory:` block in [docs/config-reference.md](docs/config-reference.md#cloud-features) for all keys (`provider`, `endpoint`, `api_key`, `socket_path`, `bundle_root`, `tlm_path`, `bundle_pull_interval`, `sidecar_*` timeouts).
 
 ### Privacy
 
-Memory bundles are local files. The daemon never sends recall queries or
-inferred candidates back to Cloud. Session sync defaults to disabled and is
-flipped on alongside Episodic Memory by the Desktop toggle (or by setting
-`sync.enabled: true` manually); when on, it uploads local session history so
-Kocoro Cloud can train fresh memory bundles. Switching the configured API
-key triggers a wipe + fresh bundle pull so cached recall from a previous
-tenant does not leak.
+Memory bundles are local files. The daemon never sends recall queries or inferred candidates back to Cloud. Session sync defaults disabled and is flipped on alongside Episodic Memory by the Desktop toggle (or `sync.enabled: true` manually); when on, it uploads local session history so Kocoro Cloud can train fresh memory bundles. Switching the configured API key triggers a wipe + fresh bundle pull so cached recall from a previous tenant doesn't leak.
 
 ## Session sync to Cloud
 
-Kocoro can upload local session JSON to Shannon Cloud once per day to power Cloud-side analytics, replay, and per-user memory training. **Opt-in** — disabled by default; the Kocoro Desktop Episodic Memory toggle flips this on. To enable manually, set `sync.enabled: true` and provide Cloud credentials.
+Kocoro uploads local session JSON to Shannon Cloud once per day to power Cloud-side analytics, replay, and per-user memory training. **Opt-in** — disabled by default; the Kocoro Desktop Episodic Memory toggle flips this on, or set `sync.enabled: true` manually.
 
-**What's uploaded:** the full session JSON files under `~/.shannon/sessions/` and `~/.shannon/agents/*/sessions/`. Sessions are sent as-is — there is no built-in PII or secret redaction in v1. Skill secrets are never included (they live in the macOS Keychain, never in transcripts), but tool output, file contents, and bash command results are uploaded verbatim.
+**What's uploaded:** full session JSON files under `~/.shannon/sessions/` and `~/.shannon/agents/*/sessions/`. Sessions are sent as-is — no built-in PII or secret redaction in v1. Skill secrets are never included (Keychain only, never in transcripts), but tool output, file contents, and bash results are uploaded verbatim.
 
-**Configure in `~/.shannon/config.yaml`:**
-
-```yaml
-sync:
-  enabled: false                 # default false; flip to true to opt in
-  dry_run: false                 # if true, write batches to ~/.shannon/sync_outbox/ instead of POSTing
-  exclude_agents: []             # ["personal", "scratch", "default"]
-  exclude_sources: []            # ["local", "cli", "slack"]; legacy sessions with no source treated as "local"
-  batch_max_sessions: 25
-  batch_max_bytes: 5242880       # 5 MiB
-  single_session_max_bytes: 4194304  # 4 MiB; sessions over this are flagged in the marker, not uploaded
-  daemon_interval: 24h
-  daemon_startup_delay: 60s
-```
+Configure in `~/.shannon/config.yaml` — see [docs/config-reference.md](docs/config-reference.md#cloud-features) for the full `sync:` block (`enabled`, `dry_run`, `exclude_agents`, `exclude_sources`, batch caps, intervals).
 
 **How it runs:**
 
-1. **Daemon ticker** — if the daemon is running, it syncs once 60s after startup, then every 24h when Cloud credentials are configured.
-2. **Manual** — run `shan sessions sync` any time. Useful for dry-run verification.
-3. **launchd schedule (recommended for daemon-off coverage on macOS).** `shan schedule create` is for scheduling agent prompts and does not run arbitrary commands, so install a launchd plist by hand:
-
-   Create `~/Library/LaunchAgents/com.shannon.sessions-sync.plist`:
-   ```xml
-   <?xml version="1.0" encoding="UTF-8"?>
-   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-   <plist version="1.0">
-   <dict>
-     <key>Label</key>
-     <string>com.shannon.sessions-sync</string>
-     <key>ProgramArguments</key>
-     <array>
-       <string>/usr/local/bin/shan</string>
-       <string>sessions</string>
-       <string>sync</string>
-     </array>
-     <key>StartCalendarInterval</key>
-     <dict>
-       <key>Hour</key><integer>3</integer>
-       <key>Minute</key><integer>30</integer>
-     </dict>
-     <key>StandardOutPath</key>
-     <string>/tmp/shannon-sessions-sync.log</string>
-     <key>StandardErrorPath</key>
-     <string>/tmp/shannon-sessions-sync.err</string>
-   </dict>
-   </plist>
-   ```
-
-   Adjust `/usr/local/bin/shan` to your install path (`which shan` to find it). Then load:
-   ```bash
-   launchctl load ~/Library/LaunchAgents/com.shannon.sessions-sync.plist
-   ```
-
-   On Linux, use `crontab -e` and add:
-   ```
-   30 3 * * * /usr/local/bin/shan sessions sync
-   ```
+1. **Daemon ticker** — when running, syncs once 60s after startup, then every 24h.
+2. **Manual** — `shan sessions sync` any time. Useful for dry-run verification.
+3. **System scheduler (recommended for daemon-off coverage)** — see [docs/session-sync-launchd.md](docs/session-sync-launchd.md) for the macOS launchd plist and Linux cron equivalent.
 
 **State files:**
-- `~/.shannon/sync_marker.json` — high-watermark + per-session retry bookkeeping. `cat` this to triage. Failed sessions show their reason and byte size.
-- `~/.shannon/sync.lock` — flock for serialization across daemon + CLI calls. Never delete.
-- `~/.shannon/sync_outbox/` — only present in `dry_run` mode; contains JSON batches that would have been uploaded.
+
+- `~/.shannon/sync_marker.json` — high-watermark + per-session retry bookkeeping. `cat` to triage.
+- `~/.shannon/sync.lock` — flock for serialization across daemon + CLI calls. **Never delete.**
+- `~/.shannon/sync_outbox/` — only in `dry_run` mode; contains JSON batches that would have been uploaded.
 
 ## Scheduled Tasks
 
-Run agents on a cron schedule using macOS launchd. Schedules persist across reboots.
-
-### CLI Management
+Run agents on a cron schedule via macOS launchd. Schedules persist across reboots.
 
 ```bash
 shan schedule create --agent ops-bot --cron "0 9 * * *" --prompt "check production health"
@@ -1228,58 +692,31 @@ shan schedule update <id> --cron "0 8 * * 1-5" --prompt "weekday morning check"
 shan schedule enable <id>
 shan schedule disable <id>
 shan schedule remove <id>
-shan schedule sync            # re-sync failed/pending launchd plists
+shan schedule sync            # retry failed launchd plists
 ```
 
-### Agent-Accessible Tools
-
-Agents can also manage schedules via tools:
+Agents can also manage schedules via tools (`schedule_create`, `schedule_list`, etc.):
 
 ```bash
 shan "schedule a daily health check at 9am using ops-bot"
-# Agent calls schedule_create tool → generates launchd plist
 shan "what schedules are running?"
-# Agent calls schedule_list tool
 shan "cancel the morning health check"
-# Agent calls schedule_remove tool
 ```
 
-| Tool | Approval | Description |
-|------|----------|-------------|
-| `schedule_create` | Yes | Create a new scheduled task |
-| `schedule_list` | No | List all scheduled tasks |
-| `schedule_update` | Yes | Update cron, prompt, or enabled state |
-| `schedule_remove` | Yes | Remove a scheduled task |
+Cron supports the full 5-field syntax (via [gronx](https://github.com/adhocore/gronx)): ranges (`1-5`), steps (`*/5`), lists (`1,3,5`), and combinations.
 
-### Cron Syntax
+**How it works:**
 
-Full 5-field cron expressions supported (via [gronx](https://github.com/adhocore/gronx)):
-
-```
-┌───── minute (0-59)
-│ ┌───── hour (0-23)
-│ │ ┌───── day of month (1-31)
-│ │ │ ┌───── month (1-12)
-│ │ │ │ ┌───── day of week (0-6, Sun=0)
-│ │ │ │ │
-* * * * *
-```
-
-Supports ranges (`1-5`), steps (`*/5`), lists (`1,3,5`), and combinations.
-
-### How It Works
-
-- **Source of truth:** `~/.shannon/schedules.json` (JSON index with sync status)
-- **Execution backend:** `~/Library/LaunchAgents/com.shannon.schedule.<id>.plist`
-- Each schedule runs `shan -y --agent <name> "<prompt>"` in one-shot mode
-- Logs written to `~/.shannon/logs/schedule-<id>.log`
-- Atomic file writes (temp + rename) and file locking prevent corruption
-- `SyncStatus` tracks whether launchd is in sync: `ok`, `pending`, or `failed`
-- `shan schedule sync` retries any failed plist operations
+- Source of truth: `~/.shannon/schedules.json`
+- Execution backend: `~/Library/LaunchAgents/com.shannon.schedule.<id>.plist`
+- Each schedule runs `shan -y --agent <name> "<prompt>"` one-shot
+- Logs: `~/.shannon/logs/schedule-<id>.log`
+- Atomic file writes + file locking prevent corruption
+- `SyncStatus`: `ok`, `pending`, or `failed`. `shan schedule sync` retries failures.
 
 ## File System Watcher
 
-Agents can react to file changes in real-time. Configure watched paths in the agent's `config.yaml`:
+Agents can react to file changes. Configure in agent `config.yaml`:
 
 ```yaml
 watch:
@@ -1289,7 +726,7 @@ watch:
     glob: "*.csv"
 ```
 
-When files matching the glob are created, modified, deleted, or renamed, the agent receives a prompt like:
+On matching create / modify / delete / rename, the agent receives:
 
 ```
 File changes detected:
@@ -1297,15 +734,15 @@ File changes detected:
 - created: internal/agent/loop_test.go
 ```
 
-- **Debounce**: Changes are batched over a 2-second window to avoid flooding from rapid saves
-- **Recursive**: Existing subdirectories are watched at startup; new subdirectories are auto-added
-- **Routing**: Events route to the agent's session (`agent:<name>` key), sharing context with other messages
-- **Fan-out**: If multiple agents watch overlapping directories, each gets its own event batch
-- **Reload**: `POST /config/reload` rebuilds all watchers from fresh agent configs
+- **Debounce**: 2-second batching window
+- **Recursive**: existing subdirs watched at startup; new ones auto-added
+- **Routing**: events route to the agent's session (`agent:<name>` key), sharing context with other messages
+- **Fan-out**: overlapping watches give each agent its own event batch
+- **Reload**: `POST /config/reload` rebuilds watchers from fresh agent configs
 
 ## Heartbeat Mode
 
-Agents can run periodic health checks using a configurable heartbeat. Define the checklist in `HEARTBEAT.md`:
+Agents can run periodic health checks. Define the checklist in `HEARTBEAT.md`:
 
 ```bash
 cat > ~/.shannon/agents/ops-bot/HEARTBEAT.md << 'EOF'
@@ -1315,30 +752,23 @@ cat > ~/.shannon/agents/ops-bot/HEARTBEAT.md << 'EOF'
 EOF
 ```
 
-Configure the interval in `config.yaml`:
+Configure in `config.yaml`:
 
 ```yaml
 heartbeat:
-  every: 30m                    # required — Go duration
-  active_hours: "09:00-22:00"   # optional (supports overnight e.g. "22:00-02:00")
-  model: small                  # optional — cheaper model for cost control
+  every: 30m                    # Go duration (required)
+  active_hours: "09:00-22:00"   # optional (supports overnight: "22:00-02:00")
+  model: small                  # optional — cheaper model for routine checks
   isolated_session: true        # default true — fresh session per heartbeat
 ```
 
-### Silent-Ack Protocol
+**Silent-ack protocol**: if everything is fine, the agent replies `HEARTBEAT_OK` — silently dropped (no notification, no session persistence). If something needs attention, the reply is emitted as a `heartbeat_alert` event on the EventBus and logged.
 
-If everything is fine, the agent replies `HEARTBEAT_OK` — this is silently dropped (no notification, no session persistence). If something needs attention, the reply is emitted as a `heartbeat_alert` event on the EventBus and logged.
-
-### Cost Controls
-
-- **Isolated sessions** (default): No conversation history carried between heartbeats
-- **Model override**: Use a cheaper model tier for routine checks
-- **Empty checklist**: If `HEARTBEAT.md` is missing or empty, the heartbeat is skipped entirely (no tokens spent)
-- **Overlap prevention**: If a previous heartbeat is still running, the next tick is skipped
+**Cost controls**: isolated sessions (default) carry no history between heartbeats; model override allows cheaper-tier checks; empty `HEARTBEAT.md` skips entirely (no tokens spent); overlap prevention skips the next tick if the previous heartbeat is still running.
 
 ## SSE Event Handling
 
-Remote workflows (`/research`, `/swarm`) stream events via SSE:
+Remote workflows (`/research`, `/swarm`) stream events:
 
 | Event | Display |
 |-------|---------|
@@ -1380,11 +810,11 @@ go vet ./...                 # lint
 
 ## Known Limitations
 
-- **Vision**: Screenshots are captured, resized (1200px max), and sent as base64 image content blocks to the LLM. The computer tool uses Anthropic's native `computer_20251124` schema with coordinate scaling for retina displays. Vision models may blend what they see with training knowledge — verify critical details.
-- **Streaming**: One-shot mode does not stream responses; it waits for the full LLM response before displaying.
-- **Windows/Linux**: Local tools (clipboard, notifications, AppleScript, screenshot, computer) and scheduled tasks (launchd) are macOS-only.
+- **Vision**: screenshots are captured, resized (1200px max), sent as base64 image content blocks. The `computer` tool uses Anthropic's native `computer_20251124` schema with coordinate scaling for retina displays. Vision models may blend what they see with training knowledge — verify critical details.
+- **Streaming**: one-shot mode does not stream; waits for the full LLM response before display.
+- **Windows/Linux**: local tools (clipboard, notifications, AppleScript, screenshot, computer) and scheduled tasks (launchd) are macOS-only.
 - **Daemon background mode**: `shan daemon start -d` uses launchd (macOS only).
-- **Scheduled tasks**: launchd-only (macOS). Complex cron expressions (ranges, steps) fall back to `StartInterval` instead of `StartCalendarInterval`.
+- **Scheduled tasks**: launchd-only. Complex cron expressions (ranges, steps) fall back to `StartInterval` instead of `StartCalendarInterval`.
 
 ## License
 

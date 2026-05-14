@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -230,6 +231,18 @@ func (t *BashTool) Run(ctx context.Context, argsJSON string) (agent.ToolResult, 
 		if ctx.Err() == context.DeadlineExceeded {
 			timeoutSecs := int(timeout.Seconds())
 			return agent.TransientError(fmt.Sprintf("command timed out after %ds\n%s", timeoutSecs, result)), nil
+		}
+		// ErrWaitDelay fires when the foreground process exited normally but
+		// stdout/stderr pipes were still held by a background subprocess
+		// (e.g. `python -m http.server &`). The foreground command itself
+		// finished — its output is already captured in `result` — so this
+		// is not a real failure. Promote to success with a note so the
+		// model doesn't mis-read the Go-internal error as a command error.
+		if errors.Is(err, exec.ErrWaitDelay) {
+			return agent.ToolResult{
+				Content: strings.TrimRight(result, "\n") +
+					"\n\n[note: bash returned early because a background subprocess kept stdout/stderr open after the foreground command finished. The foreground command itself completed — its output is shown above.]",
+			}, nil
 		}
 		return agent.ToolResult{
 			Content: fmt.Sprintf("exit code: %v\n%s", err, result),

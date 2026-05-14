@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"strings"
 )
 
@@ -26,7 +25,6 @@ type ToolCallRecord struct {
 	ResultSig       string // domain signature from results (web tools)
 	IsError         bool
 	ErrorSig        string // first 100 chars of error for grouping
-	IsSleep         bool   // bash command contains sleep
 	IsNonActionable bool   // search returned no useful results (no matches, binary noise, errors)
 	// IsEmptyThinkInput is true only for `think` tool calls whose parsed
 	// args yield an empty / whitespace-only `thought`. Used by Check() to
@@ -51,9 +49,15 @@ type ToolCallRecord struct {
 //     (5 unproductive → nudge, 8 unproductive → force stop)
 //   - NoProgress: same tool called M+ times regardless of args (skip visual/search tools,
 //     semi-repeatable tools like bash get a higher threshold)
-//   - Sleep: bash commands containing sleep (2 → nudge, 4 → force stop)
 //
 // Response escalation: threshold = nudge, threshold+1 = force stop (consecutive), 2x threshold = force stop (others).
+//
+// Removed 2026-05: a `Sleep` detector (bash commands containing `sleep N` →
+// nudge/force-stop) produced false positives on legitimate parallel-sleep
+// tasks. Real polling is now covered by ExactDup (same command repeated),
+// NoProgress (many bash calls without progress), and the idle watchdog
+// (silent long-running commands). See the post-mortem in plan
+// 2026-05-14-thinking-blocks-cc-alignment.md.
 type LoopDetector struct {
 	history     []ToolCallRecord
 	historySize int
@@ -304,7 +308,6 @@ func (ld *LoopDetector) Record(name, argsJSON string, isError bool, errMsg strin
 		ResultSig:         resultSig,
 		IsError:           isError,
 		ErrorSig:          truncateErrSig(errMsg, 100),
-		IsSleep:           name == "bash" && isSleepCommand(argsJSON),
 		IsNonActionable:   isNonActionable,
 		IsEmptyThinkInput: isEmptyThinkInput(name, argsJSON),
 	}
@@ -689,22 +692,15 @@ func (ld *LoopDetector) Check(name string) (LoopAction, string) {
 		}
 	}
 
-	// 6. Sleep detector: bash commands containing sleep indicate polling/waiting
-	sleepCount := 0
-	for _, rec := range ld.history {
-		if rec.IsSleep {
-			sleepCount++
-		}
-	}
-	if sleepCount >= 4 {
-		return LoopForceStop, fmt.Sprintf(
-			"You have used `sleep` in bash commands %d times. Stop polling and provide your answer now.", sleepCount)
-	}
-	if sleepCount >= 2 {
-		return LoopNudge, fmt.Sprintf(
-			"You've used `sleep` in bash commands %d times. Do not poll or wait in loops — diagnose the root cause, use a check command, or ask the user.", sleepCount)
-	}
-
+	// Real polling patterns are caught by the generic detectors above:
+	//   - exact-args repeats (`sleep N && check_status` x N times) → ExactDup
+	//   - many bash calls without progress → NoProgress (12 threshold)
+	//   - silent hang on a long-running command → idle watchdog (90s/540s)
+	// A dedicated `sleep` count produced false positives on legitimate
+	// parallel-sleep tasks (a user requested "run 3 sleep commands in
+	// parallel" and the model's first iteration tripped the 4-count
+	// threshold — see plan 2026-05-14-thinking-blocks-cc-alignment.md
+	// post-mortem). Removed 2026-05.
 	return LoopContinue, ""
 }
 
@@ -741,22 +737,6 @@ func latestRecoveredAfterSameArgsErrors(history []ToolCallRecord, name, latestHa
 func hashArgs(args string) string {
 	h := sha256.Sum256([]byte(args))
 	return hex.EncodeToString(h[:8])
-}
-
-// sleepPattern matches `sleep` followed by a number, as a word boundary.
-// Catches: "sleep 5", "sleep 1 && curl ...", "while true; do sleep 1; done"
-// Avoids: "sleep.log", "sleeper"
-var sleepPattern = regexp.MustCompile(`\bsleep\s+\d`)
-
-// isSleepCommand checks whether a bash tool's JSON args contain a sleep command.
-func isSleepCommand(argsJSON string) bool {
-	var args struct {
-		Command string `json:"command"`
-	}
-	if json.Unmarshal([]byte(argsJSON), &args) != nil {
-		return false
-	}
-	return sleepPattern.MatchString(args.Command)
 }
 
 func truncateErrSig(s string, maxLen int) string {

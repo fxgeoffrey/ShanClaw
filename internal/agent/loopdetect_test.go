@@ -624,67 +624,64 @@ func TestLoopDetector_SuccessAfterError_ResetsOnNewWork(t *testing.T) {
 	}
 }
 
-func TestLoopDetector_SleepDetection_Nudge(t *testing.T) {
+// TestLoopDetector_ParallelSleepBashTask_NoFalsePositive is the
+// regression guard for the removed sleep detector. The user case that
+// motivated the removal: "run 3 sleep commands in parallel (same turn)"
+// produced 3 bash records with `sleep N` and tripped the old 4-count
+// threshold once the model retried once. Now: a legitimate parallel
+// sleep task must not force-stop or nudge through any detector. Real
+// polling is covered by ExactDup (same command repeated) and NoProgress
+// (many bash calls without progress) elsewhere.
+func TestLoopDetector_ParallelSleepBashTask_NoFalsePositive(t *testing.T) {
 	ld := NewLoopDetector()
-
-	// 1 sleep call: no trigger
-	ld.Record("bash", `{"command":"sleep 5"}`, false, "", "", false)
-	action, _ := ld.Check("bash")
-	if action != LoopContinue {
-		t.Errorf("1 sleep call should not trigger, got %v", action)
-	}
-
-	// 2nd sleep call: nudge
-	ld.Record("bash", `{"command":"sleep 5 && curl http://localhost:8080"}`, false, "", "", false)
+	// 3 distinct parallel-sleep commands (one assistant turn, 3 tool_use).
+	ld.Record("bash", `{"command":"sleep 2 && echo task1_done"}`, false, "", "", false)
+	ld.Record("bash", `{"command":"sleep 2 && echo task2_done"}`, false, "", "", false)
+	ld.Record("bash", `{"command":"sleep 2 && echo task3_done"}`, false, "", "", false)
 	action, msg := ld.Check("bash")
-	if action != LoopNudge {
-		t.Errorf("2 sleep calls should nudge, got %v", action)
-	}
-	if msg == "" {
-		t.Error("nudge should have a message")
-	}
-}
-
-func TestLoopDetector_SleepDetection_ForceStop(t *testing.T) {
-	ld := NewLoopDetector()
-
-	// 4 sleep calls: force stop
-	ld.Record("bash", `{"command":"sleep 5"}`, false, "", "", false)
-	ld.Record("bash", `{"command":"sleep 1 && echo done"}`, false, "", "", false)
-	ld.Record("bash", `{"command":"while true; do sleep 1; done"}`, false, "", "", false)
-	ld.Record("bash", `{"command":"sleep 10"}`, false, "", "", false)
-	action, _ := ld.Check("bash")
-	if action != LoopForceStop {
-		t.Errorf("4 sleep calls should force stop, got %v", action)
-	}
-}
-
-func TestLoopDetector_SleepDetection_NoFalsePositive(t *testing.T) {
-	ld := NewLoopDetector()
-
-	// bash commands without sleep: no trigger
-	ld.Record("bash", `{"command":"echo hello"}`, false, "", "", false)
-	ld.Record("bash", `{"command":"cat sleep.log"}`, false, "", "", false)
-	ld.Record("bash", `{"command":"grep sleeper main.go"}`, false, "", "", false)
-	ld.Record("bash", `{"command":"ls -la"}`, false, "", "", false)
-	action, _ := ld.Check("bash")
 	if action != LoopContinue {
-		t.Errorf("non-sleep bash commands should not trigger, got %v", action)
+		t.Errorf("3 parallel distinct sleep commands must not fire any detector, got %v (msg=%q)", action, msg)
+	}
+	// Plus a fourth distinct sleep (e.g. cleanup verify). Still fine.
+	ld.Record("bash", `{"command":"sleep 1 && ls /tmp/output"}`, false, "", "", false)
+	action, msg = ld.Check("bash")
+	if action != LoopContinue {
+		t.Errorf("4th distinct sleep command must still continue (no naked sleep counter), got %v (msg=%q)", action, msg)
 	}
 }
 
-func TestLoopDetector_SleepDetection_IgnoreNonBash(t *testing.T) {
-	ld := NewLoopDetector()
+// TestLoopDetector_TrueSleepPolling_StillCaughtByExistingDetectors
+// confirms that removing the dedicated sleep detector does not blind us
+// to genuine polling: same `sleep N && check_status` repeated trips the
+// existing ConsecutiveDup / ExactDup detectors via the args hash. After
+// 3 identical calls the ConsecutiveDup detector nudges (threshold = 3),
+// after 4 it force-stops (consecDupThreshold + 1). For bash specifically
+// this is the right behavior — the model is asking the same question of
+// the system repeatedly and getting the same answer.
+func TestLoopDetector_TrueSleepPolling_StillCaughtByExistingDetectors(t *testing.T) {
+	cmd := `{"command":"sleep 5 && curl -s http://localhost:8080/status"}`
 
-	// sleep in non-bash tool args: no trigger (different args to avoid dup detection)
-	ld.Record("file_read", `{"command":"sleep 5"}`, false, "", "", false)
-	ld.Record("grep", `{"command":"sleep 10"}`, false, "", "", false)
-	ld.Record("file_read", `{"command":"sleep 15"}`, false, "", "", false)
-	ld.Record("grep", `{"command":"sleep 20"}`, false, "", "", false)
-	action, _ := ld.Check("grep")
-	if action != LoopContinue {
-		t.Errorf("sleep in non-bash tool args should not trigger, got %v", action)
-	}
+	t.Run("3 identical → nudge", func(t *testing.T) {
+		ld := NewLoopDetector()
+		for i := 0; i < 3; i++ {
+			ld.Record("bash", cmd, false, "", "", false)
+		}
+		action, msg := ld.Check("bash")
+		if action != LoopNudge {
+			t.Errorf("3 identical polling calls should nudge, got action=%v msg=%q", action, msg)
+		}
+	})
+
+	t.Run("4 identical → force-stop", func(t *testing.T) {
+		ld := NewLoopDetector()
+		for i := 0; i < 4; i++ {
+			ld.Record("bash", cmd, false, "", "", false)
+		}
+		action, msg := ld.Check("bash")
+		if action != LoopForceStop {
+			t.Errorf("4 identical polling calls should force-stop, got action=%v msg=%q", action, msg)
+		}
+	})
 }
 
 func TestLoopDetector_SearchEscalation_Nudge(t *testing.T) {

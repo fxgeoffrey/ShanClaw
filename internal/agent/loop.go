@@ -2110,9 +2110,23 @@ func (a *AgentLoop) Run(ctx context.Context, userMessage string, userContent []c
 	// the model returns empty text, so callers never see a blank bubble.
 	// Tools are intentionally omitted to force a text-only response.
 	runForceStopTurn := func(reason string, fallback string) (string, error) {
+		// Frame the force-stop reason so the model doesn't hallucinate
+		// about WHETHER its tools ran. The detector fires AFTER tool
+		// execution — every tool_use the model emitted before this point
+		// has already executed and its result is in the conversation
+		// above. Without this framing, models occasionally tell the user
+		// "the system intercepted the calls before they ran" when in fact
+		// the calls ran and only the next round-trip was blocked
+		// (observed: parallel-sleep test, 2026-05-14 — see plan
+		// 2026-05-14-thinking-blocks-cc-alignment.md post-mortem).
 		messages = append(messages, client.Message{
-			Role:    "user",
-			Content: client.NewTextContent("[system] " + reason),
+			Role: "user",
+			Content: client.NewTextContent(
+				"[system] " + reason + "\n\n" +
+					"The tools you already called have executed and their results are in this conversation above. " +
+					"Summarize what they returned and provide your final answer to the user. " +
+					"Do not claim the tools were intercepted or did not run.",
+			),
 		})
 		markInjected()
 		// Pre-ForceStop: the loop-detector verdict + accumulated tool state

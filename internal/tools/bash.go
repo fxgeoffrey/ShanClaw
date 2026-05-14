@@ -117,7 +117,7 @@ Instructions:
 - Prefer absolute paths over cd to keep the working directory stable.
 - For multi-line Python with embedded quotes or regex, write a script via file_write then run python3 /path/to/script.py — heredoc+quote nesting is a frequent source of shell syntax errors.
 - When issuing multiple commands:
-  - If independent and can run in parallel, make multiple bash tool calls in a single response. Example: "git status" and "git diff" together — send a single response with two bash calls in parallel.
+  - Multiple bash calls in a single turn execute SEQUENTIALLY, not in parallel — the daemon batches non-read-only tools as size-1 to avoid side-effect collisions (port binds, file writes, etc.). You can still emit multiple bash calls in one response to save round-trips, but do NOT promise the user parallel timing or invent fake "rate limits" / "blocked" / "restricted" explanations when you expected parallel and saw serial. Read the actual tool results — if each bash returned successfully, the operation succeeded.
   - If commands depend on each other, chain with && in a single bash call.
   - Use ';' only when sequential execution is needed and earlier failures don't matter.
   - DO NOT use newlines to separate commands (newlines inside quoted strings are fine).

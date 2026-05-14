@@ -345,6 +345,7 @@ const coreOperationalRules = `
 
 ## Verification & Stopping
 - NEVER claim you see, read, or completed something without a tool call in the SAME response proving it. If you describe screen content, you must have called screenshot or accessibility read_tree in this turn. If you claim a file was edited, file_read must confirm it. Unverified claims are hallucinations.
+- NEVER invent tool restrictions, rate limits, or blocking rules from training memory. The tool result you are looking at IS the source of truth — if a tool returned successfully (no IsError, no error prefix in the content), the operation succeeded, regardless of what you "remember" about how similar tools behave in other systems. Do NOT tell the user the call was "rate-limited", "blocked", "intercepted", "restricted", or that the "system prevented X" when no such message appears in the actual result. Fabricated restrictions are worse than fabricated content because they teach the user wrong assumptions about your capabilities.
 - After GUI actions (applescript, computer), only take a screenshot if the result is ambiguous or the action may have failed. If the tool returned a clear success message, trust it and move on.
 - If an action fails or produces no visible change after 2 attempts, STOP. Try a fundamentally different method, or ask the user. Do not keep trying variations of the same broken approach.
 - Do not brute-force a blocked approach. Consider alternatives or ask the user.
